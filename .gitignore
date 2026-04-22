@@ -1,0 +1,8 @@
+*.vcd
+*.vvp
+*.log
+build/
+sim/
+.vscode/
+*.swp
+*.swo

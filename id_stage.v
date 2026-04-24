@@ -1,13 +1,13 @@
 `include "mycpu.h"
 
 module id_stage(
-    input clk,
-    input reset,
+    input  clk,
+    input  reset,
     // allowin
-    input ex_allowin,                    // EX阶段允许接收信号（用于反压控制）
+    input  ex_allowin,                   // EX阶段允许接收信号（用于反压控制）
     output id_allowin,                   // ID阶段允许接收新指令
     // 来自IF阶段
-    input if_to_id_valid,                         // IF到ID的有效标志
+    input  if_to_id_valid,                        // IF到ID的有效标志
     input [`IF_TO_ID_BUS_WD -1:0] if_to_id_bus,   // IF传递的总线：{指令, PC}
     // 输出给ex阶段
     output id_to_ex_valid,                        // ID到EX的有效标志
@@ -15,24 +15,24 @@ module id_stage(
     // 输出给if阶段的分支总线
     output [`BR_BUS_WD -1:0] br_bus,              // 分支总线：{跳转标志, 跳转目标}
     // wb阶段输入的寄存器文件总线
-    input [`WB_TO_RF_BUS_WD -1:0] wb_to_rf_bus,   // WB阶段写回数据
+    input  [`WB_TO_RF_BUS_WD -1:0] wb_to_rf_bus,  // WB阶段写回数据
     // 前递控制
-    input   [4:0]   ex_to_id_dest,       // EX阶段的目的寄存器号
-    input   [4:0]   mem_to_id_dest,      // MEM阶段的目的寄存器号
-    input   [4:0]   wb_to_id_dest,       // WB阶段的目的寄存器号
-    input           ex_to_id_load_op,    // EX阶段是否为加载指令（用于检测load-use冒险）
-    input   [31:0]  ex_to_id_result,     // EX阶段计算结果
-    input   [31:0]  mem_to_id_result,    // MEM阶段计算结果
-    input   [31:0]  wb_to_id_result,     // WB阶段计算结果
+    input  [4:0]   ex_to_id_dest,       // EX阶段的目的寄存器号
+    input  [4:0]   mem_to_id_dest,      // MEM阶段的目的寄存器号
+    input  [4:0]   wb_to_id_dest,       // WB阶段的目的寄存器号
+    input          ex_to_id_load_op,    // EX阶段是否为加载指令（用于检测load-use冒险）
+    input  [31:0]  ex_to_id_result,     // EX阶段计算结果
+    input  [31:0]  mem_to_id_result,    // MEM阶段计算结果
+    input  [31:0]  wb_to_id_result,     // WB阶段计算结果
     // csr与ertn冒险
-    input           ex_csr_we,           // EX阶段写CSR使能
-    input  [13:0]   ex_csr_num,          // EX阶段写CSR号码
-    input           ex_ertn_flush,       // EX阶段有ertn指令
-    input           mem_csr_we,          // MEM阶段写CSR使能
-    input  [13:0]   mem_csr_num,         // MEM阶段写CSR号码
-    input           mem_ertn_flush,      // MEM阶段有ertn指令 
-    input           wb_csr_we,           // WB阶段写CSR使能
-    input  [13:0]   wb_csr_num,          // WB阶段写CSR号码
+    input          ex_csr_we,           // EX阶段写CSR使能
+    input  [13:0]  ex_csr_num,          // EX阶段写CSR号码
+    input          ex_ertn_flush,       // EX阶段有ertn指令
+    input          mem_csr_we,          // MEM阶段写CSR使能
+    input  [13:0]  mem_csr_num,         // MEM阶段写CSR号码
+    input          mem_ertn_flush,      // MEM阶段有ertn指令 
+    input          wb_csr_we,           // WB阶段写CSR使能
+    input  [13:0]  wb_csr_num,          // WB阶段写CSR号码
     // 异常冲刷 
     input wb_exc_valid,                  // WB阶段存在异常冲刷流水线    
     input wb_ertn_flush,                 // WB阶段有ertn指令则冲刷流水线  
@@ -43,7 +43,7 @@ module id_stage(
     input has_int
 );
 
-    reg id_valid;                                    // ID阶段有效标志
+    reg  id_valid;                                   // ID阶段有效标志
     wire id_ready_go;                                // ID阶段是否准备好（无冒险）
     reg [`IF_TO_ID_BUS_WD -1:0] if_to_id_bus_r;      // 锁存的取值级数据
     
@@ -185,7 +185,7 @@ module id_stage(
     wire [31:0] br_target;               // 分支目标地址
     wire [31:0] id_pc;                   // 当前指令的PC值
     wire [31:0] id_inst;                 // 当前指令的机器码
-    wire [2:0] mem_size;                 // 访存大小：0=字节，1=半字，2=字
+    wire [2:0]  mem_size;                // 访存大小：0=字节，1=半字，2=字
     wire mem_sign_ext;                   // 符号扩展标志
     // ========== 立即数控制信号 ==========
     wire need_ui5 ;                      // 5位无符号立即数（移位量）
@@ -197,12 +197,12 @@ module id_stage(
     wire src2_is_4;                      // 常数4（用于链接寄存器）
 
     // ========== 寄存器文件接口 ==========
-    wire [4:0] rf_raddr1;                // 读端口1地址（rj）
+    wire [4:0]  rf_raddr1;               // 读端口1地址（rj）
     wire [31:0] rf_rdata1;               // 读端口1数据
-    wire [4:0] rf_raddr2;                // 读端口2地址（rk或rd）
+    wire [4:0]  rf_raddr2;               // 读端口2地址（rk或rd）
     wire [31:0] rf_rdata2;               // 读端口2数据
-    wire rf_we;                          // 寄存器写使能（来自WB）
-    wire [4:0] rf_waddr;                 // 写地址（来自WB）
+    wire        rf_we;                   // 寄存器写使能（来自WB）
+    wire [4:0]  rf_waddr;                // 写地址（来自WB）
     wire [31:0] rf_wdata;                // 写数据（来自WB）
 
     // ========== csr文件写信号 ==========
@@ -484,14 +484,15 @@ module id_stage(
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
 
     //id，ex，mem有异常或者ertn可以不管brtaken，因为不论是否跳转都会冲刷，wb若有异常或者ertn，其发出的冲刷信号优先级也高于id的brtaken
-
+    assign br_ld_stall =branch_stall && load_use_stall; // id为跳转指令，ex为load指令，此时会发出错误的brtarget，不能发出取值请求
+    
     // 分支目标地址计算
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b || 
                         inst_blt || inst_bge || inst_bltu || inst_bgeu) ?
                        (id_pc + br_offs) : (rj_value + jirl_offs);
     
     // 分支总线输出（跳转标志 + 目标地址）
-    assign br_bus = {br_taken, br_target};
+    assign br_bus = {br_ld_stall, br_taken, br_target};
     
     // ========== 解析来自if阶段的总线 ==========
     assign {id_exc[0], id_inst, id_pc} = if_to_id_bus_r;        

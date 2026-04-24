@@ -1,22 +1,25 @@
 `include "mycpu.h"
 
 module exe_stage(
-    input clk,
-    input reset,
+    input  clk,
+    input  reset,
     // allowin
-    input mem_allowin,                   // MEM阶段允许接收
+    input  mem_allowin,                  // MEM阶段允许接收
     output ex_allowin,                   // EX阶段允许接收
     // 来自id阶段
-    input id_to_ex_valid,                // ID到EX有效
-    input [`ID_TO_EX_BUS_WD -1:0] id_to_ex_bus,  // 来自ID的控制信号和操作数
+    input  id_to_ex_valid,                // ID到EX有效
+    input  [`ID_TO_EX_BUS_WD -1:0] id_to_ex_bus,  // 来自ID的控制信号和操作数
     // 输出给mem阶段
     output ex_to_mem_valid,              // EX到MEM有效
     output [`EX_TO_MEM_BUS_WD -1:0] ex_to_mem_bus, // EX到MEM总线
     // 输出给数据存储器
-    output data_sram_en,                 // 数据SRAM使能
-    output [3:0] data_sram_we,           // 数据SRAM写使能（字节掩码）
-    output [31:0] data_sram_addr,        // 数据SRAM地址
-    output [31:0] data_sram_wdata,       // 数据SRAM写数据
+    output        cpu_data_req,        // 数据SRAM使能
+    output        cpu_data_wr,         // 数据SRAM写使能
+    output [1:0]  cpu_data_size,       // 数据SRAM访问长度
+    output [3:0]  cpu_data_wstrb,      // 数据SRAM写掩码
+    output [31:0] cpu_data_addr,       // 数据SRAM地址
+    output [31:0] cpu_data_wdata,      // 数据SRAM写数据
+    input         cpu_data_addr_ok,    // 数据SRAM握手信号
     // 前递控制
     output [ 4:0] ex_to_id_dest,         // EX阶段写回寄存器号
     output [31:0] ex_to_id_result,       // EX阶段计算结果
@@ -31,10 +34,10 @@ module exe_stage(
     output [13:0] ex_csr_num,           // ex阶段写csr的号码
     output ex_ertn_flush,               // ex阶段为ertn指令
     // 读取计数器
-    input [63:0] timer_value            // 计数器数值
+    input  [63:0] timer_value           // 计数器数值
 );
 
-    reg ex_valid;                                // EX阶段有效标志
+    reg  ex_valid;                               // EX阶段有效标志
     wire ex_ready_go;                            // EX阶段就绪标志（除法指令需等待）
     reg [`ID_TO_EX_BUS_WD -1:0] id_to_ex_bus_r;  // 锁存的译码级数据
     
@@ -53,7 +56,7 @@ module exe_stage(
     wire timer_high;                    // 使用计数器高32位
     wire gr_we;                         // 通用寄存器写使能
     wire mem_we;                        // 存储器写使能
-    wire [4:0] dest;                    // 目标寄存器号
+    wire [4:0]  dest;                   // 目标寄存器号
     wire [31:0] rj_value;               // 源操作数1（来自寄存器）
     wire [31:0] rkd_value;              // 源操作数2（来自寄存器或立即数）
     wire [31:0] imm;                    // 立即数
@@ -79,6 +82,8 @@ module exe_stage(
     // 计数器数值筛选 
     wire res_from_timer;                 // 结果来自计数器
     wire [31:0] timer_finalval;          //筛选后的计数器读取数据
+    // 实现类sram总线
+    wire is_mem_inst;                    //是访存指令
 
     // ========== 解析来自ID阶段的总线 ==========
     assign {
@@ -110,6 +115,7 @@ module exe_stage(
 
     // ========== 输出到MEM阶段的总线 ==========
     assign ex_to_mem_bus = {
+        is_mem_inst,     // 227 是访存指令
         timer_finalval,  // 226:195筛选后的计数器数据
         res_from_timer,  // 194    结果来自计数器
         res_from_csr,    // 193    结果来自csr寄存器堆
@@ -131,8 +137,10 @@ module exe_stage(
     
     // ========== 流水线控制 ========== 
     assign is_div_inst = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
-    assign ex_ready_go =  (is_div_inst ? div_ready || (!ex_valid || ex_exc[4:0] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) : 1'b1);     
+    assign ex_ready_go = is_div_inst ? div_ready || (!ex_valid || ex_exc[4:0] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) : 
+                         (mem_we || res_from_mem) ? (cpu_data_req && cpu_data_addr_ok) || req_already : 1'b1     
     // 如果是除法指令，要么正确握手并且算完了发出ready信号，要么由于后面有异常和ertn导致除法指令不发出除法请求就直接走
+    // 如果是访存指令，就必须发出访存请求之后才能往后走
     // ex阶段的异常中除了ale异常都不应该发出除法请求，不能添加ale，因为ale异常依赖alu结果，alu结果依赖除法结果，除法结果又依赖异常判断形成闭环，虽然二者互斥但是不能有闭环                                                                                        
     assign ex_allowin = !ex_valid || ex_ready_go && mem_allowin;
     assign ex_to_mem_valid = ex_valid && ex_ready_go;
@@ -152,6 +160,19 @@ module exe_stage(
             id_to_ex_bus_r <= id_to_ex_bus;
         end
     end
+
+    // ========== 实现类sram总线 ========== 
+    always @(posedge clk ) begin
+        if (reset || (ex_ready_go && mem_allowin)) begin
+            req_already <= 1'b0;
+        end
+        else if (cpu_data_req && !(ex_ready_go && mem_allowin)) begin
+            req_already <= 1'b1;
+        end
+    end
+    //指令往后走就清零，指令发请求且不往后走就置1。ex中的指令不存在preif中的因为冲刷和brtaken而立马变化，ex中的指令只会从id中来，如果阻塞指令就一定不变
+    assign is_mem_inst = (mem_we || res_from_mem);
+
     // ========== csr写文件写回控制 ==========
     assign ex_csr_we = csr_we && ex_valid && !ex_exc_valid; //用于csr_stall判断
    
@@ -179,25 +200,21 @@ module exe_stage(
         .wb_exc_valid(wb_exc_valid)
     );
     
-    // ========== 数据存储器写控制 ==========
-    assign offset = alu_result[1:0];
+    // ========== 数据存储器写控制 ==========                 
+    assign cpu_data_req = ex_valid && (!mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);                  
+    // 只有访存指令，且是有效指令,并且mem和ex和wb阶段无异常、不是ertn,之前没发送过请求的指令才能发送访存请求
+    assign cpu_data_wr = mem_we && ex_valid && (!mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);  
+    assign cpu_data_size = mem_size[0] ? 2'b00 :
+                            mem_size[1] ? 2'b01 :
+                            mem_size[2] ? 2'b10 ;
+    assign cpu_data_wstrb = mem_size[0] ? (4'b0001 << alu_result[1:0]) :           // 字节访问
+                             mem_size[1] ? (alu_result[1] ? 4'b1100 : 4'b0011) :   // 半字访问
+                             4'b1111;                                              // 字访问
+    assign cpu_data_addr = alu_result;                                             // 地址
+    assign cpu_data_wdata = mem_size[0] ? {4{rkd_value[7:0]}} :                    // 字节：4份
+                             mem_size[1] ? {2{rkd_value[15:0]}} :                  // 半字：2份
+                             rkd_value;                                            // 字：原值   
 
-    // 字节写使能：1左移到对应字节位置
-    assign final_we = mem_size[0] ? (4'b0001 << offset) :                    // 字节访问
-                      mem_size[1] ? (offset[1] ? 4'b1100 : 4'b0011) :        // 半字访问
-                      4'b1111;                                               // 字访问
-
-    // 写数据：将数据复制到所有字节/半字位置
-    assign data_sram_wdata = mem_size[0] ? {4{rkd_value[7:0]}} :             // 字节：4份
-                             mem_size[1] ? {2{rkd_value[15:0]}} :            // 半字：2份
-                             rkd_value;                                      // 字：原值                             
-                          
-    // 数据存储器接口
-    assign data_sram_en = ex_valid && !mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid; 
-     // 只有有效指令并且mem和ex和wb阶段无异常、不是ertn才可使用存储器
-    assign data_sram_we = mem_we && ex_valid && !mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid ? final_we : 4'h0;  
-    assign data_sram_addr = alu_result;                   // 地址
-   
     // ========== 前递输出 ==========
     assign ex_to_id_dest = dest & {5{ex_valid}} & {5{gr_we}};
     assign ex_to_id_result = res_from_csr ? csr_rvalue :

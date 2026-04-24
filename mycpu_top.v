@@ -6,18 +6,26 @@ module mycpu_top(
     input resetn,                        // 低电平有效复位信号
 
     // ========== 指令存储器接口 ==========
-    output inst_sram_en,                 // 指令SRAM使能
-    output [3:0] inst_sram_we,           // 指令SRAM写使能（只读，始终为0）
-    output [31:0] inst_sram_addr,        // 指令SRAM地址
-    output [31:0] inst_sram_wdata,       // 指令SRAM写数据（未使用）
-    input  [31:0] inst_sram_rdata,       // 指令SRAM读数据
+    output        cpu_inst_req,        // 指令SRAM使能
+    output        cpu_inst_wr,         // 指令SRAM写使能
+    output [1:0]  cpu_inst_size,       // 指令SRAM访问长度
+    output [3:0]  cpu_inst_wstrb,      // 指令SRAM写掩码
+    output [31:0] cpu_inst_addr,       // 指令SRAM地址
+    output [31:0] cpu_inst_wdata,      // 指令SRAM写数据（未使用）
+    input         cpu_inst_addr_ok,    // 地址握手成功
+    input         cpu_inst_data_ok,    // 数据握手成功
+    input  [31:0] cpu_inst_rdata,      // 指令SRAM读数据
     
     // ========== 数据存储器接口 ==========
-    output data_sram_en,                 // 数据SRAM使能
-    output [3:0] data_sram_we,           // 数据SRAM写使能（字节掩码）
-    output [31:0] data_sram_addr,        // 数据SRAM地址
-    output [31:0] data_sram_wdata,       // 数据SRAM写数据
-    input  [31:0] data_sram_rdata,       // 数据SRAM读数据
+    output        cpu_data_req,        // 数据SRAM使能
+    output        cpu_data_wr,         // 数据SRAM写使能
+    output [1:0]  cpu_data_size,       // 数据SRAM访问长度
+    output [3:0]  cpu_data_wstrb,      // 数据SRAM写掩码
+    output [31:0] cpu_data_addr,       // 数据SRAM地址
+    output [31:0] cpu_data_wdata,      // 数据SRAM写数据（未使用）
+    input         cpu_data_addr_ok,    // 地址握手成功
+    input         cpu_data_data_ok,    // 数据握手成功
+    input  [31:0] cpu_data_rdata,      // 数据SRAM读数据
     
     // ========== 调试接口（波形追踪） ==========
     output [31:0] debug_wb_pc,           // WB阶段PC值
@@ -99,17 +107,21 @@ module mycpu_top(
     .br_bus(br_bus),
     .if_to_id_valid(if_to_id_valid),
     .if_to_id_bus(if_to_id_bus),
-    .inst_sram_en(inst_sram_en),
-    .inst_sram_we(inst_sram_we),
-    .inst_sram_addr(inst_sram_addr),
-    .inst_sram_wdata(inst_sram_wdata),
-    .inst_sram_rdata(inst_sram_rdata),
+    .cpu_inst_req(cpu_inst_req),
+    .cpu_inst_wr(cpu_inst_wr),
+    .cpu_inst_size(cpu_inst_size),
+    .cpu_inst_wstrb(cpu_inst_wstrb),
+    .cpu_inst_addr(cpu_inst_addr),
+    .cpu_inst_wdata(cpu_inst_wdata),
+    .cpu_inst_addr_ok(cpu_inst_addr_ok),
+    .cpu_inst_data_ok(cpu_inst_data_ok),
+    .cpu_inst_rdata(cpu_inst_rdata),
     .wb_exc_valid(wb_exc_valid),
     .wb_ertn_flush(wb_ertn_flush),
     .exc_entry(exc_entry),
     .exc_back_pc(exc_back_pc)
     );
-    
+
     // ============================================================
     // 第二阶段：译码阶段 (ID - Instruction Decode)
     // ============================================================
@@ -158,10 +170,13 @@ module mycpu_top(
     .id_to_ex_bus(id_to_ex_bus),
     .ex_to_mem_valid(ex_to_mem_valid),
     .ex_to_mem_bus(ex_to_mem_bus),
-    .data_sram_en(data_sram_en),
-    .data_sram_we(data_sram_we),
-    .data_sram_addr(data_sram_addr),
-    .data_sram_wdata(data_sram_wdata),
+    .cpu_data_req(cpu_data_req),
+    .cpu_data_wr(cpu_data_wr),
+    .cpu_data_size(cpu_data_size),
+    .cpu_data_wstrb(cpu_data_wstrb),
+    .cpu_data_addr(cpu_data_addr),
+    .cpu_data_wdata(cpu_data_wdata),
+    .cpu_data_addr_ok(cpu_data_addr_ok),
     .ex_to_id_dest(ex_to_id_dest),
     .ex_to_id_result(ex_to_id_result),
     .ex_to_id_load_op(ex_to_id_load_op),
@@ -187,7 +202,8 @@ module mycpu_top(
     .ex_to_mem_bus(ex_to_mem_bus),
     .mem_to_wb_valid(mem_to_wb_valid),
     .mem_to_wb_bus(mem_to_wb_bus),
-    .data_sram_rdata(data_sram_rdata),
+    .cpu_data_rdata(cpu_data_rdata),
+    .cpu_data_data_ok(cpu_data_data_ok),
     .mem_to_id_dest(mem_to_id_dest),
     .mem_to_id_result(mem_to_id_result),
     .wb_exc_valid(wb_exc_valid),

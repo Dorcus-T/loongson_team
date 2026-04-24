@@ -7,17 +7,17 @@ module wb_stage(
     // allowin
     output wb_allowin,           // 写回级是否允许接收新指令
     // 来自mem阶段
-    input mem_to_wb_valid,       // 执行级到写回级的有效标志
+    input  mem_to_wb_valid,      // 执行级到写回级的有效标志
     input [`MEM_TO_WB_BUS_WD -1:0] mem_to_wb_bus, // 执行级传递的总线数据
     // 输出给寄存器文件
     output [`WB_TO_RF_BUS_WD -1:0] wb_to_rf_bus,  // 写回级到寄存器文件的总线
     // 调试接口（用于波形追踪）
     output [31:0] debug_wb_pc,           // 写回级的PC值
-    output [3:0] debug_wb_rf_we,         // 寄存器写使能（4位，用于调试）
-    output [4:0] debug_wb_rf_wnum,       // 写回的寄存器号
+    output [3:0]  debug_wb_rf_we,        // 寄存器写使能（4位，用于调试）
+    output [4:0]  debug_wb_rf_wnum,      // 写回的寄存器号
     output [31:0] debug_wb_rf_wdata,     // 写回的数据
     // 前递控制
-    output [4:0] wb_to_id_dest,          // 转发给译码级的目的寄存器号
+    output [4:0]  wb_to_id_dest,         // 转发给译码级的目的寄存器号
     output [31:0] wb_to_id_result,       // 转发给译码级的计算结果
     // 异常与ertn信号
     output wb_ertn_flush,                // 发给流水线每个阶段（也在总线中送给csr）
@@ -29,7 +29,7 @@ module wb_stage(
     output [`WB_TO_CSR_BUS_WD -1:0] wb_to_csr_bus // 写回级到csr寄存器的总线
 );
 
-    reg wb_valid;                                    // 写回级有效标志
+    reg  wb_valid;                                   // 写回级有效标志
     wire wb_ready_go;                                // 写回级是否准备好前进（数据已稳定）
     reg [`MEM_TO_WB_BUS_WD -1:0] mem_to_wb_bus_r;    // 锁存的访存级数据
    

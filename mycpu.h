@@ -5,7 +5,7 @@
 // 常数定义
 // ============================================================================
 `define TLB_INDEX_WD        5                            // TLB索引位宽
-`define MTLB_ENTRIES        4                            // MTLB项数
+`define MTLB_ENTRIES        16                           // MTLB项数
 `define STLB_ENTRIES        16                           // STLB项数
 `define PALEN               32                           // 物理地址长度
 `define VALEN               32                           // 虚拟地址长度

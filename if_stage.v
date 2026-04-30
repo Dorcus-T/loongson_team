@@ -11,21 +11,22 @@ module if_stage(
     output if_to_id_valid,                        // IF到ID有效标志
     output [`IF_TO_ID_BUS_WD -1:0] if_to_id_bus,  // IF到ID总线
     // 与指令存储器的数据交互
-    output        cpu_inst_req,        // 指令SRAM使能
-    output        cpu_inst_wr,         // 指令SRAM写使能
-    output [1:0]  cpu_inst_size,       // 指令SRAM访问长度
-    output [3:0]  cpu_inst_wstrb,      // 指令SRAM写掩码
-    output [31:0] cpu_inst_addr,       // 指令SRAM地址
-    output [31:0] cpu_inst_wdata,      // 指令SRAM写数据（未使用）
-    input         cpu_inst_addr_ok,    // 地址握手成功
-    input         cpu_inst_data_ok,    // 数据握手成功
-    input  [31:0] cpu_inst_rdata,      // 指令SRAM读数据
+    output        inst_sram_req,        // 指令SRAM使能
+    output        inst_sram_wr,         // 指令SRAM写使能
+    output [1:0]  inst_sram_size,       // 指令SRAM访问长度
+    output [3:0]  inst_sram_wstrb,      // 指令SRAM写掩码
+    output [31:0] inst_sram_addr,       // 指令SRAM地址
+    output [31:0] inst_sram_wdata,      // 指令SRAM写数据（未使用）
+    input         inst_sram_addr_ok,    // 地址握手成功
+    input         inst_sram_data_ok,    // 数据握手成功
+    input  [31:0] inst_sram_rdata,      // 指令SRAM读数据
     // 异常冲刷
     input wb_exc_valid,                 // wb阶段有异常则冲刷流水线
     input wb_ertn_flush,                // wb阶段有ertn指令则冲刷流水线
     // 来自csr寄存器堆
     input [31:0]exc_entry,              // 异常处理地址
     input [31:0]exc_back_pc             // 异常返回地址
+   
 );
 
     reg  if_valid;                      // IF阶段有效标志
@@ -34,13 +35,20 @@ module if_stage(
     wire pre_if_valid;                  // 预取指阶段有效标志
     wire pre_if_ready_go;               // 预取值阶段就绪标志
     wire pre_if_to_if_valid;            // 预取指到取值有效
+    reg  pre_if_ready_go_r;             // 预取值阶段上周期的指令是否发送过请求，用于脏指令判断
+
     // ========== 控制信号解析 ==========
     wire [31:0] seq_pc;                 // 顺序下一条PC（当前PC+4）
     wire [31:0] nextpc;                 // 下一周期PC（顺序或分支）
     reg  [31:0] nextpc_r;               // nextpc的寄存，用于判断preif是否阻塞
     wire br_taken;                      // 分支/跳转是否发生
+    reg  br_taken_r;                    // 传来跳转信号但是不能立即发出访存请求应该寄存跳转信号
+    reg  wb_ertn_flush_r;               // 传来ertn冲刷信号但是不能立即发出访存请求应该寄存跳转信号
+    reg  wb_exc_valid_r;                // 传来异常冲刷信号但是不能立即发出访存请求应该寄存跳转信号
     wire [31:0] br_target;              // 分支/跳转目标地址
     wire br_ld_stall;                   // 跳转指令没得到正确数据不能发起取值请求
+    // brtaken和两个冲刷信号的任务就是，让if中的错误指令不动，让preif输入特定的取值请求，且preif可以前进。还有让if的两个寄存器都清空从而让特定指令进入if的时候接受到的数据是新读出来的
+    // brtaken_r和两个冲刷寄存信号会让nextpc一直指向跳转地址，且不会让if中的错误指令往前走，也会让preif可以前进。if寄存器清空用不上寄存信号
 
     // ========== 异常信号 ==========
     wire pre_if_adef;
@@ -57,6 +65,7 @@ module if_stage(
     reg         new_in;                 // 表明if中是否是新进入的指令
     reg         req_already;            // 表明preif的指令已经发出过访存请求
     wire        req_already_final;      // 考虑冲刷和分支后，表明preif的指令已经发出过访存请求
+    reg  [1:0]  inst_dirty;             // 不为0就代表下一次存储器的dataok数据无效
 
     //========== 分支总线解析 ==========
     assign {br_ld_stall, br_taken, br_target} = br_bus;
@@ -67,21 +76,17 @@ module if_stage(
     // ========== 流水线控制 ========== 
     assign pre_if_to_if_valid = pre_if_ready_go && pre_if_valid;              // 预取指有效逻辑
     assign pre_if_valid = ~reset;                                             // 预取指阶段：只要不复位就一直有效
-    assign pre_if_ready_go = (cpu_inst_req && cpu_inst_addr_ok) || req_already_final;          
-    //如果发出了请求就让preif可前进，被阻塞的时候请求已发送不会再发，nextpc_r为nextpc寄存一拍，二者相等代表阻塞一次；
-    //被阻塞的指令一定是发送过请求的，因为新指令进入nextpc，sram总线中缓存一定是不满的。分析新指令上一条，如果缓存满，上一条指令不发送请求阻塞在preif，只是读出一次数据给if，读出一次缓存空闲，下一次上跳同时发请求，同时读出给if，缓存依然有空闲。所以新指令进入preif一定可以发请求。
-   
+    assign pre_if_ready_go = (inst_sram_req && inst_sram_addr_ok) || req_already_final;          
+    // 如果下一次上跳能够握手发请求或者已经发送过请求，那么下一次上跳就可以前进
     assign seq_pc = if_pc + 32'h4;                                            // 顺序PC = 当前PC + 4（指令长度4字节）
-    assign nextpc = wb_exc_valid  ? exc_entry   :                             // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
-                    wb_ertn_flush ? exc_back_pc :
-                    br_taken      ? br_target   :
-                                    seq_pc      ;
+    assign nextpc = (wb_exc_valid  || wb_exc_valid_r)  ? exc_entry   :        // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
+                    (wb_ertn_flush || wb_ertn_flush_r) ? exc_back_pc :
+                    (br_taken      || br_taken_r)      ? br_target   :
+                                                       seq_pc      ;
     // nextpc逻辑中异常和ertn的优先级高于brtaken，如果id和wb同时发来信号，优先处理wb的信号
-    always @(posedge clk) nextpc_r <= nextpc;
-
-    assign if_ready_go = ~br_taken && (if_inst_r_valid || (cpu_inst_data_ok || pre_if_inst_r_valid));            
-    //if的inst可以来源于if_inst_reg或者if_inst，前者有效就直接把数据送给id总线，后者的数据又可能来源于存储器（dataok表示有数据）或者preif_inst_reg
-    assign if_allowin = !ifvalid || (if_ready_go && id_allowin)|| br_taken || (wb_ertn_flush||wb_exc_valid);  //分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
+    assign if_ready_go = !(br_taken || br_taken_r) && (if_inst_r_valid || (inst_sram_data_ok || pre_if_inst_r_valid)) && !inst_dirty;            
+    // 如果有跳转或者寄存的跳转信号就不能让if中的错误指令往后走。如果if中的指令得到了访存数据才能继续往后走，如果下一次
+    assign if_allowin = !if_valid || (if_ready_go && id_allowin)|| (br_taken || br_taken_r) || ((wb_ertn_flush || wb_ertn_flush_r)||(wb_exc_valid || wb_exc_valid_r));  //分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
     assign if_to_id_valid = if_valid && if_ready_go;
     
     // 取值阶段有效标志更新
@@ -111,65 +116,124 @@ module if_stage(
 
     // ========== 实现类sram总线 ==========
     always @(posedge clk ) begin
-        if (reset || (pre_if_ready_go && if_allowin) ) begin
+        if (reset || (pre_if_ready_go && if_allowin)) begin
             req_already <= 1'b0;
         end
-        else if (cpu_inst_req && !(pre_if_ready_go && if_allowin)) begin
+        else if ((inst_sram_req && inst_sram_addr_ok) && !(pre_if_ready_go && if_allowin)) begin
             req_already <= 1'b1;
         end
     end
+    assign req_already_final = req_already && !(br_taken || (wb_ertn_flush || wb_exc_valid));
     //表明preif指令是否发送过访存请求的逻辑生成
     //如果preif的指令进入if则preif一定维护新的指令，新指令没发送过访存请求
     //如果preif的访存请求为1但是不能往后走就说明发送过请求
-    assign req_already_final = req_already && !(br_taken || (wb_ertn_flush || wb_exc_valid))
     //如果有冲刷或者brtaken信号会瞬间改变nextpc让他变成新指令也就不算发出过请求
+    //寄存的跳转或者冲刷信号不应该在此发挥作用，如果有寄存信号，其代表收到信号但是还没发出请求
 
     always @(posedge clk ) begin
-        if (reset) begin
+        if (reset || !(if_allowin && pre_if_to_if_valid)) begin
             new_in <= 1'b0;
         end
         else if (if_allowin && pre_if_to_if_valid) begin
             new_in <= 1'b1;
-        end
+        end 
     end
-    //表明if是否有新指令的逻辑实现
-    
+    //表明if该阶段指令是否是新进入的逻辑实现
+
     always @(posedge clk ) begin
-        if (reset || (id_allowin && if_to_id_valid) || (wb_ertn_flush || wb_exc_valid) || br_taken) begin
+        if(reset || (if_to_id_valid && id_allowin) || br_taken || (wb_exc_valid || wb_ertn_flush)) begin
             if_inst_r_valid <= 1'b0;
             if_inst_r <= 32'b0;
         end
-        else if ((if_inst_r_valid || (cpu_inst_data_ok || pre_if_inst_r_valid)) && !id_allowin) begin
+        else if(!if_inst_r_valid && (inst_sram_data_ok || pre_if_inst_r_valid) && !(if_to_id_valid && id_allowin) && (inst_dirty == 2'b0)) begin
             if_inst_r_valid <= 1'b1;
             if_inst_r <= if_inst;
         end
     end
-    //如果if有数据但是id不让进，下一次上跳if_inst又会响应preif发出的指令读出新的数据，所以就需要把这次的数据存起来
-    //当指令进入id的时候就把指令和有效信号清空,如果有跳转就要清空让preif成功覆盖
-
+   // 如果if_inst_r是空的，那么如果存储器读出的inst_sram_rdata或者pre_if_inst_r里面的数据就一定是给if指令的，如果不能进入id就把这个数据存在if_inst_r里面
+   // 如果能进入id,那么不用管if_inst_r有没有数据，直接清空一次就行
+   // 如果是脏数据那么得舍弃掉，不能写入寄存器
     always @(posedge clk ) begin
-        if (reset || new_in || (wb_ertn_flush || wb_exc_valid) || br_taken) begin
+        if(reset || new_in || br_taken || (wb_exc_valid || wb_ertn_flush)) begin
             pre_if_inst_r_valid <= 1'b0;
             pre_if_inst_r <= 32'b0;
         end
-        else if (cpu_inst_data_ok && !new_in) begin
+        else if(inst_sram_data_ok && if_inst_r_valid && (inst_dirty == 2'b0)) begin
             pre_if_inst_r_valid <= 1'b1;
-            pre_if_inst_r <= cpu_inst_rdata;
+            pre_if_inst_r <= inst_sram_rdata;
         end
     end
-    //如果preif上周期发出请求但是不能进入if，就把读出的数据存起来
-    //如果if中的是新指令，要是pre_if_reg中有数据，那么if_inst读出来的就是它，下一周期，要么写入if_reg要么进入id流水寄存器，所以可以清除掉
-    //冲刷信号和brtaken信号都是要让下一周期if中进入特别的指令（跳转和异常处理指令），所以就得清空这两个寄存器让if的指令对应存储器新输出的数据
-     
+    // 如果存储器读出数据，并且if_inst_r里面有数据，那么这次读出的数据一定是给pre_if的指令的，由于pre_if的指令不知道什么时候进入if，所以就把他存起来
+    // 如果if中进入一个新指令，如果pre_if_inst_r中有数据，那么if_inst对应的就是它输出的数据，下一个周期要么进入id要么进入if_inst_r存起来
+    
+    // ！！！！！！！！！！！！！重点分析：
+    // inst_sram_data_ok和pre_if_inst_r_valid不会同时出现。首先，指令数据要么是给if要么是给preif ，其次，根据数据返回先后顺序，dataok一定是返回给preif而preif_inst一定是给if阶段的指令
+    // 再次，当preif_inst返回的数据是给if，那么代表if中的指令是新进入的，就是说preif也刚进入一条新指令，preif中的指令还没发出访存请求，存储器不可能返回其数据
+    
+    // ！！！！！！！！！！！！！重点分析：
+    // 当dataok数据来临的时候，if中不可能没有有效指令，数据来临代表之前的上跳沿就发出过请求，发起请求以及之后的上跳沿都是可以前进的，if中如果是空的那么它之前一定有一条指令往后走，if往后面走那么if也一定可以allowin
+    //所以之前一定有一个上跳preif可以前进if可以进入所以不存在。dataok并且！if_valid 
+
+    //对于跳转和冲刷信号，它们需要保证下一次进入if的是特定指令和新的从存储器中取出的特定指令的数据，所以需要把存着的老数据都给清除掉
+    always @(posedge clk) begin
+        if (reset || (inst_sram_req && inst_sram_addr_ok)) begin
+            br_taken_r <= 1'b0;
+            wb_exc_valid_r <= 1'b0;
+            wb_ertn_flush_r <= 1'b0;
+        end
+        else if (!(inst_sram_req && inst_sram_addr_ok)) begin
+            if(br_taken)  br_taken_r <= 1'b1;
+            if(wb_exc_valid) wb_exc_valid_r <= 1'b1;
+            if(wb_ertn_flush) wb_ertn_flush_r<= 1'b1;
+        end
+    end
+    // 如果收到跳转或者冲刷信号但是握手不成功，下一次访存依然需要访存这些特定指令的数据，所以需要寄存。如果有寄存信号，代表收到了跳转或者冲刷信号但是还没发出访存请求，需要持续更改访存地址。尤其是对于跳转信号，还需要一直保证if的指令不忘后面走
+    
+    always @(posedge clk ) pre_if_ready_go_r <= pre_if_ready_go; //表明上周期preif维护的指令是否发送过访存请求
+
+    always @(posedge clk ) begin
+        if (reset) begin
+            inst_dirty <= 2'b0;
+        end
+        else if (wb_ertn_flush || wb_exc_valid || br_taken) begin
+            if(pre_if_ready_go_r && !new_in ) begin 
+              if (!(if_inst_r_valid || (inst_sram_data_ok || pre_if_inst_r_valid)))
+                  inst_dirty <= 2'b10;
+              else if(inst_sram_data_ok && if_inst_r_valid)
+                  inst_dirty <= 2'b00;
+              else if(inst_sram_data_ok || if_inst_r_valid)
+                  inst_dirty <= 2'b01;
+            end
+            if(pre_if_ready_go_r && new_in) begin
+              if (!(if_inst_r_valid || (inst_sram_data_ok || pre_if_inst_r_valid)))
+                  inst_dirty <= 2'b01;
+              else 
+                  inst_dirty <= 2'b00;
+            end
+            if(!pre_if_ready_go_r) begin
+              if (if_valid && !(if_inst_r_valid || (inst_sram_data_ok || pre_if_inst_r_valid)))
+                 inst_dirty <= 2'b01;
+              else
+                 inst_dirty <= 2'b00;            
+            end
+        end
+        else if(inst_sram_data_ok && (inst_dirty != 2'b00))
+            inst_dirty <= inst_dirty - 1'b1;
+    end
+
+    // 冲刷和跳转会立马改变nextpc，假设第一到第二周期的上跳产生冲刷或者跳转信号，第三周期会得到脏数据信号。第一周期如果preif可以发请求但是不能进入if，那么一定是if中有一条有效指令但是不能往后走。所以pre_if_ready_go_r && !new_in的时候
+    // if第二周期中的一定是第一周期中的那一条指令；如果if中没有有效数据那么就要废2条，如果刚返回或者早就有数据存在if_inst_r中那么就只废一次，如果刚返回一条并且早早也有一条数据，那么不废数据。
+    // 其他情况都是只有if中有一条指令在等数据，只看它有没有数据即可 
+    
     // ========== 指令存储器控制 ==========
-    assign cpu_inst_req = pre_if_valid && !to_if_adef && !req_already_final && !br_ld_stall ; 
-    // preif有效且无异常才能发请求；并且已经发过的话不能重复发请求；如果跳转指令遇上lduse冒险未取得正确数据，此时访存会得到错误指令数据
-    assign cpu_inst_wr = 1'b0;                                                // 不写指令存储器               
-    assign cpu_inst_size = 2'b10;                                             // 读指令读一个字
-    assign cpu_inst_wstrb = 4'h0;                                             // 不写指令存储器
-    assign cpu_inst_addr = nextpc;                                            // nextpc为访存地址
-    assign cpu_inst_wdata = 32'b0;                                            // 不写指令存储器
-    assign if_inst = pre_if_inst_r_valid ? pre_if_inst_r : cpu_inst_rdata;    // 读出数据给if,如果之前有存的读出数据就给之前的
+    assign inst_sram_req = pre_if_valid && !req_already_final && !br_ld_stall ; 
+    // preif有效才能发请求；并且已经发过的话不能重复发请求；如果跳转指令遇上lduse冒险未取得正确数据，此时访存会得到错误指令数据所以也不能访存
+    assign inst_sram_wr = 1'b0;                                                // 不写指令存储器               
+    assign inst_sram_size = 2'b10;                                             // 读指令读一个字
+    assign inst_sram_wstrb = 4'h0;                                             // 不写指令存储器
+    assign inst_sram_addr = nextpc;                                            // nextpc为访存地址
+    assign inst_sram_wdata = 32'b0;                                            // 不写指令存储器
+    assign if_inst = pre_if_inst_r_valid ? pre_if_inst_r : inst_sram_rdata;    // 读出数据给if,如果之前有存的读出数据就给之前的
 
     // ========== 检测异常 ==========
     assign pre_if_adef = nextpc[1:0] != 2'b00 && pre_if_valid;

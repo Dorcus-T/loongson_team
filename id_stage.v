@@ -24,6 +24,9 @@ module id_stage(
     input  [31:0]  ex_to_id_result,     // EX阶段计算结果
     input  [31:0]  mem_to_id_result,    // MEM阶段计算结果
     input  [31:0]  wb_to_id_result,     // WB阶段计算结果
+    input          mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
+    input          mem_exc_valid,       // MEM有冲刷就不发起brtaken
+    input          ex_exc_valid,        // ex有冲刷就不发起brtaken
     // csr与ertn冒险
     input          ex_csr_we,           // EX阶段写CSR使能
     input  [13:0]  ex_csr_num,          // EX阶段写CSR号码
@@ -239,8 +242,9 @@ module id_stage(
     wire id_load_op;                     // ID阶段是否为加载指令
     wire load_use_stall;                 // load-use冒险需要停顿
     wire branch_stall;                   // 分支指令数据冒险需要停顿
+    wire br_ld_stall;                    // 分支与ld冒险但是ld没取得数据
     wire csr_stall;                      // csr与ertn有关冒险
-
+   
     // ========== 指令字段生成 ==========
     assign op_31_26 = id_inst[31:26];
     assign op_25_22 = id_inst[25:22];
@@ -478,13 +482,14 @@ module id_stage(
                        || inst_jirl
                        || inst_bl
                        || inst_b
-                    ) && id_valid && !load_use_stall && !branch_stall ;  
+                    ) && id_valid && !load_use_stall && !branch_stall 
+                      && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_exc_valid) && !id_exc_valid;  
     // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
 
     //id，ex，mem有异常或者ertn可以不管brtaken，因为不论是否跳转都会冲刷，wb若有异常或者ertn，其发出的冲刷信号优先级也高于id的brtaken
-    assign br_ld_stall =branch_stall && load_use_stall; // id为跳转指令，ex为load指令，此时会发出错误的brtarget，不能发出取值请求
+    assign br_ld_stall = branch_stall && load_use_stall && id_valid; // id为跳转指令，ex为load指令，此时会发出错误的brtarget，不能发出取值请求
     
     // 分支目标地址计算
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b || 
@@ -550,18 +555,17 @@ module id_stage(
 
     // ========== 冒险检测、前递处理、阻塞处理 ==========
     // 指令类型分类
-    assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr;                 // 不读取rj的指令
+    assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr;  // 不读取rj的指令
     assign src_no_rk    = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w |
                           inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
                           inst_st_w | inst_jirl | inst_b | inst_bl | inst_beq | inst_bne |
                           inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_lu12i_w |
                           inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
                           inst_pcaddu12i | inst_st_b | inst_st_h | 
-                          inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid;            // 不读取rk的指令
+                          inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid;  // 不读取rk的指令
     assign src_no_rd    = ~inst_st_w & ~inst_beq & ~inst_bne & 
                           ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu &
-                          ~inst_st_b & ~inst_st_h & ~inst_csrwr & ~inst_csrxchg ;                                     // 不读取rd的指令
-
+                          ~inst_st_b & ~inst_st_h & ~inst_csrwr & ~inst_csrxchg ;  // 不读取rd的指令
 
     assign rj_wait = ~src_no_rj && (rj != 5'b00000) && 
                      ((rj == ex_to_id_dest) || (rj == mem_to_id_dest) || (rj == wb_to_id_dest));
@@ -572,10 +576,14 @@ module id_stage(
     
     // 如果当前指令的源寄存器与ex阶段的目的寄存器匹配，且EX阶段是加载指令，则需要停顿
     assign id_load_op = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
-    assign load_use_stall = ((rj_wait && (rj == ex_to_id_dest)) ||
-                             (rk_wait && (rk == ex_to_id_dest)) ||
-                             (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op;
-    
+    assign load_use_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
+                              (rk_wait && (rk == ex_to_id_dest)) ||
+                              (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op) ||
+                            (((rj_wait && (rj == mem_to_id_dest)) ||
+                              (rk_wait && (rk == mem_to_id_dest)) ||
+                              (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
+
+
     // 分支指令的阻塞检测（ex阶段的指令与id阶段的跳转指令发生冒险则需要阻塞，优化逻辑提高主频）
     assign branch_stall = ((rj_wait && (rj == ex_to_id_dest)) ||
                            (rk_wait && (rk == ex_to_id_dest)) ||

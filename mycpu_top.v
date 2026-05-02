@@ -68,6 +68,12 @@ module mycpu_top(
     wire wb_ertn_flush;      // WB阶段有ertn指令
     wire mem_exc_valid;      // MEM阶段异常有效
     wire mem_ertn_flush;     // MEM阶段有ertn指令
+    wire ex_ertn_flush;
+
+    // ========== 重取指信号 ==========
+    wire exc_not_rf;         // wb发if，csr除中断外被rf覆盖异常信号
+    wire rf_valid;           // rf信号
+    wire [31:0] wb_pc_back;  // 发if重取指pc
     
     // ========== csr有关信号 ========== 
     wire [31:0] exc_entry;          // 异常入口地址，CSR输出给IF阶段，用于异常发生时PC跳转
@@ -85,6 +91,27 @@ module mycpu_top(
     wire        mem_csr_we;         // mem阶段写csr使能
     wire [13:0] wb_csr_num;         // wb阶段写csr寄存器号
     wire        wb_csr_we;          // wb阶段写csr使能
+    // 特殊csr相关信号
+    wire [1:0]  plv_out;            // 特权等级输出
+    wire [5:0]  ecode_out;          // 异常码输出
+    wire [1:0]  da_pg_out;          // 虚实转换方式输出
+    wire [63:0] dmw_out;            // dmw输出
+    wire [`TLBCSR_BUS_WD -1:0] tlbcsr_bus; // tlb相关csr输出 
+
+    // ========== 与MMU交互信号 ==========
+    wire [31:0] if_to_mmu_vaddr;    // if发mmu虚地址
+    wire [31:0] ex_to_mmu_vaddr;    // ex发mmu虚地址
+    wire [35:0] vtlb_enop;          // 发mmu tlbsrch，invtlb使能即操作数
+    wire [1:0]  ld_and_str;         // 发mmu load和store信号
+    wire [2:0]  tlbrwf_valid;       // tlbrd tlbwr tlbfill使能
+    wire [31:0] paddr_to_if;        // 发if实地址
+    wire [2:0]  if_tlb_exc;         // 发if tlb相关异常
+    wire [1:0]  if_mat;             // if 访存方式，//占位
+    wire [31:0] paddr_to_ex;        // 发ex实地址
+    wire [5:0]  srch_value;         // 发ex tlbsrch查询结果
+    wire [4:0]  ex_tlb_exc;         // 发ex tlb相关异常
+    wire [1:0]  ex_mat;             // ex 访存方式
+    wire [`TLBRD_BUS_WD - 1:0] tlbrd_value; // 发csr tlbrd使能和数据
 
     // ========== 计数器数值 ==========
     wire [63:0] timer_value;        // 计数器输出
@@ -104,10 +131,15 @@ module mycpu_top(
     .inst_sram_addr(inst_sram_addr),
     .inst_sram_wdata(inst_sram_wdata),
     .inst_sram_rdata(inst_sram_rdata),
-    .wb_exc_valid(wb_exc_valid),
+    .if_to_mmu_vaddr(if_to_mmu_vaddr),
+    .padd(paddr_to_if),
+    .if_tlb_exc(if_tlb_exc),
+    .exc_no_rf(exc_not_rf),
     .wb_ertn_flush(wb_ertn_flush),
     .exc_entry(exc_entry),
-    .exc_back_pc(exc_back_pc)
+    .exc_back_pc(exc_back_pc),
+    .rf_valid(rf_valid),
+    .rf_pc(wb_pc_back)
     );
     
     // ============================================================
@@ -143,7 +175,8 @@ module mycpu_top(
     .wb_ertn_flush(wb_ertn_flush),
     .csr_rvalue(csr_rvalue),
     .csr_id_num(csr_id_num),
-    .has_int(has_int)
+    .has_int(has_int),
+    .csr_da_pg(da_pg_out)
     );
     
     // ============================================================
@@ -158,6 +191,12 @@ module mycpu_top(
     .id_to_ex_bus(id_to_ex_bus),
     .ex_to_mem_valid(ex_to_mem_valid),
     .ex_to_mem_bus(ex_to_mem_bus),
+    .ex_to_mmu_vaddr(ex_to_mmu_vaddr),
+    .vtlb_enop(vtlb_enop),
+    .ld_and_str(ld_and_str),
+    .padd(paddr_to_ex),
+    .srch_value(srch_value),
+    .mem_tlb_exc(ex_tlb_exc),
     .data_sram_en(data_sram_en),
     .data_sram_we(data_sram_we),
     .data_sram_addr(data_sram_addr),
@@ -217,7 +256,11 @@ module mycpu_top(
     .wb_exc_valid(wb_exc_valid),
     .wb_csr_we(wb_csr_we),
     .wb_csr_num(wb_csr_num),
-    .wb_to_csr_bus(wb_to_csr_bus)
+    .wb_to_csr_bus(wb_to_csr_bus),
+    .exc_not_rf(exc_not_rf),
+    .rf_valid(rf_valid),
+    .wb_pc_back(wb_pc_back),
+    .tlbrwf_valid(tlbrwf_valid)
     );
    // ============================================================ 
    // csr寄存器堆
@@ -234,8 +277,48 @@ module mycpu_top(
         .coreid_in(32'd0),
     // 中断输入暂时全部接0
         .hw_inter_num(8'b0),
-        .ipi_inter(1'b0)
+        .ipi_inter(1'b0),
+        .plv_out(plv_out),
+        .ecode_out(ecode_out),
+        .da_pg_out(da_pg_out),
+        .dmw_out(dmw_out),
+        .tlbrd_bus(tlbrd_value),
+        .tlbcsr_bus(tlbcsr_bus)
     );
+   // ============================================================
+   // MMU
+   // ============================================================
+    mmu u_mmu (
+        .clk           (clk),
+        .reset         (reset),
+    
+        // if interact
+        .vaddr_from_if (if_to_mmu_vaddr),
+        .paddr_to_if   (paddr_to_if),
+        .if_tlb_exc    (if_tlb_exc),
+        .if_mat        (if_mat),
+    
+        // ex interact
+        .vaddr_from_ex (ex_to_mmu_vaddr),
+        .vtlb_enop     (vtlb_enop),
+        .ld_and_str    (ld_and_str),
+        .paddr_to_ex   (paddr_to_ex),
+        .srch_value    (srch_value),
+        .ex_tlb_exc    (ex_tlb_exc),
+        .ex_mat        (ex_mat),
+    
+        // wb interact
+        .tlbrwf_en     (tlbrwf_valid),
+    
+        // csr interact
+        .plv_in        (plv_out),
+        .ecode_in      (ecode_out),
+        .dapg_in       (da_pg_out),
+        .dmw           (dmw_out),
+        .tlbcsr        (tlbcsr_bus),
+        .tlbrd_value   (tlbrd_value)
+    );
+
    // ============================================================ 
    // 计数器 
    // ============================================================

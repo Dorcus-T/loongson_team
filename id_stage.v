@@ -37,6 +37,7 @@ module id_stage(
     input wb_exc_valid,                  // WB阶段存在异常冲刷流水线    
     input wb_ertn_flush,                 // WB阶段有ertn指令则冲刷流水线  
     // 与csr寄存器堆的读交互
+    input  [1:0]  csr_da_pg,                        // csr CRMD_DA_PG 即当前映射模式
     input  [31:0] csr_rvalue,                       // csr访问指令读的数据
     output [13:0] csr_id_num,                       // csr寄存器号码(id阶段用于读)
     // 来自csr的中断判断
@@ -46,13 +47,16 @@ module id_stage(
     reg id_valid;                                    // ID阶段有效标志
     wire id_ready_go;                                // ID阶段是否准备好（无冒险）
     reg [`IF_TO_ID_BUS_WD -1:0] if_to_id_bus_r;      // 锁存的取值级数据
+    reg id_rf_valid;                                 // 重取指标志
     
     // ========== 异常信号 ==========
+    wire ipe;
+    wire fpd;
     wire syscall;
     wire brk;
     wire ine;
     wire int;
-    wire [4:0] id_exc;
+    wire [9:0] id_exc;
     wire id_exc_valid;
 
     // ========== 指令字段分割 ==========
@@ -156,10 +160,18 @@ module id_stage(
     wire inst_ertn;         // 异常返回（恢复上下文，从ERA跳转）
     //ertn指令的唯一功能就是在wb阶段发出冲刷信号，csr堆接受到冲刷信号后，在下一个上跳沿会立马利用csr中的数据来写csr，是立马读立马写所以无冒险
     
+    // ========== TLB相关指令 ==========
+    wire inst_tlbwr;        // 将TLB相关CSR页表项信息写入TLB（由index指定位置）
+    wire inst_tlbfill;      // 将TLB相关CSR页表项信息写入TLB（随机位置）
+    wire inst_invtlb;       // 根据op指示，将rj，rk匹配的TLB清除
+
     // ========== CSR访问指令 ==========
     wire inst_csrrd;        // CSR读：将CSR寄存器的值读取到通用寄存器
     wire inst_csrwr;        // CSR写：将通用寄存器的值写入CSR寄存器
     wire inst_csrxchg;      // CSR原子读改写：读取CSR原值，同时按掩码修改CSR
+    // TLB相关指令(写CSR)
+    wire inst_tlbsrch;      // CSR写：exe阶段查找tlb，写TLBIDX
+    wire inst_tlbrd;        // CSR写：读tlb，写TLBIDX,TLBEHI,TLBELO0,TLBELO1,ASID
     
     // ========== 计时器访问指令 ==========
     wire inst_rdcntvl_w;    // 读取计数器低32位写入rd
@@ -187,6 +199,11 @@ module id_stage(
     wire [31:0] id_inst;                 // 当前指令的机器码
     wire [2:0] mem_size;                 // 访存大小：0=字节，1=半字，2=字
     wire mem_sign_ext;                   // 符号扩展标志
+    wire tlbsrch_en;                     // EXE访问tlb进行查找
+    wire invtlb_en;                      // EXE访问tlb进行选中无效
+    wire tlbrd_en;                       // WB读tlb并写csr
+    wire tlbwr_en;                       // tlbwrWB写tlb
+    wire tlbfill_en;
     // ========== 立即数控制信号 ==========
     wire need_ui5 ;                      // 5位无符号立即数（移位量）
     wire need_si12;                      // 12位有符号立即数
@@ -255,7 +272,8 @@ module id_stage(
     assign i20 = id_inst[24:5];
     assign i16 = id_inst[25:10];
     assign i26 = {id_inst[9:0], id_inst[25:10]};  
-    assign csr_id_num = inst_rdcntid ? 14'h40 : id_inst[23:10];
+    assign csr_id_num = inst_rdcntid ? 14'h40
+                      : inst_tlbsrch ? 14'h10 : id_inst[23:10];
      
     // ========== 指令解码器实例化（将位向量转换为独热码） ==========
     decoder_6_64 u_dec0(.in(op_31_26), .out(op_31_26_d));
@@ -329,6 +347,12 @@ module id_stage(
     assign inst_syscall  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
     assign inst_break    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h14];
     assign inst_ertn     = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0e] & (rj == 5'b0) & (rd == 5'b0);
+    // tlb相关指令
+    assign inst_tlbsrch  = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0a] & (rj == 5'b0) & (rd == 5'b0);
+    assign inst_tlbrd    = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0b] & (rj == 5'b0) & (rd == 5'b0);
+    assign inst_tlbwr    = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0c] & (rj == 5'b0) & (rd == 5'b0);
+    assign inst_tlbfill  = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0d] & (rj == 5'b0) & (rd == 5'b0);
+    assign inst_invtlb   = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h13];
     // csr访问指令
     assign inst_csrrd    = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj == 5'b0);
     assign inst_csrwr    = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj == 5'b1);
@@ -408,12 +432,17 @@ module id_stage(
     assign dst_is_rdtid  = inst_rdcntid;                          // rdtid指令写rj
     assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b & 
                            ~inst_blt & ~inst_bltu & ~inst_bge & ~inst_bgeu &
-                           ~inst_st_b & ~inst_st_h & 
+                           ~inst_st_b & ~inst_st_h & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb &
                            ~inst_ertn;                            // 写通用寄存器条件
     assign mem_we        = inst_st_w | inst_st_b | inst_st_h;     // 存储器写使能
     assign dest          = dst_is_r1 ? 5'd1 :
                            dst_is_rdtid ? rj : rd;                // 目的寄存器：BL写R1，rdtid写rj，其他写rd
     assign ertn_flush    = inst_ertn;
+    assign tlbsrch_en    = inst_tlbsrch;
+    assign invtlb_en     = inst_invtlb;
+    assign tlbrd_en      = inst_tlbrd;
+    assign tlbwr_en      = inst_tlbwr;
+    assign tlbfill_en    = inst_tlbfill;
 
     // 访存大小编码
     assign mem_size[0]   = inst_ld_b | inst_ld_bu | inst_st_b;    // 字节访问
@@ -437,9 +466,11 @@ module id_stage(
     );
     
     // ========== csr文件写接口 ==========
-    assign csr_we     = inst_csrwr | inst_csrxchg;
-    assign csr_wvalue = rkd_value;
-    assign csr_wmask  = inst_csrxchg ? rj_value : 32'hffffffff;
+    assign csr_we     = inst_csrwr | inst_csrxchg | inst_tlbsrch;
+    assign csr_wvalue = inst_tlbsrch ? 32'h80000000 : rkd_value;
+    assign csr_wmask  = inst_csrxchg ? rj_value
+                      : inst_csrwr ? 32'hffffffff
+                      : inst_tlbsrch ? 32'h80000000 : 32'b0;
 
     // ========== 操作数前递 ==========
     // rj值前递：如果rj需要等待且与EX/MEM/WB阶段的目的寄存器匹配，则使用前递结果
@@ -494,21 +525,27 @@ module id_stage(
     assign br_bus = {br_taken, br_target};
     
     // ========== 解析来自if阶段的总线 ==========
-    assign {id_exc[0], id_inst, id_pc} = if_to_id_bus_r;        
+    assign {id_exc[8:5], id_inst, id_pc} = if_to_id_bus_r;        
 
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装
     assign id_to_ex_bus = {
-        timer_high,     // 281     使用计数器高32位
-        res_from_timer, // 280     结果来自计数器
-        res_from_csr,   // 279     结果来自csr寄存器堆
-        csr_id_num,     // 278:265 csr号码
-        csr_rvalue,     // 264:233 csr读数据
-        csr_we,         // 232     csr写使能
-        csr_wmask,      // 231:200 csr写掩码
-        csr_wvalue,     // 199:168 csr写数据
-        ertn_flush,     // 167    异常返回冲刷信号
-        id_exc,         // 166:162 异常类型
+        tlbsrch_en,     // 292     tlbsrch使能
+        invtlb_en,      // 291     invtlb使能
+        tlbrd_en,       // 290     tlbrd使能
+        tlbwr_en,       // 289     tlbwf使能
+        tlbfill_en,     // 288
+        id_rf_valid,    // 287     重取指标志   
+        timer_high,     // 286     使用计数器高32位
+        res_from_timer, // 285     结果来自计数器
+        res_from_csr,   // 284     结果来自csr寄存器堆
+        csr_id_num,     // 283:270 csr号码
+        csr_rvalue,     // 269:238 csr读数据
+        csr_we,         // 237     csr写使能
+        csr_wmask,      // 236:205 csr写掩码
+        csr_wvalue,     // 204:173 csr写数据
+        ertn_flush,     // 172    异常返回冲刷信号
+        id_exc,         // 171:162 异常类型
         res_from_mem,   // 161    结果来源（存储器/ALU）
         id_pc,          // 160:129 指令PC
         rkd_value,      // 128:97 源操作数2
@@ -544,19 +581,24 @@ module id_stage(
     always @(posedge clk) begin
         if (if_to_id_valid && id_allowin) begin
             if_to_id_bus_r <= if_to_id_bus;
+            id_rf_valid <= (csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
+                                   || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
+                                   || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) && id_valid;
         end
     end
 
     // ========== 冒险检测、前递处理、阻塞处理 ==========
     // 指令类型分类
-    assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr;                 // 不读取rj的指令
+    assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr |
+                          inst_rdcntid | inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;                 // 不读取rj的指令
     assign src_no_rk    = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w |
                           inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
                           inst_st_w | inst_jirl | inst_b | inst_bl | inst_beq | inst_bne |
                           inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_lu12i_w |
                           inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
                           inst_pcaddu12i | inst_st_b | inst_st_h | 
-                          inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid;            // 不读取rk的指令
+                          inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_rdcntvl_w | inst_rdcntvh_w |
+                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;            // 不读取rk的指令
     assign src_no_rd    = ~inst_st_w & ~inst_beq & ~inst_bne & 
                           ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu &
                           ~inst_st_b & ~inst_st_h & ~inst_csrwr & ~inst_csrxchg ;                                     // 不读取rd的指令
@@ -598,13 +640,17 @@ module id_stage(
                          (wb_ertn_flush));   // wb阶段有ertn，即将写CRMD.IE
 
     // 读csr指令与后面写同一个 CSR 冲突
-    assign inst_csr_stall = (inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid) &&
+    assign inst_csr_stall = (inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch) &&
                          ((ex_csr_we && ex_csr_num == csr_id_num) ||
                           (mem_csr_we && mem_csr_num == csr_id_num) ||
-                          (wb_csr_we && wb_csr_num == csr_id_num));
+                          (wb_csr_we && wb_csr_num == csr_id_num) ||
+                          (ex_csr_we && inst_tlbsrch && ex_csr_num == `CSR_TLBEHI) ||
+                          (mem_csr_we && inst_tlbsrch && mem_csr_num == `CSR_TLBEHI)); 
     assign csr_stall = inst_csr_stall || int_csr_stall;
 
     // ========== 检测异常 ==========
+    assign ipe = 1'b0; // 指令特权等级错例外//占位
+    assign fpd = 1'b0; // 浮点指令未使能例外//占位
     assign syscall = id_valid && inst_syscall;
     assign brk = id_valid && inst_break;
     assign ine = id_valid && 
@@ -619,9 +665,11 @@ module id_stage(
                inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
                inst_st_b | inst_st_h | inst_syscall | inst_break | inst_ertn | 
                inst_csrrd | inst_csrwr | inst_csrxchg | 
-               inst_rdcntid | inst_rdcntvh_w | inst_rdcntvl_w);
-    assign id_exc[4:1] = {syscall, brk, ine, int};
-    assign id_exc_valid = |id_exc;
+               inst_rdcntid | inst_rdcntvh_w | inst_rdcntvl_w |
+               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | 
+               (inst_invtlb & (rd == 5'd0 | rd == 5'd1 | rd == 5'd2 | rd == 5'd3 | rd == 5'd4 | rd == 5'd5 | rd == 5'd6)));
+    assign {id_exc[9], id_exc[4:0]} = {int, syscall, brk, ine, ipe, fpd};
+    assign id_exc_valid = |id_exc || id_rf_valid;
     assign int = has_int;
     // has_int的产生逻辑在csr寄存器堆里
 endmodule

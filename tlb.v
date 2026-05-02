@@ -6,6 +6,7 @@ module tlb #
 )
 (
     input clk,
+    input reset,
 
     // 搜索端口port 0(if_stage)
     input  [18:0] s0_vppn,
@@ -141,11 +142,30 @@ module tlb #
                      | ({TLBNUM{invtlb_op == 5'd3}} & inv_cond1)
                      | ({TLBNUM{invtlb_op == 5'd4}} & inv_cond1 & inv_cond3)
                      | ({TLBNUM{invtlb_op == 5'd5}} & inv_cond1 & inv_cond3 & inv_cond4)
-                     | ({TLBNUM{invtlb_op == 5'd6}} & match1);
+                     | ({TLBNUM{invtlb_op == 5'd6}} & (inv_cond2 || inv_cond3) && inv_cond4);
 
     // 写逻辑
     always @(posedge clk) begin
-        if (invtlb_valid) begin
+        if (reset) begin
+            tlb_e   <= {TLBNUM{1'b0}};      // 所有项无效
+            tlb_ps  <= {TLBNUM{1'b0}};      // 默认为4KB页
+            for (integer i = 0; i < TLBNUM; i = i + 1) begin
+                tlb_vppn[i] <= 19'd0;
+                tlb_asid[i] <= 10'd0;
+                tlb_g[i]    <= 1'b0;
+                tlb_ppn0[i] <= 20'd0;
+                tlb_plv0[i] <= 2'd0;
+                tlb_mat0[i] <= 2'd0;
+                tlb_d0[i]   <= 1'b0;
+                tlb_v0[i]   <= 1'b0;
+                tlb_ppn1[i] <= 20'd0;
+                tlb_plv1[i] <= 2'd0;
+                tlb_mat1[i] <= 2'd0;
+                tlb_d1[i]   <= 1'b0;
+                tlb_v1[i]   <= 1'b0;
+            end
+        end
+        else if (invtlb_valid) begin
             tlb_e <= tlb_e & ~inv_match;
         end
         else if (we) begin

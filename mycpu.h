@@ -14,12 +14,14 @@
 // 流水线宽度定义
 // ============================================================================
 `define BR_BUS_WD           33                            // 分支总线宽度
-`define IF_TO_ID_BUS_WD     65                            // IF到ID总线
-`define ID_TO_EX_BUS_WD     282                           // ID到EX总线
-`define EX_TO_MEM_BUS_WD    227                           // EX到MEM总线
-`define MEM_TO_WB_BUS_WD    188                           // MEM到WB总线
+`define IF_TO_ID_BUS_WD     68                            // IF到ID总线
+`define ID_TO_EX_BUS_WD     293                           // ID到EX总线
+`define EX_TO_MEM_BUS_WD    241                           // EX到MEM总线
+`define MEM_TO_WB_BUS_WD    202                           // MEM到WB总线
 `define WB_TO_RF_BUS_WD     38                            // WB到寄存器文件
 `define WB_TO_CSR_BUS_WD    160                           // WB到CSR总线
+`define TLBCSR_BUS_WD       160                           // tlb相关CSR数据总线
+`define TLBRD_BUS_WD        101                           // WB到CSR TLB读数据总线
 
 // ============================================================================
 // CSR 寄存器地址

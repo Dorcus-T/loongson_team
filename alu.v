@@ -8,7 +8,7 @@ module alu(
   input   mem_ertn_flush,      // mem为ertn就不发起除法请求
   input   wb_exc_valid,        // wb有异常冲刷就不发起除法请求
   input   wb_ertn_flush,       // wb有ertn指令就不发出除法请求
-  input   [4:0] ex_exc,        // 在ex阶段之前产生的异常类型
+  input   [9:0] ex_exc,        // 在ex阶段之前产生的异常类型
   input   ex_valid,            // 无效的ex指令就不发起除法请求
   input   clk,                 // 时钟信号
   input   reset                // 复位信号（高有效）

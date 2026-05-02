@@ -16,12 +16,19 @@ module if_stage(
     output [31:0] inst_sram_addr,       // 指令SRAM地址
     output [31:0] inst_sram_wdata,      // 指令SRAM写数据（未使用）
     input  [31:0] inst_sram_rdata,      // 指令SRAM读数据
+    // 与MMU交互
+    output [31:0] if_to_mmu_vaddr,      // if发mmu虚地址
+    input  [31:0] padd,                 // MMU返回物理地址
+    input  [2:0]  if_tlb_exc,           // MMU返回tlb异常
     // 异常冲刷
-    input wb_exc_valid,                 // wb阶段有异常则冲刷流水线
+    input exc_no_rf,                    // wb阶段有异常则冲刷流水线
     input wb_ertn_flush,                // wb阶段有ertn指令则冲刷流水线
     // 来自csr寄存器堆
     input [31:0]exc_entry,              // 异常处理地址
-    input [31:0]exc_back_pc             // 异常返回地址
+    input [31:0]exc_back_pc,            // 异常返回地址
+    // 重取指相关
+    input rf_valid,                     // 重取指信号
+    input [31:0] rf_pc                  // 重取指地址
 );
 
     reg if_valid;                       // IF阶段有效标志
@@ -37,8 +44,7 @@ module if_stage(
     
     // ========== 异常信号 ==========
     wire to_if_adef;
-    reg if_adef;
-    wire if_exc;
+    reg  [3:0]  if_exc;
 
     // ========== 指令信息 ==========
     wire [31:0] if_inst;                // 当前取到的指令
@@ -53,13 +59,14 @@ module if_stage(
     // ========== 流水线控制 ========== 
     assign to_if_valid = ~reset;                                              // 预取指阶段：只要不复位就一直有效
     assign seq_pc = if_pc + 32'h4;                                            // 顺序PC = 当前PC + 4（指令长度4字节）
-    assign nextpc = wb_exc_valid  ? exc_entry   :                             // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
+    assign nextpc = exc_no_rf     ? exc_entry   :                             // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
+                    rf_valid      ? rf_pc       :                             // 重取指地址
                     wb_ertn_flush ? exc_back_pc :
                     br_taken      ? br_target   :
                                     seq_pc      ;
     // nextpc逻辑中异常和ertn的优先级高于brtaken，如果id和wb同时发来信号，优先处理wb的信号
     assign if_ready_go = ~br_taken;                                           //分支会阻塞if指令
-    assign if_allowin = !if_valid || (if_ready_go && id_allowin)|| br_taken || (wb_ertn_flush||wb_exc_valid);  //分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
+    assign if_allowin = !if_valid || (if_ready_go && id_allowin)|| br_taken || (wb_ertn_flush||exc_no_rf||rf_valid);  //分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
     assign if_to_id_valid = if_valid && if_ready_go;
     
     // 取值阶段有效标志更新
@@ -77,24 +84,23 @@ module if_stage(
         if (reset) begin
             // 复位时设置一个特殊值，使下一周期PC为0x1c000000（内存起始）
             if_pc <= 32'h1bfffffc;
-            if_adef <= 1'b0;
+            if_exc <= 4'b0;
         end
         else if (to_if_valid && if_allowin) begin
             // 当有分支跳转时，跳过延迟槽指令，直接跳转到目标
             if_pc <= nextpc;
-            if_adef <= to_if_adef;
+            if_exc <= {to_if_adef, if_tlb_exc};
         end
     end
 
     // ========== 指令存储器控制 ==========
-    assign inst_sram_en    = to_if_valid && if_allowin && !to_if_adef;  // 欲取值阶段有效且无异常，取值阶段可进入才可发出请求
+    assign inst_sram_en    = to_if_valid && if_allowin;  // 欲取值阶段有效，取值阶段可进入才可发出请求
     assign inst_sram_we = 4'h0;                                         // 指令SRAM只读，写使能为0
-    assign inst_sram_addr = nextpc;                                     // 使用下一周期PC作为取指地址
+    assign if_to_mmu_vaddr = nextpc;                                    // 使用下一周期地址作为查tlb虚地址
+    assign inst_sram_addr = padd;                                       // 使用物理地址作为取指地址
     assign inst_sram_wdata = 32'b0;                                     // 不写入数据
     assign if_inst = inst_sram_rdata;     
 
     // ========== 检测异常 ==========
     assign to_if_adef = nextpc[1:0] != 2'b00 && to_if_valid;
-    // preif阶段产生的异常就得跟着preif，不能标记到if中去
-    assign if_exc = if_adef;
 endmodule

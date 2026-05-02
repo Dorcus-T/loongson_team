@@ -32,9 +32,13 @@ module mem_stage(
     reg [`EX_TO_MEM_BUS_WD -1:0] ex_to_mem_bus_r;  // 锁存的执行级数据
     
     // ========== 异常信号 ==========
-    wire [5:0] mem_exc;
+    wire [15:0] mem_exc;
+    wire mem_rf_valid;                    // mem阶段重取指标志
 
     // ========== 控制信号解析 ==========
+    wire tlbrd_en;                        // WB读tlb并写csr
+    wire tlbwr_en;                        // tlbwrWB写tlb
+    wire tlbfill_en;                      
     wire res_from_mem;                    // 结果是否来自存储器
     wire gr_we;                           // 寄存器写使能
     wire [4:0] dest;                      // 目标寄存器号
@@ -60,16 +64,20 @@ module mem_stage(
   
     // ========== 解析来自EX阶段的总线 ==========
     assign {
-        timer_finalval,      // 226:195筛选后的计数器数据
-        res_from_timer,      // 194    结果来自计数器
-        res_from_csr,        // 193    结果来自csr寄存器堆
-        mem_csr_num,         // 192:179 csr号码
-        csr_rvalue,          // 178:147 csr读数据
-        csr_we,              // 146     csr写使能
-        csr_wmask,           // 145:114 csr写掩码
-        csr_wvalue,          // 113:82 csr写数据
-        ertn_flush,          // 81    异常返回冲刷信号
-        mem_exc,             // 80:75 异常类型
+        tlbrd_en,            // 240     tlbrd使能
+        tlbwr_en,            // 239     tlbwf使能
+        tlbfill_en,          // 238
+        mem_rf_valid,        // 237     重取指标志
+        timer_finalval,      // 236:205筛选后的计数器数据
+        res_from_timer,      // 204    结果来自计数器
+        res_from_csr,        // 203    结果来自csr寄存器堆
+        mem_csr_num,         // 202:189 csr号码
+        csr_rvalue,          // 188:157 csr读数据
+        csr_we,              // 156     csr写使能
+        csr_wmask,           // 155:124 csr写掩码
+        csr_wvalue,          // 123:92 csr写数据
+        ertn_flush,          // 91    异常返回冲刷信号
+        mem_exc,             // 90:75 异常类型
         res_from_mem,        // 74    结果来源
         mem_sign_ext,        // 73    符号扩展标志
         mem_size,            // 72:70 访存大小
@@ -81,12 +89,16 @@ module mem_stage(
     
     // ========== 输出到WB阶段的总线 ==========
     assign mem_to_wb_bus = {
-        mem_csr_num,         // 187:174 csr号码
-        csr_we,              // 173     csr写使能
-        csr_wmask,           // 172:141 csr写掩码
-        csr_wvalue,          // 140:109 csr写数据
-        ertn_flush,          // 108   异常返回冲刷信号
-        mem_exc,             // 107:102 异常类型 
+        tlbrd_en,            // 201     tlbrd使能
+        tlbwr_en,            // 200     tlbwf使能
+        tlbfill_en,          // 199
+        mem_rf_valid,        // 198     重取指标志
+        mem_csr_num,         // 197:184 csr号码
+        csr_we,              // 183     csr写使能
+        csr_wmask,           // 182:151 csr写掩码
+        csr_wvalue,          // 150:119 csr写数据
+        ertn_flush,          // 118   异常返回冲刷信号
+        mem_exc,             // 117:102 异常类型 
         alu_result,          // 101:70 传递异常访存地址
         gr_we,               // 69    寄存器写使能
         dest,                // 68:64 目标寄存器号
@@ -140,7 +152,7 @@ module mem_stage(
     assign mem_to_id_result = final_result;
 
     // ========== 检测异常与ertn ==========
-    assign mem_exc_valid = |mem_exc && mem_valid;
+    assign mem_exc_valid = (|mem_exc || mem_rf_valid) && mem_valid;
     assign mem_ertn_flush = ertn_flush && mem_valid; //mem的ertn要发挥作用必须得有效
 
     

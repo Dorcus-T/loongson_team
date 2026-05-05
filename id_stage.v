@@ -185,6 +185,7 @@ module id_stage(
     wire [4:0] dest;                     // 目的寄存器号
     wire ertn_flush;                     // 异常返回冲刷信号
     wire br_taken;                       // 分支是否发生
+    reg  new_br;                         // 跳转指令只能发送一次跳转信号
     wire [31:0] br_target;               // 分支目标地址
     wire [31:0] id_pc;                   // 当前指令的PC值
     wire [31:0] id_inst;                 // 当前指令的机器码
@@ -244,7 +245,8 @@ module id_stage(
     wire branch_stall;                   // 分支指令数据冒险需要停顿
     wire br_ld_stall;                    // 分支与ld冒险但是ld没取得数据
     wire csr_stall;                      // csr与ertn有关冒险
-   
+    
+
     // ========== 指令字段生成 ==========
     assign op_31_26 = id_inst[31:26];
     assign op_25_22 = id_inst[25:22];
@@ -473,6 +475,18 @@ module id_stage(
     assign rj_lt_rd_u  = !adder_cout;
     assign rj_ge_rd_u  = !rj_lt_rd_u;
     // ========== 分支控制逻辑 ==========
+    always @(posedge clk) begin
+        if(reset) begin
+           new_br <= 1'b0;
+        end
+        else if(if_to_id_valid && id_allowin) begin
+           new_br <= 1'b1;
+        end
+        else if(br_taken) begin
+           new_br <= 1'b0;
+        end
+    end
+
     assign br_taken = (   inst_beq  &&  rj_eq_rd
                        || inst_bne  && !rj_eq_rd
                        || inst_blt  &&  rj_lt_rd
@@ -482,7 +496,7 @@ module id_stage(
                        || inst_jirl
                        || inst_bl
                        || inst_b
-                    ) && id_valid && !load_use_stall && !branch_stall 
+                    ) && id_valid && !load_use_stall && !branch_stall && new_br
                       && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_exc_valid) && !id_exc_valid;  
     // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长

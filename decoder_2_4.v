@@ -1,6 +1,6 @@
 module decoder_2_4(
     input  wire [ 1:0] in,
-    output wire [ 3:0] out
+    output wire [3:0] out
 );
 
 genvar i;

@@ -26,21 +26,11 @@ module csr_regfile (
     // ========== CSR值输出（供流水线使用）==========
     wire [31:0] csr_crmd_rvalue;
     wire [31:0] csr_prmd_rvalue;
-    wire [31:0] csr_euen_rvalue;
     wire [31:0] csr_ecfg_rvalue;
     wire [31:0] csr_estat_rvalue;
     wire [31:0] csr_era_rvalue;
     wire [31:0] csr_badv_rvalue;
     wire [31:0] csr_eentry_rvalue;
-    wire [31:0] csr_tlbidx_rvalue;
-    wire [31:0] csr_tlbehi_rvalue;
-    wire [31:0] csr_tlbelo0_rvalue;
-    wire [31:0] csr_tlbelo1_rvalue;
-    wire [31:0] csr_asid_rvalue;
-    wire [31:0] csr_pgdl_rvalue;
-    wire [31:0] csr_pgdh_rvalue;
-    wire [31:0] csr_pgd_rvalue;
-    wire [31:0] csr_cpuid_rvalue;
     wire [31:0] csr_save0_rvalue;
     wire [31:0] csr_save1_rvalue;
     wire [31:0] csr_save2_rvalue;
@@ -49,11 +39,6 @@ module csr_regfile (
     wire [31:0] csr_tcfg_rvalue;
     wire [31:0] csr_tval_rvalue;
     wire [31:0] csr_ticlr_rvalue;
-    wire [31:0] csr_llbctl_rvalue;
-    wire [31:0] csr_tlbrentry_rvalue;
-    wire [31:0] csr_ctag_rvalue;
-    wire [31:0] csr_dmw0_rvalue;
-    wire [31:0] csr_dmw1_rvalue;
     // ========== 内部生成定时器中断 ==========
     wire timer_inter;
 
@@ -83,101 +68,142 @@ module csr_regfile (
         wb_exc_pc           // [31:0]    32位 异常PC（ERA）
     } = wb_to_csr_bus;
     // ========== CRMD寄存器域定义 ==========
-    reg  [31:0] csr_crmd;
-    reg  [31:0] csr_prmd;
-    reg  [31:0] csr_euen;
-    reg  [31:0] csr_ecfg;
-    reg  [31:0] csr_estat;
-    reg  [31:0] csr_era;
-    reg  [31:0] csr_badv;
-    reg  [31:0] csr_eentry;
-    reg  [31:0] csr_tlbidx;
-    reg  [31:0] csr_tlbehi;
-    reg  [31:0] csr_tlbelo0;
-    reg  [31:0] csr_tlbelo1;
-    reg  [31:0] csr_asid;
-    reg  [31:0] csr_pgdl;
-    reg  [31:0] csr_pgdh;
-    reg  [31:0] csr_pgd;
-    reg  [31:0] csr_cpuid;
-    reg  [31:0] csr_save0;
-    reg  [31:0] csr_save1;
-    reg  [31:0] csr_save2;
-    reg  [31:0] csr_save3;
-    reg  [31:0] csr_tid;
-    reg  [31:0] csr_tcfg;
-    wire [31:0] tcfg_next_value;   // 定时器下次加载值 
-    reg  [31:0] csr_tval;
-    reg  [31:0] csr_ticlr;
-    reg  [31:0] csr_llbctl;
-    reg  [31:0] csr_tlbrentry;
-    reg  [31:0] csr_ctag;
-    reg  [31:0] csr_dmw0;
-    reg  [31:0] csr_dmw1;
+    // 位[1:0]   csr_crmd_plv - 特权级 (0=内核态, 3=用户态)
+    // 位[2]     csr_crmd_ie  - 中断使能 (1=开启)
+    // 位[3]     csr_crmd_da  - 地址对齐检查 (1=开启)
+    // 位[4]     csr_crmd_pg  - 页表使能 (1=开启MMU)
+    // 位[6:5]   csr_crmd_datf - 数据访存失效 (1=开启)
+    // 位[8:7]   csr_crmd_datm - 数据访存修改 (1=开启)
+    // 位[31:9]  保留 - 读返回0
+    reg  [1:0]  csr_crmd_plv;     // [1:0] 特权级
+    reg         csr_crmd_ie;      // [2] 中断使能
+    wire         csr_crmd_da;     // [3] 地址对齐检查
+    wire         csr_crmd_pg;     // [4] 页表使能
+    wire  [1:0]  csr_crmd_datf;   // [6:5] 数据访存失效
+    wire  [1:0]  csr_crmd_datm;   // [8:7] 数据访存修改
+    
+    // ========== PRMD寄存器域定义 ==========
+    // 位[1:0]   csr_prmd_pplv - 前任特权级
+    // 位[2]     csr_prmd_pie  - 前任中断使能
+    // 位[31:3]  保留
+    reg  [1:0]  csr_prmd_pplv;    // [1:0] 前任特权级
+    reg         csr_prmd_pie;     // [2] 前任中断使能
+    
+    // ========== ECFG寄存器域定义 ==========
+    // 位[12:0]   csr_ecfg_lie - 局部中断使能,位10保留
+    // 位[31:13] 保留
+    reg  [12:0]  csr_ecfg_lie;    // [12:0] 局部中断使能  
 
-    // ========== CSR寄存器读逻辑 ==========
-    assign csr_crmd_rvalue = {23'b0, csr_crmd[8:0]};
-    assign csr_prmd_rvalue = {29'b0, csr_prmd[2:0]};
-    assign csr_euen_rvalue = {31'b0, csr_euen[0]};
-    assign csr_ecfg_rvalue = {19'b0, csr_ecfg[12:11], 1'b0, csr_ecfg[9:0]};
-    assign csr_estat_rvalue = {1'b0, csr_estat[30:16], 3'b0, csr_estat[12:11], 1'b0, csr_estat[9:0]};
-    assign csr_era_rvalue = csr_era;
-    assign csr_badv_rvalue = csr_badv;
-    assign csr_eentry_rvalue = {csr_eentry[31:6], 6'b0};
-    assign csr_tlbidx_rvalue = {csr_tlbidx[31], 1'b0, csr_tlbidx[29:24], 19'b0, csr_tlbidx[`CSR_TLBIDX_INDEX]};
-    assign csr_tlbehi_rvalue = {csr_tlbehi[31:13], 13'b0};
-    assign csr_tlbelo0_rvalue = {4'b0, csr_tlbelo0[27:8], 1'b0, csr_tlbelo0[6:0]};
-    assign csr_tlbelo1_rvalue = {4'b0, csr_tlbelo1[27:8], 1'b0, csr_tlbelo1[6:0]};
-    assign csr_asid_rvalue = {8'b0, csr_asid[23:16], 6'b0, csr_asid[9:0]};
-    assign csr_pgdl_rvalue = {csr_pgdl[31:12], 12'b0};
-    assign csr_pgdh_rvalue = {csr_pgdh[31:12], 12'b0};
-    assign csr_pgd_rvalue = {csr_pgd[31:12], 12'b0};
-    assign csr_cpuid_rvalue = {23'b0, csr_cpuid[8:0]};
-    assign csr_save0_rvalue = csr_save0;
-    assign csr_save1_rvalue = csr_save1;
-    assign csr_save2_rvalue = csr_save2;
-    assign csr_save3_rvalue = csr_save3;
-    assign csr_tid_rvalue = csr_tid;
-    assign csr_tcfg_rvalue = csr_tcfg;
-    assign csr_tval_rvalue = csr_tval;
-    assign csr_ticlr_rvalue = 32'b0;
-    assign csr_llbctl_rvalue = {29'b0, csr_llbctl[2], 1'b0, csr_llbctl[1:0]};
-    assign csr_tlbrentry_rvalue = {csr_tlbrentry[31:6], 6'b0};
-    assign csr_ctag_rvalue = 32'b0;//占位
-    assign csr_dmw0_rvalue = {csr_dmw0[31:29], 1'b0, csr_dmw0[27:25], 19'b0, csr_dmw0[5:3], 2'b0, csr_dmw0[0]};
-    assign csr_dmw1_rvalue = {csr_dmw1[31:29], 1'b0, csr_dmw1[27:25], 19'b0, csr_dmw1[5:3], 2'b0, csr_dmw1[0]};
+    // ========== ESTAT寄存器域定义 ==========
+    // 位[1:0]   csr_estat_is  s_9_2   - 硬件中断状态位 (8位)
+    // 位[10]    保留
+    // 位[11]    csr_estat_is_11    - 定时器中断状态位 (1位)
+    // 位[12]    csr_estat_is_12    - 核间中断状态位 (1位)
+    // 位[15:13] 保留
+    // 位[21:16] csr_estat_ecode    - 异常码 (6位)
+    // 位[30:22] csr_estat_esubcode - 异常子码 (9位)
+    // 位[31]    保留
+    reg  [12:0] csr_estat_is;       // [12:0] 中断状态位
+    reg  [5:0]  csr_estat_ecode;    // [21:16] 异常码
+    reg  [8:0]  csr_estat_esubcode; // [30:22] 异常子码
+    
+    // ========== ERA寄存器 ==========
+    // 位[31:0] csr_era_pc - 异常返回地址
+    reg  [31:0] csr_era_pc;      // 异常返回地址
+    
+    // ========== BADV寄存器 ==========
+    // 位[31:0] csr_badv_vaddr - 错误虚拟地址
+    reg  [31:0] csr_badv_vaddr;    // 错误地址
+    wire        wb_exc_addr_err;   // WB阶段发生地址有关错误
+
+    // ========== EENTRY寄存器域定义 ==========
+    // 位[5:0]   保留
+    // 位[31:6]  csr_eentry_va - 异常入口地址
+    reg  [25:0] csr_eentry_va;       // 异常入口地址完整值
+    
+    // ========== SAVE0-3寄存器 ==========
+    // 位[31:0] 通用保存寄存器
+    reg  [31:0] csr_save0_data;    // 保存寄存器0
+    reg  [31:0] csr_save1_data;    // 保存寄存器1
+    reg  [31:0] csr_save2_data;    // 保存寄存器2
+    reg  [31:0] csr_save3_data;    // 保存寄存器3
+    
+    // ========== TID寄存器 ==========
+    // 位[31:0] csr_tid - 定时器ID
+    reg  [31:0] csr_tid_tid;       // 定时器ID
+    
+    // ========== TCFG寄存器域定义 ==========
+    // 位[0]     csr_tcfg_en       - 定时器使能 (1=开启)
+    // 位[1]     csr_tcfg_periodic - 周期模式 (1=周期, 0=单次)
+    // 位[31:2]  csr_tcfg_initval  - 计数初始值
+    reg         csr_tcfg_en;       // [0] 定时器使能
+    reg         csr_tcfg_periodic; // [1] 周期模式
+    reg  [29:0] csr_tcfg_initval;  // [31:2] 定时器初始值
+    
+    // ========== TVAL寄存器域定义 ==========
+    reg  [31:0] csr_tval_timeval;  // 定时器当前值
+    wire [31:0] tcfg_next_value;   // 定时器下次加载值        
+    
+    // ========== TICLR寄存器域定义 ========== 
+    wire         csr_ticlr_clr;    //定时中断清除信号
+
+
+    // ========== 组合逻辑：CRMD寄存器组装 ==========
+    assign csr_crmd_rvalue = {23'b0, csr_crmd_datm, csr_crmd_datf, csr_crmd_pg, 
+                         csr_crmd_da, csr_crmd_ie, csr_crmd_plv};
+    
+    // ========== 组合逻辑：PRMD寄存器组装 ==========
+    assign csr_prmd_rvalue = {29'b0, csr_prmd_pie, csr_prmd_pplv};
+    
+    // ========== 组合逻辑：ECFG寄存器组装 ==========
+    assign csr_ecfg_rvalue = {19'b0, csr_ecfg_lie};
+    
+    // ========== 组合逻辑：ESTAT寄存器组装 ==========
+    assign csr_estat_rvalue = {1'b0, csr_estat_esubcode, csr_estat_ecode, 
+                          3'b0, csr_estat_is};
+    // ========== 组合逻辑：ERA寄存器组装 ==========
+    assign csr_era_rvalue = csr_era_pc;
+
+    // ========== 组合逻辑：BADV寄存器组装 ==========
+    assign csr_badv_rvalue = csr_badv_vaddr;
+
+    // ========== 组合逻辑：EENTRY寄存器组装 ==========;
+    assign csr_eentry_rvalue = {csr_eentry_va, 6'b0};  // 64KB对齐
+    
+    // ========== 组合逻辑：SAVE0-3寄存器组装 ==========
+    assign csr_save0_rvalue = csr_save0_data;
+    assign csr_save1_rvalue = csr_save1_data;
+    assign csr_save2_rvalue = csr_save2_data;
+    assign csr_save3_rvalue = csr_save3_data;
+
+    // ========== 组合逻辑：TID寄存器组装 ==========
+    assign csr_tid_rvalue = csr_tid_tid;
+
+    // ========== 组合逻辑：TCFG寄存器组装 ==========
+    assign csr_tcfg_rvalue = {csr_tcfg_initval, csr_tcfg_periodic, csr_tcfg_en};
+    
+    // ========== 组合逻辑：TVAL寄存器组装 ==========
+    assign csr_tval_rvalue = csr_tval_timeval;
+
+    // ========== 组合逻辑：TICLR寄存器组装 ==========
+    assign csr_ticlr_rvalue = {30'b0, csr_ticlr_clr};  
     
     // ========== CSR读操作 ==========
-    assign csr_rvalue = ({32{csr_id_num == `CSR_CRMD}}     & csr_crmd_rvalue)     |
-                        ({32{csr_id_num == `CSR_PRMD}}     & csr_prmd_rvalue)     |
-                        ({32{csr_id_num == `CSR_EUEN}}     & csr_euen_rvalue)     |
-                        ({32{csr_id_num == `CSR_ECFG}}     & csr_ecfg_rvalue)     |
-                        ({32{csr_id_num == `CSR_ESTAT}}    & csr_estat_rvalue)    |
-                        ({32{csr_id_num == `CSR_ERA}}      & csr_era_rvalue)      |
-                        ({32{csr_id_num == `CSR_BADV}}     & csr_badv_rvalue)     |
-                        ({32{csr_id_num == `CSR_EENTRY}}   & csr_eentry_rvalue)   |
-                        ({32{csr_id_num == `CSR_TLBIDX}}   & csr_tlbidx_rvalue)   |
-                        ({32{csr_id_num == `CSR_TLBEHI}}   & csr_tlbidx_rvalue)   |
-                        ({32{csr_id_num == `CSR_TLBELO0}}  & csr_tlbelo0_rvalue)  |
-                        ({32{csr_id_num == `CSR_TLBELO1}}  & csr_tlbelo1_rvalue)  |
-                        ({32{csr_id_num == `CSR_ASID}}     & csr_asid_rvalue)     |
-                        ({32{csr_id_num == `CSR_PGDL}}     & csr_pgdl_rvalue)     |
-                        ({32{csr_id_num == `CSR_PGDH}}     & csr_pgdh_rvalue)     |
-                        ({32{csr_id_num == `CSR_PGD}}      & csr_pgd_rvalue)      |
-                        ({32{csr_id_num == `CSR_CPUID}}    & csr_cpuid_rvalue)    |
-                        ({32{csr_id_num == `CSR_SAVE0}}    & csr_save0_rvalue)    |
-                        ({32{csr_id_num == `CSR_SAVE1}}    & csr_save1_rvalue)    |
-                        ({32{csr_id_num == `CSR_SAVE2}}    & csr_save2_rvalue)    |
-                        ({32{csr_id_num == `CSR_SAVE3}}    & csr_save3_rvalue)    |
-                        ({32{csr_id_num == `CSR_TID}}      & csr_tid_rvalue)      |
-                        ({32{csr_id_num == `CSR_TCFG}}     & csr_tcfg_rvalue)     |
-                        ({32{csr_id_num == `CSR_TVAL}}     & csr_tval_rvalue)     |
-                        ({32{csr_id_num == `CSR_TICLR}}    & csr_ticlr_rvalue)    |
-                        ({32{csr_id_num == `CSR_LLBCTL}}   & csr_llbctl_rvalue)   |
-                        ({32{csr_id_num == `CSR_TLBRENTRY}}& csr_tlbrentry_rvalue)|
-                        ({32{csr_id_num == `CSR_CTAG}}     & csr_ctag_rvalue)     |
-                        ({32{csr_id_num == `CSR_DMW0}}     & csr_dmw0_rvalue)     |
-                        ({32{csr_id_num == `CSR_DMW1}}     & csr_dmw1_rvalue);
+    assign csr_rvalue = ({32{csr_id_num == `CSR_CRMD}}   & csr_crmd_rvalue)   |
+                        ({32{csr_id_num == `CSR_PRMD}}   & csr_prmd_rvalue)   |
+                        ({32{csr_id_num == `CSR_ECFG}}   & csr_ecfg_rvalue)   |
+                        ({32{csr_id_num == `CSR_ESTAT}}  & csr_estat_rvalue)  |
+                        ({32{csr_id_num == `CSR_ERA}}    & csr_era_rvalue)    |
+                        ({32{csr_id_num == `CSR_BADV}}   & csr_badv_rvalue)   |
+                        ({32{csr_id_num == `CSR_EENTRY}} & csr_eentry_rvalue) |
+                        ({32{csr_id_num == `CSR_SAVE0}}  & csr_save0_rvalue)  |
+                        ({32{csr_id_num == `CSR_SAVE1}}  & csr_save1_rvalue)  |
+                        ({32{csr_id_num == `CSR_SAVE2}}  & csr_save2_rvalue)  |
+                        ({32{csr_id_num == `CSR_SAVE3}}  & csr_save3_rvalue)  |
+                        ({32{csr_id_num == `CSR_TID}}    & csr_tid_rvalue)    |
+                        ({32{csr_id_num == `CSR_TCFG}}   & csr_tcfg_rvalue)   |
+                        ({32{csr_id_num == `CSR_TVAL}}   & csr_tval_rvalue)   |
+                        ({32{csr_id_num == `CSR_TICLR}}  & csr_ticlr_rvalue);
 
 
     // ========== CSR写操作（按域实现，每个域一个always块）========== 
@@ -185,102 +211,93 @@ module csr_regfile (
     //写PLV、IE
     always @(posedge clk) begin
         if (reset) begin
-            csr_crmd[`CSR_CRMD_PLV] <= 2'b0;
-            csr_crmd[`CSR_CRMD_IE] <= 1'b0;
-            //占位
-            csr_crmd[`CSR_CRMD_DA]   = 1'b1;
-            csr_crmd[`CSR_CRMD_PG]   = 1'b0;
-            csr_crmd[`CSR_CRMD_DATF] = 2'b00;
-            csr_crmd[`CSR_CRMD_DATM] = 2'b00;
-            //占位
+            csr_crmd_plv <= 2'b0;
+            csr_crmd_ie <= 1'b0;
         end    
         else if (wb_exc_valid) begin
-            csr_crmd[`CSR_CRMD_PLV] <= 2'b0;
-            csr_crmd[`CSR_CRMD_IE]  <= 1'b0;
+            csr_crmd_plv <= 2'b0;
+            csr_crmd_ie  <= 1'b0;
         end
         else if (wb_ertn_flush) begin
-            csr_crmd[`CSR_CRMD_PLV] <= csr_prmd[`CSR_PRMD_PPLV];
-            csr_crmd[`CSR_CRMD_IE]  <= csr_prmd[`CSR_PRMD_PIE];
+            csr_crmd_plv <= csr_prmd_pplv;
+            csr_crmd_ie  <= csr_prmd_pie;
         end    
         else if (csr_we && csr_num==`CSR_CRMD) begin
-            csr_crmd[`CSR_CRMD_PLV] <= csr_wmask[`CSR_CRMD_PLV]&csr_wvalue[`CSR_CRMD_PLV]
-                         | ~csr_wmask[`CSR_CRMD_PLV]&csr_crmd[`CSR_CRMD_PLV];
-            csr_crmd[`CSR_CRMD_IE] <= csr_wmask[`CSR_CRMD_IE]&csr_wvalue[`CSR_CRMD_IE]
-                        | ~csr_wmask[`CSR_CRMD_IE]&csr_crmd[`CSR_CRMD_IE];
+            csr_crmd_plv <= csr_wmask[`CSR_CRMD_PLV]&csr_wvalue[`CSR_CRMD_PLV]
+                         | ~csr_wmask[`CSR_CRMD_PLV]&csr_crmd_plv;
+            csr_crmd_ie <= csr_wmask[`CSR_CRMD_IE]&csr_wvalue[`CSR_CRMD_IE]
+                        | ~csr_wmask[`CSR_CRMD_IE]&csr_crmd_ie;
         end
     end
+    //写DA、PG、DATF、DATM
+    assign csr_crmd_da   = 1'b1;
+    assign csr_crmd_pg   = 1'b0;
+    assign csr_crmd_datf = 2'b00;
+    assign csr_crmd_datm = 2'b00;
     
     // ========== PRMD写操作 ==========
     //写PPLV、PIE
     always @(posedge clk) begin
         if (reset) begin
-            csr_prmd[`CSR_PRMD_PPLV] <= 2'b0;
-            csr_prmd[`CSR_PRMD_PIE] <= 1'b0;
+            csr_prmd_pplv <= 2'b0;
+            csr_prmd_pie <= 1'b0;
         end 
         else if (wb_exc_valid) begin
-            csr_prmd[`CSR_PRMD_PPLV] <= csr_crmd[`CSR_CRMD_PLV];
-            csr_prmd[`CSR_PRMD_PIE]  <= csr_crmd[`CSR_CRMD_IE];
+            csr_prmd_pplv <= csr_crmd_plv;
+            csr_prmd_pie  <= csr_crmd_ie;
         end
         else if (csr_we && csr_num==`CSR_PRMD) begin
-            csr_prmd[`CSR_PRMD_PPLV] <= csr_wmask[`CSR_PRMD_PPLV]&csr_wvalue[`CSR_PRMD_PPLV]
-                         | ~csr_wmask[`CSR_PRMD_PPLV]&csr_prmd[`CSR_PRMD_PPLV];
-            csr_prmd[`CSR_PRMD_PIE] <= csr_wmask[`CSR_PRMD_PIE]&csr_wvalue[`CSR_PRMD_PIE]
-                         | ~csr_wmask[`CSR_PRMD_PIE]&csr_prmd[`CSR_PRMD_PIE];
+            csr_prmd_pplv <= csr_wmask[`CSR_PRMD_PPLV]&csr_wvalue[`CSR_PRMD_PPLV]
+                         | ~csr_wmask[`CSR_PRMD_PPLV]&csr_prmd_pplv;
+            csr_prmd_pie <= csr_wmask[`CSR_PRMD_PIE]&csr_wvalue[`CSR_PRMD_PIE]
+                         | ~csr_wmask[`CSR_PRMD_PIE]&csr_prmd_pie;
         end
     end
-    // ========== EUEN写操作 ==========
-    //占位
-    always @(posedge clk) begin
-        if(reset) begin
-            csr_euen[`CSR_EUEN_FPE] <= 1'b1;
-        end
-    end
-    //占位
     // ========== ECFG写操作 ==========
     //写LIE
     always @(posedge clk) begin
         if (reset) begin
-            csr_ecfg[`CSR_ECFG_LIE] <= 13'b0;
+            csr_ecfg_lie <= 13'b0;
         end
         else if (csr_we && csr_num == `CSR_ECFG) begin
-            csr_ecfg[10] <= 1'b0;
-            csr_ecfg[9:0] <= (csr_wmask[9:0] & csr_wvalue[9:0]) 
-                               | (~csr_wmask[9:0] & csr_ecfg[9:0]);
-            csr_ecfg[12:11] <= (csr_wmask[12:11] & csr_wvalue[12:11]) 
-                                 | (~csr_wmask[12:11] & csr_ecfg[12:11]);
+            csr_ecfg_lie[10] <= 1'b0;
+            csr_ecfg_lie[9:0] <= (csr_wmask[9:0] & csr_wvalue[9:0]) 
+                               | (~csr_wmask[9:0] & csr_ecfg_lie[9:0]);
+            csr_ecfg_lie[12:11] <= (csr_wmask[12:11] & csr_wvalue[12:11]) 
+                                 | (~csr_wmask[12:11] & csr_ecfg_lie[12:11]);
         end
     end
     // ========== ESTAT写操作 ==========
     //写IS
     always @(posedge clk) begin
         if (reset) begin
-            csr_estat[`CSR_ESTAT_IS10] <= 2'b0;
+            csr_estat_is[1:0] <= 2'b0;
         end
         else if (csr_we && csr_num==`CSR_ESTAT) begin
-            csr_estat[`CSR_ESTAT_IS10] <= csr_wmask[`CSR_ESTAT_IS10]&csr_wvalue[`CSR_ESTAT_IS10]
-                               | ~csr_wmask[`CSR_ESTAT_IS10]&csr_estat[`CSR_ESTAT_IS10];    
+            csr_estat_is[1:0] <= csr_wmask[`CSR_ESTAT_IS10]&csr_wvalue[`CSR_ESTAT_IS10]
+                               | ~csr_wmask[`CSR_ESTAT_IS10]&csr_estat_is[1:0];    
         end
-        csr_estat[`CSR_ESTAT_IS92] <= hw_inter_num[7:0];
-        csr_estat[10] <= 1'b0;
+        csr_estat_is[9:2] <= hw_inter_num[7:0];
+        csr_estat_is[10] <= 1'b0;
         if (timer_inter)
-            csr_estat[11] <= 1'b1;
+            csr_estat_is[11] <= 1'b1;
         else if (csr_we && csr_num==`CSR_TICLR && csr_wmask[`CSR_TICLR_CLR]
                  && csr_wvalue[`CSR_TICLR_CLR])
-            csr_estat[11] <= 1'b0;
+            csr_estat_is[11] <= 1'b0;
 
-        csr_estat[12] <= ipi_inter; 
+        csr_estat_is[12] <= ipi_inter; 
     end
-    assign timer_inter = (csr_tval == 32'b0);
+    assign timer_inter = (csr_tval_timeval == 32'b0);
 
    //写Ecode、EsubCode
    always @(posedge clk) begin
         if (reset) begin
-            csr_estat[`CSR_ESTAT_ECODE]     <= 6'b0;
-            csr_estat[`CSR_ESTAT_ESUBCODE] <= 9'b0;
+            csr_estat_ecode     <= 6'b0;
+            csr_estat_esubcode <= 9'b0;
         end
         else if (wb_exc_valid) begin
-            csr_estat[`CSR_ESTAT_ECODE]     <= wb_exc_ecode;
-            csr_estat[`CSR_ESTAT_ESUBCODE] <= wb_exc_esubcode;
+            csr_estat_ecode     <= wb_exc_ecode;
+            csr_estat_esubcode <= wb_exc_esubcode;
         end
         
     end
@@ -288,14 +305,14 @@ module csr_regfile (
     //写PC
     always @(posedge clk) begin
         if (reset) begin
-            csr_era <= 32'b0;
+            csr_era_pc <= 32'b0;
         end 
         else if (wb_exc_valid) begin
-            csr_era <= wb_exc_pc;
+            csr_era_pc <= wb_exc_pc;
         end
         else if (csr_we && csr_num==`CSR_ERA)
-            csr_era <= csr_wmask[`CSR_ERA_PC]&csr_wvalue[`CSR_ERA_PC]
-                        |~csr_wmask[`CSR_ERA_PC]&csr_era;
+            csr_era_pc <= csr_wmask[`CSR_ERA_PC]&csr_wvalue[`CSR_ERA_PC]
+                        |~csr_wmask[`CSR_ERA_PC]&csr_era_pc;
     end
     // ========== BADV写操作 ==========
     //写VADDR
@@ -303,11 +320,11 @@ module csr_regfile (
 
     always @(posedge clk) begin
         if (reset) begin
-            csr_badv <= 32'b0;
+            csr_badv_vaddr <= 32'b0;
         end 
         else if (wb_exc_valid && wb_exc_addr_err) begin
-            csr_badv <= (wb_exc_ecode==`ECODE_ADE &&
-                            wb_exc_esubcode==`ESUBCODE_ADEF) ? wb_exc_pc : wb_exc_badv;
+            csr_badv_vaddr <= (wb_exc_ecode==`ECODE_ADE &&
+                               wb_exc_esubcode==`ESUBCODE_ADEF) ? wb_exc_pc : wb_exc_badv;
         end
     end
 
@@ -315,44 +332,44 @@ module csr_regfile (
     //写VA
     always @(posedge clk) begin
         if (reset) begin
-            csr_eentry[`CSR_EENTRY_VA] <= 26'b0;
+            csr_eentry_va <= 26'b0;
         end 
         else if (csr_we && csr_num==`CSR_EENTRY) begin
-            csr_eentry[`CSR_EENTRY_VA] <= csr_wmask[`CSR_EENTRY_VA]&csr_wvalue[`CSR_EENTRY_VA]
-                           |~csr_wmask[`CSR_EENTRY_VA]&csr_eentry[`CSR_EENTRY_VA];
+            csr_eentry_va <= csr_wmask[`CSR_EENTRY_VA]&csr_wvalue[`CSR_EENTRY_VA]
+                           |~csr_wmask[`CSR_EENTRY_VA]&csr_eentry_va;
         end
     end
     
     // ========== SAVE0~3写操作 ==========
     always @(posedge clk) begin
         if (reset) begin
-            csr_save0 <= 32'b0;
-            csr_save1 <= 32'b0;
-            csr_save2 <= 32'b0;
-            csr_save3 <= 32'b0;
+            csr_save0_data <= 32'b0;
+            csr_save1_data <= 32'b0;
+            csr_save2_data <= 32'b0;
+            csr_save3_data <= 32'b0;
         end 
         else if (csr_we && csr_num==`CSR_SAVE0) 
-            csr_save0 <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
-                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save0;
+            csr_save0_data <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
+                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save0_data;
         else if (csr_we && csr_num==`CSR_SAVE1) 
-            csr_save1 <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
-                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save1;
+            csr_save1_data <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
+                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save1_data;
         else if (csr_we && csr_num==`CSR_SAVE2) 
-            csr_save2 <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
-                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save2;
+            csr_save2_data <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
+                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save2_data;
         else if (csr_we && csr_num==`CSR_SAVE3) 
-            csr_save3 <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
-                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save3;
+            csr_save3_data <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
+                            |~csr_wmask[`CSR_SAVE_DATA]&csr_save3_data;
     end
     
     // ========== TID写操作 ==========
     //写TID
     always @(posedge clk) begin
         if (reset) begin
-            csr_tid <= coreid_in;
+            csr_tid_tid <= coreid_in;
         end else if (csr_we && csr_num ==`CSR_TID) begin
-            csr_tid <= csr_wmask[`CSR_TID_TID]&csr_wvalue[`CSR_TID_TID]
-                         |~csr_wmask[`CSR_TID_TID]&csr_tid;
+            csr_tid_tid <= csr_wmask[`CSR_TID_TID]&csr_wvalue[`CSR_TID_TID]
+                         |~csr_wmask[`CSR_TID_TID]&csr_tid_tid;
         end
     end
     
@@ -360,52 +377,48 @@ module csr_regfile (
     //写EN、Periodic、InitVal
     always @(posedge clk) begin
         if (reset) begin
-            csr_tcfg[`CSR_TCFG_EN] <= 1'b0;
-            csr_tcfg[`CSR_TCFG_PERIODIC] <= 1'b0;
-            csr_tcfg[`CSR_TCFG_INITVAL] <= 30'b0;
+            csr_tcfg_en <= 1'b0;
+            csr_tcfg_periodic <= 1'b0;
+            csr_tcfg_initval <= 30'b0;
         end
         else if (csr_we && csr_num ==`CSR_TCFG) begin 
-            csr_tcfg[`CSR_TCFG_EN] <= csr_wmask[`CSR_TCFG_EN]&csr_wvalue[`CSR_TCFG_EN]
-                         |~csr_wmask[`CSR_TCFG_EN]&csr_tcfg[`CSR_TCFG_EN];
-            csr_tcfg[`CSR_TCFG_PERIODIC] <= csr_wmask[`CSR_TCFG_PERIODIC]&csr_wvalue[`CSR_TCFG_PERIODIC]
-                               |~csr_wmask[`CSR_TCFG_PERIODIC]&csr_tcfg[`CSR_TCFG_PERIODIC];
-            csr_tcfg[`CSR_TCFG_INITVAL] <= csr_wmask[`CSR_TCFG_INITVAL]&csr_wvalue[`CSR_TCFG_INITVAL]
-                              |~csr_wmask[`CSR_TCFG_INITVAL]&csr_tcfg[`CSR_TCFG_INITVAL];
+            csr_tcfg_en <= csr_wmask[`CSR_TCFG_EN]&csr_wvalue[`CSR_TCFG_EN]
+                         |~csr_wmask[`CSR_TCFG_EN]&csr_tcfg_en;
+            csr_tcfg_periodic <= csr_wmask[`CSR_TCFG_PERIODIC]&csr_wvalue[`CSR_TCFG_PERIODIC]
+                               |~csr_wmask[`CSR_TCFG_PERIODIC]&csr_tcfg_periodic;
+            csr_tcfg_initval <= csr_wmask[`CSR_TCFG_INITVAL]&csr_wvalue[`CSR_TCFG_INITVAL]
+                              |~csr_wmask[`CSR_TCFG_INITVAL]&csr_tcfg_initval;
         end
     end
 
     // ========== TVAL写操作 ==========
     assign tcfg_next_value = csr_wmask[31:0]&csr_wvalue[31:0]
-                           |~csr_wmask[31:0]&csr_tcfg;
+                           |~csr_wmask[31:0]&{csr_tcfg_initval,csr_tcfg_periodic,csr_tcfg_en};
                     
     always @(posedge clk) begin
         if (reset) begin
-            csr_tval <= 32'hffffffff;
+            csr_tval_timeval <= 32'hffffffff;
         end else if (csr_we && csr_num == `CSR_TCFG && tcfg_next_value[`CSR_TCFG_EN])
-            csr_tval <= {tcfg_next_value[`CSR_TCFG_INITVAL], 2'b0};
-            else if (csr_tcfg[`CSR_TCFG_EN] && csr_tval!=32'hffffffff) begin
-                if (csr_tval==32'b0 && csr_tcfg[`CSR_TCFG_PERIODIC])
-                    csr_tval <= {csr_tcfg[`CSR_TCFG_INITVAL], 2'b0};
+            csr_tval_timeval <= {tcfg_next_value[`CSR_TCFG_INITVAL], 2'b0};
+            else if (csr_tcfg_en && csr_tval_timeval!=32'hffffffff) begin
+                if (csr_tval_timeval[31:0]==32'b0 && csr_tcfg_periodic)
+                    csr_tval_timeval <= {csr_tcfg_initval, 2'b0};
                 else
-                    csr_tval <= csr_tval - 1'b1;
+                    csr_tval_timeval <= csr_tval_timeval - 1'b1;
             end
     end                    
    
     // ========== TICLR写操作 ==========
     //写CLR
-    always @(posedge clk) begin
-        if(reset) begin
-            csr_ticlr <= 32'b0;
-        end
-    end
+    assign csr_ticlr_clr = 1'b0;
     
     // ========== 中断状态输出给ID阶段 ==========
     // 计算使能的中断（受csr_crmd_ie和csr_ecfg_lie控制，且不在异常处理中）
-    assign has_int = ((csr_estat[12:0] & csr_ecfg[12:0]) != 13'b0) && (csr_crmd[`CSR_CRMD_IE] == 1'b1);
+    assign has_int = ((csr_estat_is[12:0] & csr_ecfg_lie[12:0]) != 13'b0) && (csr_crmd_ie == 1'b1);
 
     // ========== 输出地址计算 ==========
     // 异常入口地址（直接模式）
-    assign exc_entry = {csr_eentry[`CSR_EENTRY_VA], 6'b0};
-    assign exc_back_pc = csr_era;
+    assign exc_entry = {csr_eentry_va, 6'b0};
+    assign exc_back_pc = csr_era_pc;
     
 endmodule

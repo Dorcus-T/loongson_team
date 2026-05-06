@@ -258,8 +258,6 @@ module mycpu_top(
     .padd(paddr_to_ex),
     .srch_value(srch_value),
     .mem_tlb_exc(ex_tlb_exc),
-    .data_sram_en(data_sram_en),
-    .data_sram_we(data_sram_we),
     .data_sram_addr(data_sram_addr),
     .data_sram_wdata(data_sram_wdata),
     .data_sram_addr_ok(data_sram_addr_ok),

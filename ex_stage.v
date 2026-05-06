@@ -56,7 +56,6 @@ module exe_stage(
     wire [12:0] ex_exc;
     wire [15:0] mem_exc;
     wire [4:0]  valid_mem_tlb_exc;
-    wire ex_exc_valid;   // EX阶段异常检测
     wire ex_rf_valid;    // EX阶段重取指标志
     wire ex_inst_valid;  // 判断指令能否正常起效
     wire [31:0] result_or_badv; // 若取指阶段为tlb相关异常，替换为pc
@@ -92,9 +91,6 @@ module exe_stage(
     wire [31:0] alu_src1;
     wire [31:0] alu_src2;
     wire [31:0] alu_result;
-    // 数据存储器控制信号
-    wire [1:0] offset;                   // 地址偏移（低2位）
-    wire [3:0] final_we;                 // 最终写使能
     // csr交互信号 
     wire res_from_csr;                   // 结果来自csr寄存器堆
     wire [31:0] csr_rvalue;              // csr读数据
@@ -172,7 +168,7 @@ module exe_stage(
     assign ex_inst_valid = ex_valid && !mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid;
     assign is_div_inst = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
     assign ex_ready_go =  is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
-                                        (mem_we || res_from_mem) && !ex_exc_valid ? (data_sram_req && data_sram_addr_ok) || req_already : 1'b1 ;     
+                                        ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (data_sram_req && data_sram_addr_ok) || req_already : 1'b1 ;     
     // 如果是除法指令，要么正确握手并且算完了发出ready信号，要么由于后面有异常和ertn导致除法指令不发出除法请求就直接走
     // 如果是访存指令，就必须发出访存请求之后才能往后走
     // ex阶段的异常中除了ale异常都不应该发出除法请求，不能添加ale，因为ale异常依赖alu结果，alu结果依赖除法结果，除法结果又依赖异常判断形成闭环，虽然二者互斥但是不能有闭环                                                                                        

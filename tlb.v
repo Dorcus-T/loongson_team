@@ -145,24 +145,25 @@ module tlb #
                      | ({TLBNUM{invtlb_op == 5'd6}} & (inv_cond2 || inv_cond3) && inv_cond4);
 
     // 写逻辑
+    integer a;
     always @(posedge clk) begin
         if (reset) begin
             tlb_e   <= {TLBNUM{1'b0}};      // 所有项无效
             tlb_ps  <= {TLBNUM{1'b0}};      // 默认为4KB页
-            for (integer i = 0; i < TLBNUM; i = i + 1) begin
-                tlb_vppn[i] <= 19'd0;
-                tlb_asid[i] <= 10'd0;
-                tlb_g[i]    <= 1'b0;
-                tlb_ppn0[i] <= 20'd0;
-                tlb_plv0[i] <= 2'd0;
-                tlb_mat0[i] <= 2'd0;
-                tlb_d0[i]   <= 1'b0;
-                tlb_v0[i]   <= 1'b0;
-                tlb_ppn1[i] <= 20'd0;
-                tlb_plv1[i] <= 2'd0;
-                tlb_mat1[i] <= 2'd0;
-                tlb_d1[i]   <= 1'b0;
-                tlb_v1[i]   <= 1'b0;
+            for (a = 0; a < TLBNUM; a = a + 1) begin
+                tlb_vppn[a] <= 19'd0;
+                tlb_asid[a] <= 10'd0;
+                tlb_g[a]    <= 1'b0;
+                tlb_ppn0[a] <= 20'd0;
+                tlb_plv0[a] <= 2'd0;
+                tlb_mat0[a] <= 2'd0;
+                tlb_d0[a]   <= 1'b0;
+                tlb_v0[a]   <= 1'b0;
+                tlb_ppn1[a] <= 20'd0;
+                tlb_plv1[a] <= 2'd0;
+                tlb_mat1[a] <= 2'd0;
+                tlb_d1[a]   <= 1'b0;
+                tlb_v1[a]   <= 1'b0;
             end
         end
         else if (invtlb_valid) begin

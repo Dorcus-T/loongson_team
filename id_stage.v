@@ -600,12 +600,17 @@ module id_stage(
     always @(posedge clk) begin
         if (if_to_id_valid && id_allowin) begin
             if_to_id_bus_r <= if_to_id_bus;
-            id_rf_valid <= (csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
-                                   || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                   || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) && id_valid;
         end
     end
-
+    // 重取指信号生成
+    always @(posedge clk) begin
+        if (reset || wb_exc_valid || wb_ertn_flush) id_rf_valid <= 1'b0;
+        else if (id_to_ex_valid && ex_allowin)begin
+            id_rf_valid <= (csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
+                                       || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
+                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) && id_valid;
+        end
+    end
     // ========== 冒险检测、前递处理、阻塞处理 ==========
     // 指令类型分类
     assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr |

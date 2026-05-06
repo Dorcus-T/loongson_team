@@ -1,21 +1,21 @@
 `include "mycpu.h"
 
 module id_stage(
-    input clk,
-    input reset,
+    input  clk,
+    input  reset,
     // allowin
-    input ex_allowin,                    // EX阶段允许接收信号（用于反压控制）
-    output id_allowin,                   // ID阶段允许接收新指令
+    input  ex_allowin,                    // EX阶段允许接收信号（用于反压控制）
+    output id_allowin,                    // ID阶段允许接收新指令
     // 来自IF阶段
-    input if_to_id_valid,                         // IF到ID的有效标志
-    input [`IF_TO_ID_BUS_WD -1:0] if_to_id_bus,   // IF传递的总线：{指令, PC}
+    input  if_to_id_valid,                         // IF到ID的有效标志
+    input  [`IF_TO_ID_BUS_WD -1:0] if_to_id_bus,   // IF传递的总线：{指令, PC}
     // 输出给ex阶段
-    output id_to_ex_valid,                        // ID到EX的有效标志
-    output [`ID_TO_EX_BUS_WD -1:0] id_to_ex_bus,  // ID到EX的控制总线
+    output id_to_ex_valid,                         // ID到EX的有效标志
+    output [`ID_TO_EX_BUS_WD -1:0] id_to_ex_bus,   // ID到EX的控制总线
     // 输出给if阶段的分支总线
-    output [`BR_BUS_WD -1:0] br_bus,              // 分支总线：{跳转标志, 跳转目标}
+    output [`BR_BUS_WD -1:0] br_bus,               // 分支总线：{跳转标志, 跳转目标}
     // wb阶段输入的寄存器文件总线
-    input [`WB_TO_RF_BUS_WD -1:0] wb_to_rf_bus,   // WB阶段写回数据
+    input  [`WB_TO_RF_BUS_WD -1:0] wb_to_rf_bus,   // WB阶段写回数据
     // 前递控制
     input   [4:0]   ex_to_id_dest,       // EX阶段的目的寄存器号
     input   [4:0]   mem_to_id_dest,      // MEM阶段的目的寄存器号
@@ -24,6 +24,9 @@ module id_stage(
     input   [31:0]  ex_to_id_result,     // EX阶段计算结果
     input   [31:0]  mem_to_id_result,    // MEM阶段计算结果
     input   [31:0]  wb_to_id_result,     // WB阶段计算结果
+    input           mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
+    input           mem_exc_valid,       // MEM有冲刷就不发起brtaken
+    input           ex_exc_valid,        // ex有冲刷就不发起brtaken
     // csr与ertn冒险
     input           ex_csr_we,           // EX阶段写CSR使能
     input  [13:0]   ex_csr_num,          // EX阶段写CSR号码
@@ -194,6 +197,7 @@ module id_stage(
     wire [4:0] dest;                     // 目的寄存器号
     wire ertn_flush;                     // 异常返回冲刷信号
     wire br_taken;                       // 分支是否发生
+    reg  new_br;                         // 跳转指令只能发送一次跳转信号
     wire [31:0] br_target;               // 分支目标地址
     wire [31:0] id_pc;                   // 当前指令的PC值
     wire [31:0] id_inst;                 // 当前指令的机器码
@@ -256,6 +260,7 @@ module id_stage(
     wire id_load_op;                     // ID阶段是否为加载指令
     wire load_use_stall;                 // load-use冒险需要停顿
     wire branch_stall;                   // 分支指令数据冒险需要停顿
+    wire br_ld_stall;                    // 分支与ld冒险，但ld没取得数据
     wire csr_stall;                      // csr与ertn有关冒险
 
     // ========== 指令字段生成 ==========
@@ -500,6 +505,18 @@ module id_stage(
     assign rj_lt_rd_u  = !adder_cout;
     assign rj_ge_rd_u  = !rj_lt_rd_u;
     // ========== 分支控制逻辑 ==========
+    always @(posedge clk) begin
+        if(reset) begin
+           new_br <= 1'b0;
+        end
+        else if(if_to_id_valid && id_allowin) begin
+           new_br <= 1'b1;
+        end
+        else if(br_taken) begin
+           new_br <= 1'b0;
+        end
+    end
+
     assign br_taken = (   inst_beq  &&  rj_eq_rd
                        || inst_bne  && !rj_eq_rd
                        || inst_blt  &&  rj_lt_rd
@@ -509,12 +526,14 @@ module id_stage(
                        || inst_jirl
                        || inst_bl
                        || inst_b
-                    ) && id_valid && !load_use_stall && !branch_stall ;  
+                    ) && id_valid && !load_use_stall && !branch_stall && new_br
+                      && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_exc_valid) && !id_exc_valid;  
     // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
 
     //id，ex，mem有异常或者ertn可以不管brtaken，因为不论是否跳转都会冲刷，wb若有异常或者ertn，其发出的冲刷信号优先级也高于id的brtaken
+    assign br_ld_stall = branch_stall && load_use_stall && id_valid; // id为跳转指令，ex为load指令，此时会发出错误的brtarget，不能发出取值请求
 
     // 分支目标地址计算
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b || 
@@ -522,7 +541,7 @@ module id_stage(
                        (id_pc + br_offs) : (rj_value + jirl_offs);
     
     // 分支总线输出（跳转标志 + 目标地址）
-    assign br_bus = {br_taken, br_target};
+    assign br_bus = {br_ld_stall, br_taken, br_target};
     
     // ========== 解析来自if阶段的总线 ==========
     assign {id_exc[8:5], id_inst, id_pc} = if_to_id_bus_r;        
@@ -613,9 +632,12 @@ module id_stage(
     
     // 如果当前指令的源寄存器与ex阶段的目的寄存器匹配，且EX阶段是加载指令，则需要停顿
     assign id_load_op = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
-    assign load_use_stall = ((rj_wait && (rj == ex_to_id_dest)) ||
+    assign load_use_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
                              (rk_wait && (rk == ex_to_id_dest)) ||
-                             (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op;
+                             (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op) ||
+                            (((rj_wait && (rj == mem_to_id_dest)) ||
+                              (rk_wait && (rk == mem_to_id_dest)) ||
+                              (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
     
     // 分支指令的阻塞检测（ex阶段的指令与id阶段的跳转指令发生冒险则需要阻塞，优化逻辑提高主频）
     assign branch_stall = ((rj_wait && (rj == ex_to_id_dest)) ||

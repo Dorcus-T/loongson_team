@@ -2,23 +2,49 @@
 
 module mycpu_top(
     // ========== 系统时钟和复位 ==========
-    input clk,                           // 系统时钟
-    input resetn,                        // 低电平有效复位信号
-
-    // ========== 指令存储器接口 ==========
-    output inst_sram_en,                 // 指令SRAM使能
-    output [3:0] inst_sram_we,           // 指令SRAM写使能（只读，始终为0）
-    output [31:0] inst_sram_addr,        // 指令SRAM地址
-    output [31:0] inst_sram_wdata,       // 指令SRAM写数据（未使用）
-    input  [31:0] inst_sram_rdata,       // 指令SRAM读数据
-    
-    // ========== 数据存储器接口 ==========
-    output data_sram_en,                 // 数据SRAM使能
-    output [3:0] data_sram_we,           // 数据SRAM写使能（字节掩码）
-    output [31:0] data_sram_addr,        // 数据SRAM地址
-    output [31:0] data_sram_wdata,       // 数据SRAM写数据
-    input  [31:0] data_sram_rdata,       // 数据SRAM读数据
-    
+    input aclk,                           // 系统时钟
+    input aresetn,                        // 低电平有效复位信号
+    // ========== AXI3 Master 读地址通道 ==========
+    output [3 :0]  arid,
+    output [31:0]  araddr,
+    output [7 :0]  arlen,
+    output [2 :0]  arsize,
+    output [1 :0]  arburst,
+    output [1 :0]  arlock,
+    output [3 :0]  arcache,
+    output [2 :0]  arprot,
+    output         arvalid,
+    input          arready,
+    // ========== AXI3 Master 读数据通道 ==========
+    input  [3 :0]  rid,
+    input  [31:0]  rdata,
+    input  [1 :0]  rresp,
+    input          rlast,
+    input          rvalid,
+    output         rready,
+    // ========== AXI3 Master 写地址通道 ==========
+    output [3 :0]  awid,
+    output [31:0]  awaddr,
+    output [7 :0]  awlen,
+    output [2 :0]  awsize,
+    output [1 :0]  awburst,
+    output [1 :0]  awlock,
+    output [3 :0]  awcache,
+    output [2 :0]  awprot,
+    output         awvalid,
+    input          awready,
+    // ========== AXI3 Master 写数据通道 ==========
+    output [3 :0]  wid,
+    output [31:0]  wdata,
+    output [3 :0]  wstrb,
+    output         wlast,
+    output         wvalid,
+    input          wready,
+    // ========== AXI3 Master 写响应通道 ==========
+    input  [3 :0]  bid,
+    input  [1 :0]  bresp,
+    input          bvalid,
+    output         bready,   
     // ========== 调试接口（波形追踪） ==========
     output [31:0] debug_wb_pc,           // WB阶段PC值
     output [3:0] debug_wb_rf_we,         // 寄存器写使能（调试用）
@@ -28,7 +54,8 @@ module mycpu_top(
 
     // ========== 复位信号处理（将低有效转换为高有效）==========
     reg reset;
-    always @(posedge clk) reset <= ~resetn;
+    wire clk = aclk;
+    always @(posedge clk) reset <= ~aresetn;
 
     // ========== 流水线控制信号（各级之间的握手信号） ==========
     wire id_allowin;                     // ID阶段允许接收（来自ID）
@@ -62,8 +89,10 @@ module mycpu_top(
     wire [31:0] mem_to_id_result;        // MEM阶段计算结果
     wire [31:0] wb_to_id_result;         // WB阶段计算结果
     wire        ex_to_id_load_op;        // EX阶段是否为加载指令（用于load-use检测）
+    wire        mem_to_id_data_ok;       // MEM前递给id的数据是否准备好
 
     // ========== 异常信号与ertn ==========
+    wire ex_exc_valid;       // EX阶段异常有效
     wire wb_exc_valid;       // WB阶段异常有效
     wire wb_ertn_flush;      // WB阶段有ertn指令
     wire mem_exc_valid;      // MEM阶段异常有效
@@ -116,6 +145,27 @@ module mycpu_top(
     // ========== 计数器数值 ==========
     wire [63:0] timer_value;        // 计数器输出
 
+    // ========== SRAM侧内部连线（CPU与桥模块之间） ==========
+    // --- 取指 SRAM 信号 ---
+    wire        inst_sram_req;
+    wire        inst_sram_wr;
+    wire [1:0]  inst_sram_size;
+    wire [3:0]  inst_sram_wstrb;
+    wire [31:0] inst_sram_addr;
+    wire [31:0] inst_sram_wdata;
+    wire        inst_sram_addr_ok;
+    wire        inst_sram_data_ok;
+    wire [31:0] inst_sram_rdata;
+    // --- 数据 SRAM 信号 ---
+    wire        data_sram_req;
+    wire        data_sram_wr;
+    wire [1:0]  data_sram_size;
+    wire [3:0]  data_sram_wstrb;
+    wire [31:0] data_sram_addr;
+    wire [31:0] data_sram_wdata;
+    wire        data_sram_addr_ok;
+    wire        data_sram_data_ok;
+    wire [31:0] data_sram_rdata;
     // ============================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
     // ============================================================
@@ -126,10 +176,14 @@ module mycpu_top(
     .br_bus(br_bus),
     .if_to_id_valid(if_to_id_valid),
     .if_to_id_bus(if_to_id_bus),
-    .inst_sram_en(inst_sram_en),
-    .inst_sram_we(inst_sram_we),
+    .inst_sram_req(inst_sram_req),
+    .inst_sram_wr(inst_sram_wr),
+    .inst_sram_size(inst_sram_size),
+    .inst_sram_wstrb(inst_sram_wstrb),
     .inst_sram_addr(inst_sram_addr),
     .inst_sram_wdata(inst_sram_wdata),
+    .inst_sram_addr_ok(inst_sram_addr_ok),
+    .inst_sram_data_ok(inst_sram_data_ok),
     .inst_sram_rdata(inst_sram_rdata),
     .if_to_mmu_vaddr(if_to_mmu_vaddr),
     .padd(paddr_to_if),
@@ -163,12 +217,15 @@ module mycpu_top(
     .ex_to_id_result(ex_to_id_result),
     .mem_to_id_result(mem_to_id_result),
     .wb_to_id_result(wb_to_id_result),
+    .mem_to_id_data_ok(mem_to_id_data_ok),
+    .mem_exc_valid(mem_exc_valid),
     .ex_csr_we(ex_csr_we),
     .ex_csr_num(ex_csr_num),
     .ex_ertn_flush(ex_ertn_flush),
     .mem_csr_we(mem_csr_we),
     .mem_csr_num(mem_csr_num),
     .mem_ertn_flush(mem_ertn_flush),
+    .ex_exc_valid(ex_exc_valid),
     .wb_csr_we(wb_csr_we),
     .wb_csr_num(wb_csr_num),
     .wb_exc_valid(wb_exc_valid),
@@ -192,6 +249,10 @@ module mycpu_top(
     .ex_to_mem_valid(ex_to_mem_valid),
     .ex_to_mem_bus(ex_to_mem_bus),
     .ex_to_mmu_vaddr(ex_to_mmu_vaddr),
+    .data_sram_req(data_sram_req),
+    .data_sram_wr(data_sram_wr),
+    .data_sram_size(data_sram_size),
+    .data_sram_wstrb(data_sram_wstrb),
     .vtlb_enop(vtlb_enop),
     .ld_and_str(ld_and_str),
     .padd(paddr_to_ex),
@@ -201,9 +262,11 @@ module mycpu_top(
     .data_sram_we(data_sram_we),
     .data_sram_addr(data_sram_addr),
     .data_sram_wdata(data_sram_wdata),
+    .data_sram_addr_ok(data_sram_addr_ok),
     .ex_to_id_dest(ex_to_id_dest),
     .ex_to_id_result(ex_to_id_result),
     .ex_to_id_load_op(ex_to_id_load_op),
+    .ex_exc_valid(ex_exc_valid),
     .wb_exc_valid(wb_exc_valid),
     .wb_ertn_flush(wb_ertn_flush),
     .mem_exc_valid(mem_exc_valid),
@@ -227,8 +290,10 @@ module mycpu_top(
     .mem_to_wb_valid(mem_to_wb_valid),
     .mem_to_wb_bus(mem_to_wb_bus),
     .data_sram_rdata(data_sram_rdata),
+    .data_sram_data_ok(data_sram_data_ok),
     .mem_to_id_dest(mem_to_id_dest),
     .mem_to_id_result(mem_to_id_result),
+    .mem_to_id_data_ok(mem_to_id_data_ok),
     .wb_exc_valid(wb_exc_valid),
     .wb_ertn_flush(wb_ertn_flush),
     .mem_exc_valid(mem_exc_valid),
@@ -257,14 +322,14 @@ module mycpu_top(
     .wb_csr_we(wb_csr_we),
     .wb_csr_num(wb_csr_num),
     .wb_to_csr_bus(wb_to_csr_bus),
-    .exc_not_rf(exc_not_rf),
+    .exc_no_rf(exc_not_rf),
     .rf_valid(rf_valid),
     .wb_pc_back(wb_pc_back),
     .tlbrwf_valid(tlbrwf_valid)
     );
-   // ============================================================ 
-   // csr寄存器堆
-   // ============================================================
+    // ============================================================ 
+    // csr寄存器堆
+    // ============================================================
     csr_regfile csr_regfile(
         .clk(clk),
         .reset(reset),
@@ -285,9 +350,9 @@ module mycpu_top(
         .tlbrd_bus(tlbrd_value),
         .tlbcsr_bus(tlbcsr_bus)
     );
-   // ============================================================
-   // MMU
-   // ============================================================
+    // ============================================================
+    // MMU
+    // ============================================================
     mmu u_mmu (
         .clk           (clk),
         .reset         (reset),
@@ -319,12 +384,81 @@ module mycpu_top(
         .tlbrd_value   (tlbrd_value)
     );
 
-   // ============================================================ 
-   // 计数器 
-   // ============================================================
-   timer_64bit timer_64bit(
+    // ============================================================ 
+    // 计数器 
+    // ============================================================
+    timer_64bit timer_64bit(
         .clk(clk),
         .reset(reset),
         .timer_value(timer_value)
+    );
+
+    // ============================================================
+    // SRAM-to-AXI 桥模块
+    // ============================================================
+    sram_to_axi_bridge sram_to_axi_bridge(
+        .clk                (clk),
+        .reset              (reset),
+        // 取指 SRAM 侧
+        .inst_sram_req      (inst_sram_req),
+        .inst_sram_wr       (inst_sram_wr),
+        .inst_sram_size     (inst_sram_size),
+        .inst_sram_wstrb    (inst_sram_wstrb),
+        .inst_sram_addr     (inst_sram_addr),
+        .inst_sram_wdata    (inst_sram_wdata),
+        .inst_sram_addr_ok  (inst_sram_addr_ok),
+        .inst_sram_data_ok  (inst_sram_data_ok),
+        .inst_sram_rdata    (inst_sram_rdata),
+        // 访存 SRAM 侧
+        .data_sram_req      (data_sram_req),
+        .data_sram_wr       (data_sram_wr),
+        .data_sram_size     (data_sram_size),
+        .data_sram_wstrb    (data_sram_wstrb),
+        .data_sram_addr     (data_sram_addr),
+        .data_sram_wdata    (data_sram_wdata),
+        .data_sram_addr_ok  (data_sram_addr_ok),
+        .data_sram_data_ok  (data_sram_data_ok),
+        .data_sram_rdata    (data_sram_rdata),
+        // AXI 读地址通道
+        .arid           (arid),
+        .araddr         (araddr),
+        .arlen          (arlen),
+        .arsize         (arsize),
+        .arburst        (arburst),
+        .arlock         (arlock),
+        .arcache        (arcache),
+        .arprot         (arprot),
+        .arvalid        (arvalid),
+        .arready        (arready),
+        // AXI 读数据通道
+        .rid            (rid),
+        .rdata          (rdata),
+        .rresp          (rresp),
+        .rlast          (rlast),
+        .rvalid         (rvalid),
+        .rready         (rready),
+        // AXI 写地址通道
+        .awid           (awid),
+        .awaddr         (awaddr),
+        .awlen          (awlen),
+        .awsize         (awsize),
+        .awburst        (awburst),
+        .awlock         (awlock),
+        .awcache        (awcache),
+        .awprot         (awprot),
+        .awvalid        (awvalid),
+        .awready        (awready),
+        // AXI 写数据通道
+        .wid            (wid),
+        .wdata          (wdata),
+        .wstrb          (wstrb),
+        .wlast          (wlast),
+        .wvalid         (wvalid),
+        .wready         (wready),
+        // AXI 写响应通道
+        .bid            (bid),
+        .bresp          (bresp),
+        .bvalid         (bvalid),
+        .bready         (bready)
     );
 endmodule

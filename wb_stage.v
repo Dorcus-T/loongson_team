@@ -28,7 +28,7 @@ module wb_stage(
     // 输出给csr寄存器堆（包含异常处理和写交互信号）
     output [`WB_TO_CSR_BUS_WD -1:0] wb_to_csr_bus, // 写回级到csr寄存器的总线
     // 重取指相关控制
-    output exc_not_rf,                   // 异常和重取指同时出现时，除中断外，避免进入异常处理程序，发IF和CSR
+    output exc_no_rf,                    // 异常和重取指同时出现时，除中断外，避免进入异常处理程序，发IF和CSR
     output rf_valid,                     // 重取指信号，发IF
     output [31:0] wb_pc_back,            // 重取指指令PC，发IF
     // MMU读写控制
@@ -99,7 +99,7 @@ module wb_stage(
         csr_wmask,          // [144:113] 32位 CSR写掩码
         csr_wvalue,         // [112:81]  32位 CSR写数据
         wb_ertn_flush,      // [80]      1位 异常返回冲刷信号
-        exc_not_rf,         // [79]      1位 异常有效标志
+        exc_no_rf,          // [79]      1位 异常有效标志
         wb_exc_ecode,       // [78:73]   6位 异常码
         wb_exc_esubcode,    // [72:64]   9位 异常子码
         mem_addr,           // [63:32]   32位 异常地址（BADV）
@@ -158,7 +158,7 @@ module wb_stage(
     // ========== 重取指控制 ==========
     assign wb_pc_back = wb_pc;
     assign wb_rf_valid = mem_to_wb_rf_valid && wb_valid;
-    assign exc_not_rf = (wb_rf_valid ? (int ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;
+    assign exc_no_rf = (wb_rf_valid ? (int ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;
     assign rf_valid = wb_rf_valid;
 
     // ========== 异常信号解析 ==========

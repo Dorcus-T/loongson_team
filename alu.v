@@ -9,7 +9,7 @@ module alu(
   input   wb_exc_valid,        // wb有异常冲刷就不发起除法请求
   input   wb_ertn_flush,       // wb有ertn指令就不发出除法请求
   input   [9:0] ex_exc,        // 在ex阶段之前产生的异常类型
-  input   ex_valid,            // 无效的ex指令就不发起除法请求
+  input   ex_valid,            // 无效的ex指令就不发起除法请求，不拉高除法数据有效信号
   input   clk,                 // 时钟信号
   input   reset                // 复位信号（高有效）
 );
@@ -178,7 +178,7 @@ always @(posedge clk) begin
         if(signed_handshake) begin
             s_axis_divisor_tvalid_signed <= 1'b0;  // 握手完成，清除有效标志
         end
-        else if(signed_div_inst && div_inst_new ) begin
+        else if(signed_div_inst && div_inst_new && ex_valid) begin
             s_axis_divisor_tvalid_signed <= 1'b1;  // 开始新的除法，拉高有效标志
         end
         else begin
@@ -189,7 +189,7 @@ always @(posedge clk) begin
         if(signed_handshake) begin
             s_axis_dividend_tvalid_signed <= 1'b0;
         end
-        else if(signed_div_inst && div_inst_new) begin
+        else if(signed_div_inst && div_inst_new && ex_valid) begin
             s_axis_dividend_tvalid_signed <= 1'b1;
         end
         else begin
@@ -208,7 +208,7 @@ always @(posedge clk) begin
         if(unsigned_handshake) begin
             s_axis_divisor_tvalid_unsigned <= 1'b0;
         end
-        else if(unsigned_div_inst && div_inst_new) begin
+        else if(unsigned_div_inst && div_inst_new && ex_valid) begin
             s_axis_divisor_tvalid_unsigned <= 1'b1;
         end
         else begin
@@ -218,7 +218,7 @@ always @(posedge clk) begin
         if(unsigned_handshake) begin
             s_axis_dividend_tvalid_unsigned <= 1'b0;
         end
-        else if(unsigned_div_inst && div_inst_new) begin
+        else if(unsigned_div_inst && div_inst_new && ex_valid) begin
             s_axis_dividend_tvalid_unsigned <= 1'b1;
         end
         else begin

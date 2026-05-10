@@ -85,6 +85,13 @@ reg  [3:0]  wstrb_r;
 reg         rready_r;
 reg         bready_r;
 
+// ========== 写请求追踪器（用于地址冲突检测） ==========
+reg         wr_pend0_valid, wr_pend1_valid;
+reg [31:0]  wr_pend0_addr,  wr_pend1_addr;
+reg [2:0]   wr_pend0_size,  wr_pend1_size;
+reg [3:0]   wr_pend0_wstrb, wr_pend1_wstrb;
+wire        aw_w_done;
+
 // ==========  尺寸映射 ==========
 function [2:0] map_size;
     input [1:0] sz;
@@ -161,13 +168,6 @@ reg [1:0] aw_w_state, aw_w_next;
 reg       aw_done_r;
 reg       w_done_r;
 wire      data_sram_addr_ok_wr;
-
-// ========== 写请求追踪器（用于地址冲突检测） ==========
-reg         wr_pend0_valid, wr_pend1_valid;
-reg [31:0]  wr_pend0_addr,  wr_pend1_addr;
-reg [2:0]   wr_pend0_size,  wr_pend1_size;
-reg [3:0]   wr_pend0_wstrb, wr_pend1_wstrb;
-wire        aw_w_done;
 
 // ========== 写响应相关信号 ==========
 reg [1:0] b_pending_cnt;

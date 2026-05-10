@@ -21,12 +21,18 @@ module wb_stage(
     output [31:0] wb_to_id_result,       // 转发给译码级的计算结果
     // 异常与ertn信号
     output wb_ertn_flush,                // 发给流水线每个阶段（也在总线中送给csr）
-    output wb_exc_valid,                 // 发给流水线每个阶段（也在总线中送给csr）
+    output wb_exc_valid,                 // 发给流水线除IF每个阶段
     // csr与ertn冒险
     output wb_csr_we,                    // wb阶段确定写csr
     output [13:0] wb_csr_num,            // wb阶段写csr的寄存器号
     // 输出给csr寄存器堆（包含异常处理和写交互信号）
-    output [`WB_TO_CSR_BUS_WD -1:0] wb_to_csr_bus // 写回级到csr寄存器的总线
+    output [`WB_TO_CSR_BUS_WD -1:0] wb_to_csr_bus, // 写回级到csr寄存器的总线
+    // 重取指相关控制
+    output exc_no_rf,                    // 异常和重取指同时出现时，除中断外，避免进入异常处理程序，发IF和CSR
+    output rf_valid,                     // 重取指信号，发IF
+    output [31:0] wb_pc_back,            // 重取指指令PC，发IF
+    // MMU读写控制
+    output [2:0] tlbrwf_valid            // {tlbrd_en, tlbwr_en, tlbfill_en}  
 );
 
     reg  wb_valid;                                   // 写回级有效标志
@@ -40,9 +46,15 @@ module wb_stage(
     wire ine;
     wire int;
     wire adef;
-    wire [5:0] wb_exc;
+    wire tlbr, pif, ppi, ipe, fpd, fpe, adem, pil, pis, pme;
+    wire [15:0] wb_exc;
+    wire mem_to_wb_rf_valid;
+    wire wb_rf_valid;               // wb阶段重取指标志
 
     // ========== 控制信号解析 ==========
+    wire tlbrd_en;                  // WB读tlb并写csr
+    wire tlbwr_en;                  // tlbwrWB写tlb
+    wire tlbfill_en;
     wire gr_we;                     // 通用寄存器写使能
     wire [4:0] dest;                // 目的寄存器号
     wire [31:0] final_result;       // 最终计算结果
@@ -63,12 +75,16 @@ module wb_stage(
     // ========== 解析来自MEM阶段的总线 ==========
     // 从锁存的执行级总线中提取各个字段
     assign {
-        wb_csr_num,         // 187:174 csr号码
-        csr_we,             // 173     csr写使能
-        csr_wmask,          // 172:141 csr写掩码
-        csr_wvalue,         // 140:109 csr写数据
-        ertn_flush,         // 108：异常返回冲刷信号
-        wb_exc,             // 107-102：异常类型
+        tlbrd_en,           // 201     tlbrd使能
+        tlbwr_en,           // 200     tlbwf使能
+        tlbfill_en,         // 199
+        mem_to_wb_rf_valid,        // 198     重取指标志
+        wb_csr_num,         // 197:184 csr号码
+        csr_we,             // 183     csr写使能
+        csr_wmask,          // 182:151 csr写掩码
+        csr_wvalue,         // 150:119 csr写数据
+        ertn_flush,         // 118：异常返回冲刷信号
+        wb_exc,             // 117：异常类型
         mem_addr,           // 101-70：访存地址（32位）
         gr_we,              // 69：寄存器写使能
         dest,               // 68-64：目的寄存器号（5位）
@@ -83,7 +99,7 @@ module wb_stage(
         csr_wmask,          // [144:113] 32位 CSR写掩码
         csr_wvalue,         // [112:81]  32位 CSR写数据
         wb_ertn_flush,      // [80]      1位 异常返回冲刷信号
-        wb_exc_valid,       // [79]      1位 异常有效标志
+        exc_no_rf,          // [79]      1位 异常有效标志
         wb_exc_ecode,       // [78:73]   6位 异常码
         wb_exc_esubcode,    // [72:64]   9位 异常子码
         mem_addr,           // [63:32]   32位 异常地址（BADV）
@@ -136,22 +152,41 @@ module wb_stage(
     assign wb_to_id_dest = dest & {5{wb_valid}} & {5{gr_we}};
     assign wb_to_id_result = final_result;
 
+    // ========== MMU读写控制 ==========
+    assign tlbrwf_valid = {tlbrd_en, tlbwr_en, tlbfill_en} & {3{!wb_exc_valid}};
+
+    // ========== 重取指控制 ==========
+    assign wb_pc_back = wb_pc;
+    assign wb_rf_valid = mem_to_wb_rf_valid && wb_valid;
+    assign exc_no_rf = (wb_rf_valid ? (int ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;
+    assign rf_valid = wb_rf_valid;
+
     // ========== 异常信号解析 ==========
-    assign {ale, syscall, brk, ine, int, adef} = wb_exc;
+    assign {int, adef, tlbr, pif, ppi, syscall, brk, ine, ipe, fpd, fpe, adem, ale, pil, pis, pme} = wb_exc;
     assign wb_exc_badv = mem_addr;
     assign wb_exc_pc = wb_pc;
     assign wb_exc_ecode = 
     int      ? `ECODE_INT   :  // 最高：中断
     adef     ? `ECODE_ADE   :  // 第二：取指阶段
+    tlbr     ? `ECODE_TLBR  :  // IF tlb相关
+    pif      ? `ECODE_PIF   :
+    ppi      ? `ECODE_PPI   :
     syscall  ? `ECODE_SYS   :  // 第三：译码阶段
     brk      ? `ECODE_BRK   :  // id例外互斥
     ine      ? `ECODE_INE   :  // id例外互斥
-    ale      ? `ECODE_ALE   :  // 第四：执行阶段
+    ipe      ? `ECODE_IPE   :
+    fpd      ? `ECODE_FPD   :
+    fpe      ? `ECODE_FPE   :  // 第四：执行阶段
+    adem     ? `ECODE_ADE   :
+    ale      ? `ECODE_ALE   :
+    pil      ? `ECODE_PIL   :  // MEM tlb相关
+    pis      ? `ECODE_PIS   :
+    pme      ? `ECODE_PME   :
     `ECODE_NO_EXC;
-    assign wb_exc_esubcode =  9'd0;
+    assign wb_exc_esubcode =  adem ? `ESUBCODE_ADEM : `ESUBCODE_ADEF;
   
    // ========== 冲刷信号生成 ==========
    assign wb_ertn_flush = ertn_flush && wb_valid;
-   assign wb_exc_valid = |wb_exc && wb_valid;   
+   assign wb_exc_valid = (|wb_exc || wb_rf_valid) && wb_valid;   
    //冲刷指令刚进入wb，valid必为1，发出冲刷信号，下一个上跳让除了if的valid都为0，因而无法再次发冲刷信号 
 endmodule

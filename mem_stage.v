@@ -2,7 +2,7 @@
 
 module mem_stage(
     input clk,
-    input reset,
+    input reset, 
     // allowin
     input wb_allowin,                   // WB阶段允许接收
     output mem_allowin,                 // MEM阶段允许接收

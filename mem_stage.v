@@ -74,7 +74,7 @@ module mem_stage(
     reg  [31:0] ex_data_r;               // 新读出的数据，若无新数据进入mem就把它存起来
     reg         ex_data_r_valid;         // 存的新数据有效
   
-    // ========== 解析来自EX阶段的总线 ==========
+    // ========== 解析来自EX阶段的总线 =========
     assign {
         tlbrd_en,            // 241     tlbrd使能
         tlbwr_en,            // 240     tlbwf使能

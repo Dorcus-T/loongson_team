@@ -1,79 +1,79 @@
 `include "mycpu.h"
 
-module mem_stage(
-    input clk,
-    input reset,
+module mem_stage (
+    input  wire                         clk,
+    input  wire                         reset,
     // allowin
-    input wb_allowin,                   // WB阶段允许接收
-    output mem_allowin,                 // MEM阶段允许接收
+    input  wire                         wb_allowin,            // WB阶段允许接收
+    output wire                         mem_allowin,           // MEM阶段允许接收
     // 来自ex阶段
-    input ex_to_mem_valid,              // EX到MEM有效
-    input [`EX_TO_MEM_BUS_WD -1:0] ex_to_mem_bus,  // 来自EX的总线
+    input  wire                         ex_to_mem_valid,       // EX到MEM有效
+    input  wire [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus,         // 来自EX的总线
     // 输出给wb阶段
-    output mem_to_wb_valid,              // MEM到WB有效
-    output [`MEM_TO_WB_BUS_WD -1:0] mem_to_wb_bus, // MEM到WB总线
+    output wire                         mem_to_wb_valid,       // MEM到WB有效
+    output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
     // 来自数据存储器
-    input [31:0] data_sram_rdata,        // 数据SRAM读数据
-    input        data_sram_data_ok,      // 数据SRAM数据ok 
+    input  wire [31:0]                  data_sram_rdata,       // 数据SRAM读数据
+    input  wire                         data_sram_data_ok,     // 数据SRAM数据ok
     // 前递控制
-    output [ 4:0] mem_to_id_dest,        // MEM阶段写回寄存器号
-    output [31:0] mem_to_id_result,      // MEM阶段计算结果
-    input         mem_to_id_data_ok,     // MEM前递给id的数据是否准备好
+    output wire [ 4:0]                  mem_to_id_dest,        // MEM阶段写回寄存器号
+    output wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
+    input  wire                         mem_to_id_data_ok,     // MEM前递给id的数据是否准备好
     // 异常冲刷
-    input wb_exc_valid,                  // WB阶段异常冲刷流水线
-    input wb_ertn_flush,                 // WB阶段有ertn指令则冲刷流水线
-    output mem_exc_valid,                // 防止有异常时ex阶段发出访存请求
-    output mem_ertn_flush,               // 防止ertn位于mem时,ex发出访存请求
+    input  wire                         wb_exc_valid,          // WB阶段异常冲刷流水线
+    input  wire                         wb_ertn_flush,         // WB阶段有ertn指令则冲刷流水线
+    output wire                         mem_exc_valid,         // 防止有异常时ex阶段发出访存请求
+    output wire                         mem_ertn_flush,        // 防止ertn位于mem时,ex发出访存请求
     // csr与ertn冒险
-    output mem_csr_we,                   // mem阶段确定要写csr
-    output [13:0] mem_csr_num            // mem阶段写csr的号码
+    output wire                         mem_csr_we,            // mem阶段确定要写csr
+    output wire [13:0]                  mem_csr_num            // mem阶段写csr的号码
 );
 
-    reg mem_valid;                                 // MEM阶段有效标志
-    wire mem_ready_go;                             // MEM阶段就绪（总是1）
-    reg [`EX_TO_MEM_BUS_WD -1:0] ex_to_mem_bus_r;  // 锁存的执行级数据
-    
+    reg  mem_valid;                                   // MEM阶段有效标志
+    wire mem_ready_go;                                // MEM阶段就绪（总是1）
+    reg  [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus_r;     // 锁存的执行级数据
+
     // ========== 异常信号 ==========
     wire [15:0] mem_exc;
-    wire mem_rf_valid;                    // mem阶段重取指标志
+    wire        mem_rf_valid;             // mem阶段重取指标志
 
     // ========== 控制信号解析 ==========
-    wire tlbrd_en;                        // WB读tlb并写csr
-    wire tlbwr_en;                        // tlbwrWB写tlb
-    wire tlbfill_en;                      
-    wire res_from_mem;                    // 结果是否来自存储器
-    wire gr_we;                           // 寄存器写使能
-    wire [4:0] dest;                      // 目标寄存器号
+    wire        tlbrd_en;                 // WB读tlb并写csr
+    wire        tlbwr_en;                 // tlbwrWB写tlb
+    wire        tlbfill_en;
+    wire        res_from_mem;             // 结果是否来自存储器
+    wire        gr_we;                    // 寄存器写使能
+    wire [ 4:0] dest;                     // 目标寄存器号
     wire [31:0] alu_result;               // ALU计算结果（地址）
     wire [31:0] mem_pc;                   // 指令PC
     wire [31:0] final_result;             // 最终结果（来自ALU或存储器）
-    wire ertn_flush;                      // 异常返回冲刷信号
-    wire [2:0] mem_size;                  // 访存大小
-    wire mem_sign_ext;                    // 符号扩展标志
+    wire        ertn_flush;               // 异常返回冲刷信号
+    wire [ 2:0] mem_size;                 // 访存大小
+    wire        mem_sign_ext;             // 符号扩展标志
     // 访存数据控制信号
-    wire [1:0] offset;                   // 偏移量，地址低两位         
-    wire [31:0] shift_data;              // 偏移后的数据
-    wire [31:0] data_result;             // 最终读的数据
-    // csr交互信号 
-    wire res_from_csr;                   // 结果来自csr寄存器堆
-    wire [31:0] csr_rvalue;              // csr读数据
-    wire csr_we;                         // csr写使能
-    wire [31:0] csr_wmask;               // csr写掩码
-    wire [31:0] csr_wvalue;              // csr写数据
-    // 计数器数值筛选 
-    wire res_from_timer;                 // 结果来自计数器
-    wire [31:0] timer_finalval;          //筛选后的计数器读取数据
-    //实现类sram总线
-    wire is_mem_inst;                    // 是访存指令
-    reg  [1:0]  inst_dirty;              // 不为0就代表下一次存储器的dataok数据无效
+    wire [ 1:0] offset;                   // 偏移量，地址低两位
+    wire [31:0] shift_data;               // 偏移后的数据
+    wire [31:0] data_result;              // 最终读的数据
+    // csr交互信号
+    wire        res_from_csr;             // 结果来自csr寄存器堆
+    wire [31:0] csr_rvalue;               // csr读数据
+    wire        csr_we;                   // csr写使能
+    wire [31:0] csr_wmask;                // csr写掩码
+    wire [31:0] csr_wvalue;               // csr写数据
+    // 计数器数值筛选
+    wire        res_from_timer;           // 结果来自计数器
+    wire [31:0] timer_finalval;           // 筛选后的计数器读取数据
+    // 实现类sram总线
+    wire        is_mem_inst;              // 是访存指令
+    reg  [ 1:0] inst_dirty;               // 不为0就代表下一次存储器的dataok数据无效
 
     // ========== 类sram实现所需信号 ==========
-    reg         new_in;                  // 表明mem中的指令是新进入的
-    reg  [31:0] mem_data_r;              // 寄存mem阶段的数据
-    reg         mem_data_r_valid;        // 寄存数据是否有效
-    reg  [31:0] ex_data_r;               // 新读出的数据，若无新数据进入mem就把它存起来
-    reg         ex_data_r_valid;         // 存的新数据有效
-  
+    reg         new_in;                   // 表明mem中的指令是新进入的
+    reg  [31:0] mem_data_r;               // 寄存mem阶段的数据
+    reg         mem_data_r_valid;         // 寄存数据是否有效
+    reg  [31:0] ex_data_r;                // 新读出的数据，若无新数据进入mem就把它存起来
+    reg         ex_data_r_valid;          // 存的新数据有效
+
     // ========== 解析来自EX阶段的总线 ==========
     assign {
         tlbrd_en,            // 241     tlbrd使能
@@ -81,25 +81,25 @@ module mem_stage(
         tlbfill_en,          // 239
         mem_rf_valid,        // 238     重取指标志
         is_mem_inst,         // 237     是访存指令
-        timer_finalval,      // 236:205筛选后的计数器数据
-        res_from_timer,      // 204    结果来自计数器
-        res_from_csr,        // 203    结果来自csr寄存器堆
+        timer_finalval,      // 236:205 筛选后的计数器数据
+        res_from_timer,      // 204     结果来自计数器
+        res_from_csr,        // 203     结果来自csr寄存器堆
         mem_csr_num,         // 202:189 csr号码
         csr_rvalue,          // 188:157 csr读数据
-        csr_we,              // 156     csr写使能
+        csr_we,              // 156      csr写使能
         csr_wmask,           // 155:124 csr写掩码
-        csr_wvalue,          // 123:92 csr写数据
-        ertn_flush,          // 91    异常返回冲刷信号
-        mem_exc,             // 90:75 异常类型
-        res_from_mem,        // 74    结果来源
-        mem_sign_ext,        // 73    符号扩展标志
-        mem_size,            // 72:70 访存大小
-        gr_we,               // 69    寄存器写使能
-        dest,                // 68:64 目标寄存器号
-        alu_result,          // 63:32 ALU结果
-        mem_pc               // 31:0  PC
+        csr_wvalue,          // 123:92  csr写数据
+        ertn_flush,          // 91      异常返回冲刷信号
+        mem_exc,             // 90:75   异常类型
+        res_from_mem,        // 74      结果来源
+        mem_sign_ext,        // 73      符号扩展标志
+        mem_size,            // 72:70   访存大小
+        gr_we,               // 69      寄存器写使能
+        dest,                // 68:64   目标寄存器号
+        alu_result,          // 63:32   ALU结果
+        mem_pc               // 31:0    PC
     } = ex_to_mem_bus_r;
-    
+
     // ========== 输出到WB阶段的总线 ==========
     assign mem_to_wb_bus = {
         tlbrd_en,            // 201     tlbrd使能
@@ -107,26 +107,26 @@ module mem_stage(
         tlbfill_en,          // 199
         mem_rf_valid,        // 198     重取指标志
         mem_csr_num,         // 197:184 csr号码
-        csr_we,              // 183     csr写使能
+        csr_we,              // 183      csr写使能
         csr_wmask,           // 182:151 csr写掩码
         csr_wvalue,          // 150:119 csr写数据
-        ertn_flush,          // 118   异常返回冲刷信号
-        mem_exc,             // 117:102 异常类型 
-        alu_result,          // 101:70 传递异常访存地址
-        gr_we,               // 69    寄存器写使能
-        dest,                // 68:64 目标寄存器号
-        mem_data_r_valid ? mem_data_r : final_result, 
-                             // 63:32 最终结果
-        mem_pc               // 31:0  PC  
+        ertn_flush,          // 118     异常返回冲刷信号
+        mem_exc,             // 117:102 异常类型
+        alu_result,          // 101:70  传递异常访存地址
+        gr_we,               // 69      寄存器写使能
+        dest,                // 68:64   目标寄存器号
+        mem_data_r_valid ? mem_data_r : final_result,
+                             // 63:32   最终结果
+        mem_pc               // 31:0    PC
     };
-    
+
     // ========== 流水线控制 ==========
-    assign mem_ready_go = is_mem_inst && !mem_exc_valid ? data_sram_data_ok: 1'b1;           
-    assign mem_allowin = !mem_valid || mem_ready_go && wb_allowin;
+    assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? data_sram_data_ok : 1'b1;
+    assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
     assign mem_to_wb_valid = mem_valid && mem_ready_go;
-    
+
     // 访存级有效标志更新
-    always @(posedge clk ) begin
+    always @(posedge clk) begin
         if (reset || wb_exc_valid || wb_ertn_flush) begin
             mem_valid <= 1'b0;
         end
@@ -148,29 +148,29 @@ module mem_stage(
         end
         else if (mem_allowin && ex_to_mem_valid) begin
             new_in <= 1'b1;
-        end 
+        end
     end
 
     always @(posedge clk) begin
-        if(reset || (mem_to_wb_valid && wb_allowin && is_mem_inst)) begin
+        if (reset || (mem_to_wb_valid && wb_allowin && is_mem_inst)) begin
             mem_data_r_valid <= 1'b0;
-            mem_data_r <= 32'b0;
+            mem_data_r       <= 32'b0;
         end
-        if(is_mem_inst && !mem_data_r_valid && (data_sram_data_ok || ex_data_r_valid) && !(mem_to_wb_valid && wb_allowin)) begin
+        if (is_mem_inst && !mem_data_r_valid && (data_sram_data_ok || ex_data_r_valid) && !(mem_to_wb_valid && wb_allowin)) begin
             mem_data_r_valid <= 1'b1;
-            mem_data_r <= final_result;
+            mem_data_r       <= final_result;
         end
     end
     // 当mem中是访存指令，如果mem_data_r中没有数据那么mem的数据可能来源于ex_data_r和存储器读出，如果有数据，mem中的访存指令不能前进那么就把数据存入mem_data_r
 
     always @(posedge clk) begin
-        if(reset || new_in) begin
+        if (reset || new_in) begin
             ex_data_r_valid <= 1'b0;
-            ex_data_r <= 32'b0;
+            ex_data_r       <= 32'b0;
         end
-        if(data_sram_data_ok && ((mem_data_r_valid && is_mem_inst) || !is_mem_inst)) begin
+        if (data_sram_data_ok && ((mem_data_r_valid && is_mem_inst) || !is_mem_inst)) begin
             ex_data_r_valid <= 1'b1;
-            ex_data_r <= data_sram_rdata;
+            ex_data_r       <= data_sram_rdata;
         end
     end
     // 如果数据读出来，mem阶段不是访存指令，那么这个数据一定是给ex的数据，就存入ex_data_r。如果mem是访存指令，如果mem_data_r有数据么这个数据就是给ex的，也存入ex_data_r
@@ -178,36 +178,35 @@ module mem_stage(
     // 当前mem不会被阻塞，所以如果前面是一条非访存指令，访存请求发出后，访存指令一定会进入mem，读出的数据后也不会阻塞，直接给wb流水寄存器就行。
     // 如果前面是一条访存指令，第二条访存指令发出请求后可能被阻塞在ex，数据返回后，因为无阻塞第一条会立马进入wb。
     // 所以这两个寄存器一般不会用到
-    
+
     // ========== csr写文件写回控制 ==========
     assign mem_csr_we = csr_we && mem_valid && !mem_exc_valid;
 
-    // ========== 存储器读数据处理（字节/半字/字，支持符号扩展）==========
-    assign offset = alu_result[1:0]; 
+    // ========== 存储器读数据处理（字节/半字/字，支持符号扩展） ==========
+    assign offset = alu_result[1:0];
 
     // 移位对齐（将目标数据移到最低位）
     assign shift_data = (ex_data_r_valid ? ex_data_r : data_sram_rdata) >> (offset * 8);
 
     // 根据访存大小提取并扩展
-    assign data_result = mem_size[2] ? (ex_data_r_valid ? ex_data_r : data_sram_rdata) :         // 字
-                         mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} : // 半字
-                         mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :   // 字节
+    assign data_result = mem_size[2] ? (ex_data_r_valid ? ex_data_r : data_sram_rdata) :          // 字
+                         mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} :  // 半字
+                         mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :    // 字节
                          32'b0;
-    
+
     // 最终结果：来自存储器或ALU或者CSR
-    assign final_result = res_from_mem ? (mem_data_r_valid ? mem_data_r : data_result) :
-                          res_from_csr ? csr_rvalue  :
+    assign final_result = res_from_mem   ? (mem_data_r_valid ? mem_data_r : data_result) :
+                          res_from_csr   ? csr_rvalue  :
                           res_from_timer ? timer_finalval :
                           alu_result;
-    
+
     // ========== 前递输出 ==========
-    assign mem_to_id_dest = dest & {5{mem_valid}} & {5{gr_we}};
-    assign mem_to_id_result = final_result;
-    assign mem_to_id_data_ok = res_from_mem ? data_sram_data_ok :1'b1;
+    assign mem_to_id_dest    = dest & {5{mem_valid}} & {5{gr_we}};
+    assign mem_to_id_result  = final_result;
+    assign mem_to_id_data_ok = res_from_mem ? data_sram_data_ok : 1'b1;
 
     // ========== 检测异常与ertn ==========
-    assign mem_exc_valid = (|mem_exc || mem_rf_valid) && mem_valid;
-    assign mem_ertn_flush = ertn_flush && mem_valid; //mem的ertn要发挥作用必须得有效
+    assign mem_exc_valid  = (|mem_exc || mem_rf_valid) && mem_valid;
+    assign mem_ertn_flush = ertn_flush && mem_valid;  // mem的ertn要发挥作用必须得有效
 
-    
 endmodule

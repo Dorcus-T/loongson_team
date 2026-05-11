@@ -186,7 +186,7 @@ module csr_regfile (
     assign csr_tcfg_rvalue    = csr_tcfg;
     assign csr_tval_rvalue    = csr_tval;
     assign csr_ticlr_rvalue   = 32'b0;
-    assign csr_llbctl_rvalue  = {29'b0, csr_llbctl[2], 1'b0, csr_llbctl[1:0]};
+    assign csr_llbctl_rvalue  = {29'b0, csr_llbctl[2], 1'b0, csr_llbctl[0]};
     assign csr_tlbrentry_rvalue = {csr_tlbrentry[31:6], 6'b0};
     assign csr_ctag_rvalue    = 32'b0;  // 占位
     assign csr_dmw0_rvalue    = {csr_dmw0[31:29], 1'b0, csr_dmw0[27:25], 19'b0, csr_dmw0[5:3], 2'b0, csr_dmw0[0]};

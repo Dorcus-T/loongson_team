@@ -251,7 +251,7 @@ module id_stage (
     // ========== 数据冒险检测信号 ==========
     wire src_no_rj;                      // 指令不使用rj
     wire src_no_rk;                      // 指令不使用rk
-    wire src_no_rd;                      // 指令不使用rd
+    wire src_has_rd;                     // 指令需要读rd
     wire rj_wait;                        // rj需要等待前递
     wire rk_wait;                        // rk需要等待前递
     wire rd_wait;                        // rd需要等待前递
@@ -645,16 +645,16 @@ module id_stage (
                           inst_pcaddu12i | inst_st_b | inst_st_h |
                           inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_rdcntvl_w | inst_rdcntvh_w |
                           inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;            // 不读取rk的指令
-    assign src_no_rd    = ~inst_st_w & ~inst_beq & ~inst_bne &
-                          ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu &
-                          ~inst_st_b & ~inst_st_h & ~inst_csrwr & ~inst_csrxchg;                                     // 不读取rd的指令
+    assign src_has_rd   = inst_st_w | inst_beq | inst_bne |
+                          inst_blt | inst_bge | inst_bltu | inst_bgeu |
+                          inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;                                     // 需要读取rd的指令
 
 
     assign rj_wait = ~src_no_rj && (rj != 5'b00000) &&
                      ((rj == ex_to_id_dest) || (rj == mem_to_id_dest) || (rj == wb_to_id_dest));
     assign rk_wait = ~src_no_rk && (rk != 5'b00000) &&
                      ((rk == ex_to_id_dest) || (rk == mem_to_id_dest) || (rk == wb_to_id_dest));
-    assign rd_wait = ~src_no_rd && (rd != 5'b00000) &&
+    assign rd_wait = src_has_rd && (rd != 5'b00000) &&
                      ((rd == ex_to_id_dest) || (rd == mem_to_id_dest) || (rd == wb_to_id_dest));
 
     // 如果当前指令的源寄存器与ex阶段的目的寄存器匹配，且EX阶段是加载指令，则需要停顿

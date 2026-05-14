@@ -164,7 +164,8 @@ module mycpu_top (
     wire [31:0] data_sram_addr;
     wire [31:0] data_sram_wdata;
     wire        data_sram_addr_ok;
-    wire        data_sram_data_ok;
+    wire        data_sram_data_ok_wr;
+    wire        data_sram_data_ok_rd;
     wire [31:0] data_sram_rdata;
     // ============================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
@@ -279,25 +280,26 @@ module mycpu_top (
     // 第四阶段：访存阶段 (MEM - Memory Access)
     // ============================================================
     mem_stage u_mem_stage (
-        .clk               (clk),
-        .reset             (reset),
-        .wb_allowin        (wb_allowin),
-        .mem_allowin       (mem_allowin),
-        .ex_to_mem_valid   (ex_to_mem_valid),
-        .ex_to_mem_bus     (ex_to_mem_bus),
-        .mem_to_wb_valid   (mem_to_wb_valid),
-        .mem_to_wb_bus     (mem_to_wb_bus),
-        .data_sram_rdata   (data_sram_rdata),
-        .data_sram_data_ok (data_sram_data_ok),
-        .mem_to_id_dest    (mem_to_id_dest),
-        .mem_to_id_result  (mem_to_id_result),
-        .mem_to_id_data_ok (mem_to_id_data_ok),
-        .wb_exc_valid      (wb_exc_valid),
-        .wb_ertn_flush     (wb_ertn_flush),
-        .mem_exc_valid     (mem_exc_valid),
-        .mem_ertn_flush    (mem_ertn_flush),
-        .mem_csr_we        (mem_csr_we),
-        .mem_csr_num       (mem_csr_num)
+        .clk                  (clk),
+        .reset                (reset),
+        .wb_allowin           (wb_allowin),
+        .mem_allowin          (mem_allowin),
+        .ex_to_mem_valid      (ex_to_mem_valid),
+        .ex_to_mem_bus        (ex_to_mem_bus),
+        .mem_to_wb_valid      (mem_to_wb_valid),
+        .mem_to_wb_bus        (mem_to_wb_bus),
+        .data_sram_rdata      (data_sram_rdata),
+        .data_sram_data_ok_wr (data_sram_data_ok_wr),
+        .data_sram_data_ok_rd (data_sram_data_ok_rd),
+        .mem_to_id_dest       (mem_to_id_dest),
+        .mem_to_id_result     (mem_to_id_result),
+        .mem_to_id_data_ok    (mem_to_id_data_ok),
+        .wb_exc_valid         (wb_exc_valid),
+        .wb_ertn_flush        (wb_ertn_flush),
+        .mem_exc_valid        (mem_exc_valid),
+        .mem_ertn_flush       (mem_ertn_flush),
+        .mem_csr_we           (mem_csr_we),
+        .mem_csr_num          (mem_csr_num)
     );
     // ============================================================
     // 第五阶段：写回阶段 (WB - Write Back)
@@ -395,28 +397,29 @@ module mycpu_top (
     // SRAM-to-AXI 桥模块
     // ============================================================
     sram_to_axi_bridge u_sram_to_axi_bridge (
-        .clk                (clk),
-        .reset              (reset),
-        // 取指 SRAM 侧
-        .inst_sram_req      (inst_sram_req),
-        .inst_sram_wr       (inst_sram_wr),
-        .inst_sram_size     (inst_sram_size),
-        .inst_sram_wstrb    (inst_sram_wstrb),
-        .inst_sram_addr     (inst_sram_addr),
-        .inst_sram_wdata    (inst_sram_wdata),
-        .inst_sram_addr_ok  (inst_sram_addr_ok),
-        .inst_sram_data_ok  (inst_sram_data_ok),
-        .inst_sram_rdata    (inst_sram_rdata),
-        // 访存 SRAM 侧
-        .data_sram_req      (data_sram_req),
-        .data_sram_wr       (data_sram_wr),
-        .data_sram_size     (data_sram_size),
-        .data_sram_wstrb    (data_sram_wstrb),
-        .data_sram_addr     (data_sram_addr),
-        .data_sram_wdata    (data_sram_wdata),
-        .data_sram_addr_ok  (data_sram_addr_ok),
-        .data_sram_data_ok  (data_sram_data_ok),
-        .data_sram_rdata    (data_sram_rdata),
+        .clk                  (clk),
+        .reset                (reset),
+        // 取指 SRAM 侧  
+        .inst_sram_req        (inst_sram_req),
+        .inst_sram_wr         (inst_sram_wr),
+        .inst_sram_size       (inst_sram_size),
+        .inst_sram_wstrb      (inst_sram_wstrb),
+        .inst_sram_addr       (inst_sram_addr),
+        .inst_sram_wdata      (inst_sram_wdata),
+        .inst_sram_addr_ok    (inst_sram_addr_ok),
+        .inst_sram_data_ok    (inst_sram_data_ok),
+        .inst_sram_rdata      (inst_sram_rdata),
+        // 访存 SRAM 侧  
+        .data_sram_req        (data_sram_req),
+        .data_sram_wr         (data_sram_wr),
+        .data_sram_size       (data_sram_size),
+        .data_sram_wstrb      (data_sram_wstrb),
+        .data_sram_addr       (data_sram_addr),
+        .data_sram_wdata      (data_sram_wdata),
+        .data_sram_addr_ok    (data_sram_addr_ok),
+        .data_sram_data_ok_wr (data_sram_data_ok_wr),
+        .data_sram_data_ok_rd (data_sram_data_ok_rd),
+        .data_sram_rdata      (data_sram_rdata),
         // AXI 读地址通道
         .arid           (arid),
         .araddr         (araddr),

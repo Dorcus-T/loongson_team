@@ -44,7 +44,7 @@ module wb_stage (
     wire syscall;
     wire brk;
     wire ine;
-    wire int;
+    wire intr;
     wire adef;
     wire tlbr, pif, ppi, ipe, fpd, fpe, adem, pil, pis, pme;
     wire [15:0] wb_exc;
@@ -158,15 +158,15 @@ module wb_stage (
     // ========== 重取指控制 ==========
     assign wb_pc_back  = wb_pc;
     assign wb_rf_valid = mem_to_wb_rf_valid && wb_valid;
-    assign exc_no_rf   = (wb_rf_valid ? (int ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;
+    assign exc_no_rf   = (wb_rf_valid ? (intr ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;
     assign rf_valid    = wb_rf_valid;
 
     // ========== 异常信号解析 ==========
-    assign {int, adef, tlbr, pif, ppi, syscall, brk, ine, ipe, fpd, fpe, adem, ale, pil, pis, pme} = wb_exc;
+    assign {intr, adef, tlbr, pif, ppi, syscall, brk, ine, ipe, fpd, fpe, adem, ale, pil, pis, pme} = wb_exc;
     assign wb_exc_badv = mem_addr;
     assign wb_exc_pc   = wb_pc;
     assign wb_exc_ecode =
-    int      ? `ECODE_INT   :  // 最高：中断
+    intr     ? `ECODE_INT   :  // 最高：中断
     adef     ? `ECODE_ADE   :  // 第二：取指阶段
     tlbr     ? `ECODE_TLBR  :  // IF tlb相关
     pif      ? `ECODE_PIF   :

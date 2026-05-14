@@ -58,7 +58,7 @@ module id_stage (
     wire syscall;
     wire brk;
     wire ine;
-    wire int;
+    wire intr;
     wire [9:0] id_exc;
     wire id_exc_valid;
 
@@ -262,6 +262,8 @@ module id_stage (
     wire branch_stall;                   // 分支指令数据冒险需要停顿
     wire br_ld_stall;                    // 分支与ld冒险，但ld没取得数据
     wire csr_stall;                      // csr与ertn有关冒险
+    wire int_csr_stall;                  // 中断与csr有关冒险
+    wire inst_csr_stall;                 // csr指令有关冒险
 
     // ========== 指令字段生成 ==========
     assign op_31_26 = id_inst[31:26];
@@ -717,8 +719,8 @@ module id_stage (
                inst_rdcntid | inst_rdcntvh_w | inst_rdcntvl_w |
                inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill |
                (inst_invtlb & (rd == 5'd0 | rd == 5'd1 | rd == 5'd2 | rd == 5'd3 | rd == 5'd4 | rd == 5'd5 | rd == 5'd6)));
-    assign {id_exc[9], id_exc[4:0]} = {int, syscall, brk, ine, ipe, fpd};
+    assign {id_exc[9], id_exc[4:0]} = {intr, syscall, brk, ine, ipe, fpd};
     assign id_exc_valid = |id_exc || id_rf_valid;
-    assign int = has_int;
+    assign intr = has_int;
     // has_int的产生逻辑在csr寄存器堆里
 endmodule

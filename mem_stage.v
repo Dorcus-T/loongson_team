@@ -14,11 +14,12 @@ module mem_stage (
     output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
     // 来自数据存储器
     input  wire [31:0]                  data_sram_rdata,       // 数据SRAM读数据
-    input  wire                         data_sram_data_ok,     // 数据SRAM数据ok
+    input  wire                         data_sram_data_ok_wr,  // 数据SRAM数据写ok
+    input  wire                         data_sram_data_ok_rd,  // 数据SRAM数据读ok
     // 前递控制
     output wire [ 4:0]                  mem_to_id_dest,        // MEM阶段写回寄存器号
     output wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
-    input  wire                         mem_to_id_data_ok,     // MEM前递给id的数据是否准备好
+    output wire                         mem_to_id_data_ok,     // MEM前递给id的数据是否准备好
     // 异常冲刷
     input  wire                         wb_exc_valid,          // WB阶段异常冲刷流水线
     input  wire                         wb_ertn_flush,         // WB阶段有ertn指令则冲刷流水线
@@ -69,10 +70,7 @@ module mem_stage (
 
     // ========== 类sram实现所需信号 ==========
     reg         new_in;                   // 表明mem中的指令是新进入的
-    reg  [31:0] mem_data_r;               // 寄存mem阶段的数据
-    reg         mem_data_r_valid;         // 寄存数据是否有效
-    reg  [31:0] ex_data_r;                // 新读出的数据，若无新数据进入mem就把它存起来
-    reg         ex_data_r_valid;          // 存的新数据有效
+    reg         data_sram_data_ok_r;      // 数据sram数据ok寄存，避免wr和rd重叠导致丢失
 
     // ========== 解析来自EX阶段的总线 ==========
     assign {
@@ -115,13 +113,12 @@ module mem_stage (
         alu_result,          // 101:70  传递异常访存地址
         gr_we,               // 69      寄存器写使能
         dest,                // 68:64   目标寄存器号
-        mem_data_r_valid ? mem_data_r : final_result,
-                             // 63:32   最终结果
+        final_result,        // 63:32   最终结果
         mem_pc               // 31:0    PC
     };
 
     // ========== 流水线控制 ==========
-    assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? data_sram_data_ok : 1'b1;
+    assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? data_sram_data_ok_wr || data_sram_data_ok_rd || data_sram_data_ok_r: 1'b1;
     assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
     assign mem_to_wb_valid = mem_valid && mem_ready_go;
 
@@ -152,32 +149,13 @@ module mem_stage (
     end
 
     always @(posedge clk) begin
-        if (reset || (mem_to_wb_valid && wb_allowin && is_mem_inst)) begin
-            mem_data_r_valid <= 1'b0;
-            mem_data_r       <= 32'b0;
+        if (reset || mem_to_wb_valid && wb_allowin && data_sram_data_ok_r) begin
+            data_sram_data_ok_r <= 1'b0;
         end
-        if (is_mem_inst && !mem_data_r_valid && (data_sram_data_ok || ex_data_r_valid) && !(mem_to_wb_valid && wb_allowin)) begin
-            mem_data_r_valid <= 1'b1;
-            mem_data_r       <= final_result;
+        else begin
+            data_sram_data_ok_r <= data_sram_data_ok_wr && data_sram_data_ok_rd;
         end
     end
-    // 当mem中是访存指令，如果mem_data_r中没有数据那么mem的数据可能来源于ex_data_r和存储器读出，如果有数据，mem中的访存指令不能前进那么就把数据存入mem_data_r
-
-    always @(posedge clk) begin
-        if (reset || new_in) begin
-            ex_data_r_valid <= 1'b0;
-            ex_data_r       <= 32'b0;
-        end
-        if (data_sram_data_ok && ((mem_data_r_valid && is_mem_inst) || !is_mem_inst)) begin
-            ex_data_r_valid <= 1'b1;
-            ex_data_r       <= data_sram_rdata;
-        end
-    end
-    // 如果数据读出来，mem阶段不是访存指令，那么这个数据一定是给ex的数据，就存入ex_data_r。如果mem是访存指令，如果mem_data_r有数据么这个数据就是给ex的，也存入ex_data_r
-    // ex_data_r中有数据的时候，下一条mem指令一定是访存指令，所以只用清零只用new_in就可以
-    // 当前mem不会被阻塞，所以如果前面是一条非访存指令，访存请求发出后，访存指令一定会进入mem，读出的数据后也不会阻塞，直接给wb流水寄存器就行。
-    // 如果前面是一条访存指令，第二条访存指令发出请求后可能被阻塞在ex，数据返回后，因为无阻塞第一条会立马进入wb。
-    // 所以这两个寄存器一般不会用到
 
     // ========== csr写文件写回控制 ==========
     assign mem_csr_we = csr_we && mem_valid && !mem_exc_valid;
@@ -186,24 +164,24 @@ module mem_stage (
     assign offset = alu_result[1:0];
 
     // 移位对齐（将目标数据移到最低位）
-    assign shift_data = (ex_data_r_valid ? ex_data_r : data_sram_rdata) >> (offset * 8);
+    assign shift_data = data_sram_rdata >> (offset * 8);
 
     // 根据访存大小提取并扩展
-    assign data_result = mem_size[2] ? (ex_data_r_valid ? ex_data_r : data_sram_rdata) :          // 字
+    assign data_result = mem_size[2] ? data_sram_rdata :                                          // 字
                          mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} :  // 半字
                          mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :    // 字节
                          32'b0;
 
     // 最终结果：来自存储器或ALU或者CSR
-    assign final_result = res_from_mem   ? (mem_data_r_valid ? mem_data_r : data_result) :
-                          res_from_csr   ? csr_rvalue  :
+    assign final_result = res_from_mem   ? data_result   :
+                          res_from_csr   ? csr_rvalue    :
                           res_from_timer ? timer_finalval :
                           alu_result;
 
     // ========== 前递输出 ==========
     assign mem_to_id_dest    = dest & {5{mem_valid}} & {5{gr_we}};
     assign mem_to_id_result  = final_result;
-    assign mem_to_id_data_ok = res_from_mem ? data_sram_data_ok : 1'b1;
+    assign mem_to_id_data_ok = res_from_mem ? data_sram_data_ok_wr || data_sram_data_ok_rd || data_sram_data_ok_r: 1'b1;
 
     // ========== 检测异常与ertn ==========
     assign mem_exc_valid  = (|mem_exc || mem_rf_valid) && mem_valid;

@@ -21,7 +21,8 @@ module sram_to_axi_bridge (
     input  wire [31:0]  data_sram_addr,
     input  wire [31:0]  data_sram_wdata,
     output wire         data_sram_addr_ok,
-    output wire         data_sram_data_ok,
+    output wire         data_sram_data_ok_wr,
+    output wire         data_sram_data_ok_rd,
     output wire [31:0]  data_sram_rdata,
 
     // AXI3 Master
@@ -157,7 +158,6 @@ module sram_to_axi_bridge (
     reg         mem_data_valid;     // 访存读数据就绪
     reg  [31:0] mem_data_r;         // 访存读数据锁存
 
-    wire        data_sram_data_ok_rd;
 
     // ========== 写请求相关信号 ==========
     localparam AW_W_IDLE = 2'd0;
@@ -170,7 +170,6 @@ module sram_to_axi_bridge (
 
     // ========== 写响应相关信号 ==========
     reg  [ 1:0] b_pending_cnt;
-    wire        data_sram_data_ok_wr;
 
     // ========== 常量axi信号 ==========
     assign arlen   = 8'h00;
@@ -449,6 +448,5 @@ module sram_to_axi_bridge (
 
     // 写有关data_ok生成
     assign data_sram_data_ok_wr = bvalid && bready_r && (b_pending_cnt > 0);
-    assign data_sram_data_ok    = data_sram_data_ok_rd || data_sram_data_ok_wr;
 
 endmodule

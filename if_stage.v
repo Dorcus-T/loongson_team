@@ -185,7 +185,7 @@ module if_stage (
             nextpc_r <= 32'b0;
         end
         else if (!(inst_sram_req && inst_sram_addr_ok)) begin
-            if (br_taken || exc_no_rf || wb_ertn_flush || rf_valid) begin
+            if (br_taken || exc_no_rf || wb_ertn_flush || rf_valid && !pre_if_adef) begin
                 fork_r   <= 1'b1;
                 nextpc_r <= nextpc;
             end

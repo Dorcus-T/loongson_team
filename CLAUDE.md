@@ -11,6 +11,8 @@ LoongArch (LA) 5级顺序流水线 CPU
 - `mycpu_top.v` — 顶层，例化全部子模块
 - `if_stage.v / id_stage.v / ex_stage.v / mem_stage.v / wb_stage.v` — 5级流水
 - `alu.v` — 组合逻辑 ALU + 串行除法器
+- `mydiv.v` — AXI-Stream 有符号除法器
+- `mydivu.v` — AXI-Stream 无符号除法器
 - `csr.v` — CSR 寄存器文件（CRMD/PRMD/ERA/DMW/TLB 控制等 ~20 reg）
 - `mmu.v / tlb.v` — 虚实地址转换，32项 TLB，2搜索端口
 - `regfile.v` — 32×32 通用寄存器堆

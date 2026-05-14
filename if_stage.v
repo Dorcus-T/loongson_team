@@ -203,11 +203,11 @@ module if_stage (
             inst_dirty <= 2'b0;
         end
         else if (wb_ertn_flush || exc_no_rf || br_taken || rf_valid) begin
-            inst_dirty <= 2'b0;
-            if(!if_exc && !(inst_sram_data_ok || if_inst_r_valid || pre_if_inst_r_valid))
-            inst_dirty <= inst_dirty + 1'b1;
-            if(!new_in && !pre_if_exc_r && pre_if_ready_go)
-            inst_dirty <= inst_dirty + 1'b1;
+            if((!if_exc && !(inst_sram_data_ok || if_inst_r_valid || pre_if_inst_r_valid)) && (!new_in && !pre_if_exc_r && pre_if_ready_go_r))
+            inst_dirty <= 2'b10;
+            else if((!if_exc && !(inst_sram_data_ok || if_inst_r_valid || pre_if_inst_r_valid)) || (!new_in && !pre_if_exc_r && pre_if_ready_go_r))
+            inst_dirty <= 2'b1;
+            else inst_dirty <= 2'b0;
         end
         else if (inst_sram_data_ok && (inst_dirty != 2'b00))
             inst_dirty <= inst_dirty - 1'b1;
@@ -229,6 +229,6 @@ module if_stage (
 
     // ========== 检测异常 ==========
     assign pre_if_adef = (fork_r ? nextpc_r[1:0] : nextpc[1:0]) != 2'b00 && pre_if_valid;
-    assign pre_if_exc = {pre_if_adef, if_tlb_exc} && pre_if_valid;
-    assign pre_if_exc_valid = |pre_if_exc && pre_if_valid
+    assign pre_if_exc = {pre_if_adef, if_tlb_exc};
+    assign pre_if_exc_valid = |pre_if_exc && pre_if_valid;
 endmodule

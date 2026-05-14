@@ -168,7 +168,7 @@ module exe_stage (
     // ========== 流水线控制 ==========
     assign ex_inst_valid = ex_valid && !mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid;
     assign is_div_inst   = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
-    assign ex_ready_go   = is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
+    assign ex_ready_go   = is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
                                         ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (data_sram_req && data_sram_addr_ok) || req_already : 1'b1;
     // 如果是除法指令，要么正确握手并且算完了发出ready信号，要么由于后面有异常和ertn导致除法指令不发出除法请求就直接走
     // 如果是访存指令，就必须发出访存请求之后才能往后走

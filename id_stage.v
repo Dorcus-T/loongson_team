@@ -718,7 +718,7 @@ module id_stage (
                inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill |
                (inst_invtlb & (rd == 5'd0 | rd == 5'd1 | rd == 5'd2 | rd == 5'd3 | rd == 5'd4 | rd == 5'd5 | rd == 5'd6)));
     assign {id_exc[9], id_exc[4:0]} = {int, syscall, brk, ine, ipe, fpd};
-    assign id_exc_valid = |id_exc || id_rf_valid;
+    assign id_exc_valid = |id_exc || id_rf_valid && id_valid;
     assign int = has_int;
     // has_int的产生逻辑在csr寄存器堆里
 endmodule

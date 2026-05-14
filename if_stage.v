@@ -88,7 +88,7 @@ module if_stage (
                      br_taken      ? br_target   :
                                      seq_pc      ;
     // nextpc逻辑中异常和ertn的优先级高于brtaken，如果id和wb同时发来信号，优先处理wb的信号
-    assign if_ready_go    = !(br_taken || fork_r) && (if_inst_r_valid || (inst_sram_data_ok || pre_if_inst_r_valid)) && !inst_dirty && (|if_exc);  //分支会阻塞if指令
+    assign if_ready_go    = !(br_taken || fork_r) && (if_inst_r_valid || (inst_sram_data_ok || pre_if_inst_r_valid)) && !inst_dirty || (|if_exc);  //分支会阻塞if指令
     // 如果有跳转或者寄存的跳转信号就不能让if中的错误指令往后走。如果if中的指令得到了访存数据才能继续往后走，如果下一次
     assign if_allowin     = !if_valid || (if_ready_go && id_allowin) || br_taken || wb_ertn_flush || rf_valid || exc_no_rf || fork_r;  //分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
     assign if_to_id_valid = if_valid && if_ready_go;

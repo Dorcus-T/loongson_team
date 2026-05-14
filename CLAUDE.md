@@ -1,3 +1,36 @@
+## 项目概览
+
+LoongArch (LA) 5级顺序流水线 CPU
+- 流水级：IF → ID → EX → MEM → WB
+- 前推网络：EX/MEM/WB → ID 全旁路
+- Load-use 停顿、CSR/ERTN 互锁
+- AXI3 主接口，通过 sram_axi_bridge 桥接
+
+## 目录结构（扁平项目）
+
+- `mycpu_top.v` — 顶层，例化全部子模块
+- `if_stage.v / id_stage.v / ex_stage.v / mem_stage.v / wb_stage.v` — 5级流水
+- `alu.v` — 组合逻辑 ALU + 串行除法器
+- `csr.v` — CSR 寄存器文件（CRMD/PRMD/ERA/DMW/TLB 控制等 ~20 reg）
+- `mmu.v / tlb.v` — 虚实地址转换，32项 TLB，2搜索端口
+- `regfile.v` — 32×32 通用寄存器堆
+- `timer_64bit.v` — 64位周期计数器
+- `sram_axi_bridge.v` — 内部 SRAM 协议 → AXI3 转换
+- `decoder_*_*.v` — generate 实现译码器
+- `mycpu.h` — 总线位宽、CSR 地址、异常编码宏定义
+
+## 仿真命令
+
+- 综合工具：Verilator
+- lint 工具：iverilog（详见 `.vscode/settings.json`）
+
+## 坑点
+
+- **复位极性**：外部 `aresetn` 低有效，内部 `reset` 高有效
+- **TLB 可配置**：条目数由 parameter 控制，当前 32 项
+- **SRAM 协议两通道独立**：inst_sram（取指）和 data_sram（访存）各自握手
+- **CSR 写后读冒险**：跟踪 CSR 写所在的流水级来解决 RAW
+
 # Verilog 代码格式规范
 
 ## 1. 模块声明

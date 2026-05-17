@@ -27,7 +27,9 @@ module mem_stage (
     output wire                         mem_ertn_flush,        // 防止ertn位于mem时,ex发出访存请求
     // csr与ertn冒险
     output wire                         mem_csr_we,            // mem阶段确定要写csr
-    output wire [13:0]                  mem_csr_num            // mem阶段写csr的号码
+    output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
+    // cpu可接受数据
+    output wire                         data_cpu_accept        // MEM可接受读数据
 );
 
     reg  mem_valid;                                   // MEM阶段有效标志
@@ -121,6 +123,10 @@ module mem_stage (
     assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? data_sram_data_ok_wr || data_sram_data_ok_rd || data_sram_data_ok_r: 1'b1;
     assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
     assign mem_to_wb_valid = mem_valid && mem_ready_go;
+
+    // ========== CPU可接受数据 ==========
+    // load指令有效、无异常、WB就绪时拉高，告诉桥可以发送/弹出读数据
+    assign data_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we) && !mem_exc_valid;
 
     // 访存级有效标志更新
     always @(posedge clk) begin

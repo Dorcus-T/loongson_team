@@ -156,6 +156,7 @@ module mycpu_top (
     wire        inst_sram_addr_ok;
     wire        inst_sram_data_ok;
     wire [31:0] inst_sram_rdata;
+    wire        inst_cpu_accept;      
     // --- 数据 SRAM 信号 ---
     wire        data_sram_req;
     wire        data_sram_wr;
@@ -167,6 +168,7 @@ module mycpu_top (
     wire        data_sram_data_ok_wr;
     wire        data_sram_data_ok_rd;
     wire [31:0] data_sram_rdata;
+    wire        data_cpu_accept;
     // ============================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
     // ============================================================
@@ -194,7 +196,8 @@ module mycpu_top (
         .exc_entry         (exc_entry),
         .exc_back_pc       (exc_back_pc),
         .rf_valid          (rf_valid),
-        .rf_pc             (wb_pc_back)
+        .rf_pc             (wb_pc_back),
+        .inst_cpu_accept     (inst_cpu_accept)
     );
 
     // ============================================================
@@ -299,7 +302,8 @@ module mycpu_top (
         .mem_exc_valid        (mem_exc_valid),
         .mem_ertn_flush       (mem_ertn_flush),
         .mem_csr_we           (mem_csr_we),
-        .mem_csr_num          (mem_csr_num)
+        .mem_csr_num          (mem_csr_num),
+        .data_cpu_accept      (data_cpu_accept)
     );
     // ============================================================
     // 第五阶段：写回阶段 (WB - Write Back)

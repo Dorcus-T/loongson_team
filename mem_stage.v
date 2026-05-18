@@ -68,19 +68,19 @@ module mem_stage (
     wire [31:0] timer_finalval;           // 筛选后的计数器读取数据
     // 实现类sram总线
     wire        is_mem_inst;              // 是访存指令
-    reg  [ 1:0] inst_dirty;               // 不为0就代表下一次存储器的dataok数据无效
-
+    wire        mem_we;                   // 存储器写使能
     // ========== 类sram实现所需信号 ==========
     reg         new_in;                   // 表明mem中的指令是新进入的
     reg         data_sram_data_ok_r;      // 数据sram数据ok寄存，避免wr和rd重叠导致丢失
 
     // ========== 解析来自EX阶段的总线 ==========
     assign {
-        tlbrd_en,            // 241     tlbrd使能
-        tlbwr_en,            // 240     tlbwf使能
-        tlbfill_en,          // 239
-        mem_rf_valid,        // 238     重取指标志
-        is_mem_inst,         // 237     是访存指令
+        tlbrd_en,            // 242     tlbrd使能
+        tlbwr_en,            // 241     tlbwf使能
+        tlbfill_en,          // 240
+        mem_rf_valid,        // 239     重取指标志
+        is_mem_inst,         // 238     是访存指令
+        mem_we,              // 237     存储器写使能
         timer_finalval,      // 236:205 筛选后的计数器数据
         res_from_timer,      // 204     结果来自计数器
         res_from_csr,        // 203     结果来自csr寄存器堆

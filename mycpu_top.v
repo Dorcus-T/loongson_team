@@ -413,6 +413,7 @@ module mycpu_top (
         .inst_sram_addr_ok    (inst_sram_addr_ok),
         .inst_sram_data_ok    (inst_sram_data_ok),
         .inst_sram_rdata      (inst_sram_rdata),
+        .inst_cpu_accept      (inst_cpu_accept),
         // 访存 SRAM 侧  
         .data_sram_req        (data_sram_req),
         .data_sram_wr         (data_sram_wr),
@@ -424,6 +425,7 @@ module mycpu_top (
         .data_sram_data_ok_wr (data_sram_data_ok_wr),
         .data_sram_data_ok_rd (data_sram_data_ok_rd),
         .data_sram_rdata      (data_sram_rdata),
+        .data_cpu_accept      (data_cpu_accept),
         // AXI 读地址通道
         .arid           (arid),
         .araddr         (araddr),

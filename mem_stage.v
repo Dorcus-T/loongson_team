@@ -12,10 +12,9 @@ module mem_stage (
     // 输出给wb阶段
     output wire                         mem_to_wb_valid,       // MEM到WB有效
     output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
-    // 来自数据存储器
-    input  wire [31:0]                  data_sram_rdata,       // 数据SRAM读数据
-    input  wire                         data_sram_data_ok_wr,  // 数据SRAM数据写ok
-    input  wire                         data_sram_data_ok_rd,  // 数据SRAM数据读ok
+     // 来自 DCache
+    input  wire [31:0]                  dcache_cpu_rdata,      // DCache 读数据
+    input  wire                         dcache_cpu_data_ok,    // DCache 数据就绪
     // 前递控制
     output wire [ 4:0]                  mem_to_id_dest,        // MEM阶段写回寄存器号
     output wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
@@ -29,11 +28,11 @@ module mem_stage (
     output wire                         mem_csr_we,            // mem阶段确定要写csr
     output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
     // cpu可接受数据
-    output wire                         data_cpu_accept        // MEM可接受读数据
+    output wire                         dcache_cpu_accept      // MEM可接受 cache 读数据
 );
 
     reg  mem_valid;                                   // MEM阶段有效标志
-    wire mem_ready_go;                                // MEM阶段就绪（总是1）
+    wire mem_ready_go;                                // MEM阶段就绪
     reg  [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus_r;     // 锁存的执行级数据
 
     // ========== 异常信号 ==========
@@ -66,12 +65,9 @@ module mem_stage (
     // 计数器数值筛选
     wire        res_from_timer;           // 结果来自计数器
     wire [31:0] timer_finalval;           // 筛选后的计数器读取数据
-    // 实现类sram总线
+    // 访存指令
     wire        is_mem_inst;              // 是访存指令
     wire        mem_we;                   // 存储器写使能
-    // ========== 类sram实现所需信号 ==========
-    reg         new_in;                   // 表明mem中的指令是新进入的
-    reg         data_sram_data_ok_r;      // 数据sram数据ok寄存，避免wr和rd重叠导致丢失
 
     // ========== 解析来自EX阶段的总线 ==========
     assign {
@@ -120,13 +116,14 @@ module mem_stage (
     };
 
     // ========== 流水线控制 ==========
-    assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? data_sram_data_ok_wr || data_sram_data_ok_rd || data_sram_data_ok_r: 1'b1;
+    // 统一等待 cache 返回 data_ok（store 由 cache 保证恒为 1）
+    assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? dcache_cpu_data_ok : 1'b1;
     assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
     assign mem_to_wb_valid = mem_valid && mem_ready_go;
 
-    // ========== CPU可接受数据 ==========
-    // load指令有效、无异常、WB就绪时拉高，告诉桥可以发送/弹出读数据
-    assign data_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we) && !mem_exc_valid;
+    // ========== DCache 数据接受 ==========
+    // load指令有效、无异常、WB就绪时拉高，告知 cache 可弹出 FIFO 数据
+    assign dcache_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we) && !mem_exc_valid;
 
     // 访存级有效标志更新
     always @(posedge clk) begin
@@ -144,25 +141,6 @@ module mem_stage (
         end
     end
 
-    // ========== 实现类sram总线 ==========
-    always @(posedge clk) begin
-        if (reset || !(mem_allowin && ex_to_mem_valid)) begin
-            new_in <= 1'b0;
-        end
-        else if (mem_allowin && ex_to_mem_valid) begin
-            new_in <= 1'b1;
-        end
-    end
-
-    always @(posedge clk) begin
-        if (reset || mem_to_wb_valid && wb_allowin && data_sram_data_ok_r) begin
-            data_sram_data_ok_r <= 1'b0;
-        end
-        else begin
-            data_sram_data_ok_r <= data_sram_data_ok_wr && data_sram_data_ok_rd;
-        end
-    end
-
     // ========== csr写文件写回控制 ==========
     assign mem_csr_we = csr_we && mem_valid && !mem_exc_valid;
 
@@ -170,10 +148,10 @@ module mem_stage (
     assign offset = alu_result[1:0];
 
     // 移位对齐（将目标数据移到最低位）
-    assign shift_data = data_sram_rdata >> (offset * 8);
+    assign shift_data = dcache_cpu_rdata >> (offset * 8);
 
     // 根据访存大小提取并扩展
-    assign data_result = mem_size[2] ? data_sram_rdata :                                          // 字
+    assign data_result = mem_size[2] ? dcache_cpu_rdata :                                          // 字
                          mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} :  // 半字
                          mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :    // 字节
                          32'b0;
@@ -187,7 +165,7 @@ module mem_stage (
     // ========== 前递输出 ==========
     assign mem_to_id_dest    = dest & {5{mem_valid}} & {5{gr_we}};
     assign mem_to_id_result  = final_result;
-    assign mem_to_id_data_ok = res_from_mem ? data_sram_data_ok_wr || data_sram_data_ok_rd || data_sram_data_ok_r: 1'b1;
+    assign mem_to_id_data_ok = res_from_mem ? dcache_cpu_data_ok : 1'b1;
 
     // ========== 检测异常与ertn ==========
     assign mem_exc_valid  = (|mem_exc || mem_rf_valid) && mem_valid;

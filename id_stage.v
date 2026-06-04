@@ -76,7 +76,7 @@ module id_stage (
     wire [19:0] i20;                     // 20位立即数[24:5]
     wire [15:0] i16;                     // 16位立即数[25:10]
     wire [25:0] i26;                     // 26位立即数（用于分支）
-
+    wire [4:0] cache_code;               // cache操作类型
     // ========== 解码器输出（用于指令识别） ==========
     wire [63:0] op_31_26_d;              // 6位操作码的1-of-64解码
     wire [15:0] op_25_22_d;              // 4位操作码的1-of-16解码
@@ -180,6 +180,8 @@ module id_stage (
     wire inst_rdcntvl_w;    // 读取计数器低32位写入rd
     wire inst_rdcntvh_w;    // 读取计数器高32位写入rd
     wire inst_rdcntid;      // 读取csr_tid写入rd
+    // ========== cache控制指令 ==========
+    wire inst_cacop;        // cache操作指令
 
     // ========== 控制信号 ==========
     wire [18:0] alu_op;                  // ALU操作码（19位）
@@ -208,6 +210,7 @@ module id_stage (
     wire tlbrd_en;                       // WB读tlb并写csr
     wire tlbwr_en;                       // tlbwrWB写tlb
     wire tlbfill_en;
+    wire cache_en;                       // cache操作使能
     // ========== 立即数控制信号 ==========
     wire need_ui5;                       // 5位无符号立即数（移位量）
     wire need_si12;                      // 12位有符号立即数
@@ -281,7 +284,7 @@ module id_stage (
     assign i26      = {id_inst[9:0], id_inst[25:10]};
     assign csr_id_num = inst_rdcntid ? 14'h40
                       : inst_tlbsrch ? 14'h10 : id_inst[23:10];
-
+    assign cache_code = id_inst[4:0];
     // ========== 指令解码器实例化（将位向量转换为独热码） ==========
     decoder_6_64 u_dec0 (
         .in  (op_31_26),
@@ -385,13 +388,16 @@ module id_stage (
     // 计数器指令
     assign inst_rdcntvl_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & (rj == 5'b0);
     assign inst_rdcntvh_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h19] & (rj == 5'b0);
-    assign inst_rdcntid = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & (rd == 5'b0);
+    assign inst_rdcntid   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & (rd == 5'b0);
+    // cache控制指令
+    assign inst_cacop     = op_31_26_d[6'h01] & op_25_22_d[4'h8];
 
     // ========== alu操作码生成 ==========
     assign alu_op[0]  = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w |
                         inst_jirl | inst_bl | inst_pcaddu12i |
                         inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
-                        inst_st_b | inst_st_h;     // 加法操作
+                        inst_st_b | inst_st_h | inst_cacop;
+                                                   // 加法操作
     assign alu_op[1]  = inst_sub_w;                // 减法操作
     assign alu_op[2]  = inst_slt | inst_slti;      // 有符号小于置1
     assign alu_op[3]  = inst_sltu | inst_sltui;    // 无符号小于置1
@@ -416,7 +422,7 @@ module id_stage (
     assign need_si12 = inst_addi_w | inst_ld_w | inst_st_w |
                        inst_slti | inst_sltui |
                        inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
-                       inst_st_b | inst_st_h;                       // 12位有符号立即数
+                       inst_st_b | inst_st_h | inst_cacop;          // 12位有符号立即数
     assign need_ui12 = inst_andi | inst_ori | inst_xori;            // 12位无符号立即数
     assign need_si16 = inst_jirl | inst_beq | inst_bne |
                        inst_blt | inst_bltu | inst_bge | inst_bgeu; // 16位有符号立即数（分支）
@@ -440,14 +446,14 @@ module id_stage (
 
     // ========== 控制信号生成 ==========
     assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_blt |
-                           inst_bltu | inst_bge | inst_bgeu | inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;  // 使用rd作为第二读寄存器数
-    assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;  // 读寄存器数1来自PC
+                           inst_bltu | inst_bge | inst_bgeu | inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;  // rkd数据源于rd寄存器
+    assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;  // alu操作数1来自PC
     assign src2_is_imm   = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w |
                            inst_ld_w | inst_st_w | inst_lu12i_w | inst_jirl | inst_bl |
                            inst_slti | inst_sltui | inst_pcaddu12i |
                            inst_andi | inst_ori | inst_xori |
                            inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
-                           inst_st_b | inst_st_h;                 // 读寄存器数2来自立即数
+                           inst_st_b | inst_st_h | inst_cacop;    // alu操作数2来自立即数
     assign res_from_mem  = inst_ld_w | inst_ld_b | inst_ld_h |
                            inst_ld_bu | inst_ld_hu;               // 结果来自存储器（加载指令）
     assign res_from_csr  = inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid;// 结果来自csr寄存器堆
@@ -458,7 +464,7 @@ module id_stage (
     assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b &
                            ~inst_blt & ~inst_bltu & ~inst_bge & ~inst_bgeu &
                            ~inst_st_b & ~inst_st_h & ~inst_tlbsrch & ~inst_tlbrd & ~inst_tlbwr & ~inst_tlbfill & ~inst_invtlb &
-                           ~inst_ertn;                            // 写通用寄存器条件
+                           ~inst_ertn & ~inst_cacop;               // 写通用寄存器条件
     assign mem_we        = inst_st_w | inst_st_b | inst_st_h;     // 存储器写使能
     assign dest          = dst_is_r1 ? 5'd1 :
                            dst_is_rdtid ? rj : rd;                // 目的寄存器：BL写R1，rdtid写rj，其他写rd
@@ -468,7 +474,7 @@ module id_stage (
     assign tlbrd_en      = inst_tlbrd;
     assign tlbwr_en      = inst_tlbwr;
     assign tlbfill_en    = inst_tlbfill;
-
+    assign cache_en      = inst_cacop;
     // 访存大小编码
     assign mem_size[0]   = inst_ld_b | inst_ld_bu | inst_st_b;    // 字节访问
     assign mem_size[1]   = inst_ld_h | inst_ld_hu | inst_st_h;    // 半字访问
@@ -573,6 +579,8 @@ module id_stage (
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装
     assign id_to_ex_bus = {
+        cache_code,     // 298:294 cache操作类型
+        cache_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
         invtlb_en,      // 291     invtlb使能
         tlbrd_en,       // 290     tlbrd使能
@@ -630,9 +638,9 @@ module id_stage (
     always @(posedge clk) begin
         if (reset || wb_exc_valid || wb_ertn_flush) id_rf_valid <= 1'b0;
         else if (id_to_ex_valid && ex_allowin) begin
-            id_rf_valid <= (csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
+            id_rf_valid <= ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
                                        || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) && id_valid;
+                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cache_code[2:0] == 3'b000)) && id_valid;
         end
     end
     // ========== 冒险检测、前递处理、阻塞处理 ==========
@@ -646,7 +654,7 @@ module id_stage (
                           inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
                           inst_pcaddu12i | inst_st_b | inst_st_h |
                           inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_rdcntvl_w | inst_rdcntvh_w |
-                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill;            // 不读取rk的指令
+                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop;            // 不读取rk的指令
     assign src_has_rd   = inst_st_w | inst_beq | inst_bne |
                           inst_blt | inst_bge | inst_bltu | inst_bgeu |
                           inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;                                     // 需要读取rd的指令
@@ -717,7 +725,7 @@ module id_stage (
                inst_st_b | inst_st_h | inst_syscall | inst_break | inst_ertn |
                inst_csrrd | inst_csrwr | inst_csrxchg |
                inst_rdcntid | inst_rdcntvh_w | inst_rdcntvl_w |
-               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill |
+               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop |
                (inst_invtlb & (rd == 5'd0 | rd == 5'd1 | rd == 5'd2 | rd == 5'd3 | rd == 5'd4 | rd == 5'd5 | rd == 5'd6)));
     assign {id_exc[9], id_exc[4:0]} = {intr, syscall, brk, ine, ipe, fpd};
     assign id_exc_valid = (|id_exc || id_rf_valid) && id_valid;

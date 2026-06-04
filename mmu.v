@@ -9,6 +9,7 @@ module mmu (
     output wire [31:0] paddr_to_if,
     output wire [ 2:0] if_tlb_exc,
     output wire [ 1:0] if_mat,
+    output wire         if_cached,       // IF 访问可缓存（MAT==1）
 
     // id interact
     // ex interact
@@ -19,6 +20,7 @@ module mmu (
     output wire [ 5:0] srch_value,
     output wire [ 4:0] ex_tlb_exc,
     output wire [ 1:0] ex_mat,
+    output wire         ex_cached,       // EX 访问可缓存（MAT==1）
 
     // mem interact
     // wb interact
@@ -28,6 +30,8 @@ module mmu (
     input  wire [ 1:0] plv_in,
     input  wire [ 5:0] ecode_in,
     input  wire [ 1:0] dapg_in,
+    input  wire [ 1:0] datf_in,         // CRMD.DATF — IF 直接翻译 MAT
+    input  wire [ 1:0] datm_in,         // CRMD.DATM — MEM 直接翻译 MAT
     input  wire [63:0] dmw,
     input  wire [`TLBCSR_BUS_WD-1:0] tlbcsr,
     output wire [`TLBRD_BUS_WD-1:0]  tlbrd_value
@@ -243,7 +247,14 @@ module mmu (
     assign s0_tlb_exc[1] = s0_v == 1'b0 && !s0_tlb_exc[2];
     assign s0_tlb_exc[0] = (plv > s0_plv) && !s0_tlb_exc[2] && !s0_tlb_exc[1];
     assign if_tlb_exc = s0_tlb_exc & {3{dapg==2'b01}} & {3{if_match==2'b0}};
-    assign if_mat = s0_mat;
+    // MAT 选源：直接翻译 → DATF / DMW窗口 → DMW MAT / 页表 → TLB MAT
+    wire [1:0] if_mat_final;
+    assign if_mat_final = (dapg == 2'b10) ? datf_in           :
+                          if_match[0]     ? dmw0[`CSR_DMW_MAT]:
+                          if_match[1]     ? dmw1[`CSR_DMW_MAT]:
+                                            s0_mat;
+    assign if_mat    = if_mat_final;
+    assign if_cached = (if_mat_final == 2'b01);
     assign paddr_to_if = dapg == 2'b10    ? vaddr_from_if                              :
                          if_match[0]      ? {dmw0[`CSR_DMW_PSEG], vaddr_from_if[28:0]} :
                          if_match[1]      ? {dmw1[`CSR_DMW_PSEG], vaddr_from_if[28:0]} :
@@ -265,7 +276,14 @@ module mmu (
     assign s1_tlb_exc[1] = store && s1_v == 1'b0 && !s1_tlb_exc[4] && !s1_tlb_exc[3] && !s1_tlb_exc[2] && !tlbsrch_en && !invtlb_en;
     assign s1_tlb_exc[0] = store && s1_d == 1'b0 && !s1_tlb_exc[4] && !s1_tlb_exc[3] && !s1_tlb_exc[2] && !s1_tlb_exc[1] && !tlbsrch_en && !invtlb_en;
     assign ex_tlb_exc = s1_tlb_exc & {5{dapg==2'b01}} & {5{ex_match==2'b0}};
-    assign ex_mat = s1_mat;
+    // MAT 选源：直接翻译 → DATM / DMW窗口 → DMW MAT / 页表 → TLB MAT
+    wire [1:0] ex_mat_final;
+    assign ex_mat_final = (dapg == 2'b10) ? datm_in           :
+                          ex_match[0]     ? dmw0[`CSR_DMW_MAT]:
+                          ex_match[1]     ? dmw1[`CSR_DMW_MAT]:
+                                            s1_mat;
+    assign ex_mat    = ex_mat_final;
+    assign ex_cached = (ex_mat_final == 2'b01);
     assign paddr_to_ex = tlbsrch_en || invtlb_en ? 32'b0                               :
                          dapg == 2'b10    ? vaddr_from_ex                              :
                          ex_match[0]      ? {dmw0[`CSR_DMW_PSEG], vaddr_from_ex[28:0]} :

@@ -22,8 +22,10 @@ module csr_regfile (
     output wire [ 5:0]                  ecode_out,     // 例外码输出
     output wire [ 1:0]                  da_pg_out,
     output wire [63:0]                  dmw_out,
-    input  wire [`TLBRD_BUS_WD-1:0]     tlbrd_bus,     // TLB数据传入（由MMU加工）
-    output wire [`TLBCSR_BUS_WD-1:0]    tlbcsr_bus     // TLB相关CSR数据总线
+    output wire [ 1:0]                  datf_out,       // CRMD.DATF — IF 直接翻译 MAT
+    output wire [ 1:0]                  datm_out,       // CRMD.DATM — MEM 直接翻译 MAT
+    input  wire [`TLBRD_BUS_WD-1:0]     tlbrd_bus,      // TLB数据传入（由MMU加工）
+    output wire [`TLBCSR_BUS_WD-1:0]    tlbcsr_bus      // TLB相关CSR数据总线
 );
 
     // ========== CSR 值输出（供流水线使用） ==========
@@ -95,6 +97,8 @@ module csr_regfile (
     assign plv_out   = csr_crmd_rvalue[1:0];
     assign da_pg_out = {csr_crmd_rvalue[3], csr_crmd_rvalue[4]};// 映射模式输出
     assign dmw_out   = {csr_dmw0_rvalue, csr_dmw1_rvalue};      // 直接映射窗口输出
+    assign datf_out  = csr_crmd[`CSR_CRMD_DATF];               // IF 直接翻译 MAT
+    assign datm_out  = csr_crmd[`CSR_CRMD_DATM];               // MEM 直接翻译 MAT
     assign ecode_out = csr_estat_rvalue[21:16];                 // ecode输出
 
     assign tlbcsr_bus = {

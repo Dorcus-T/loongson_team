@@ -15,7 +15,7 @@
 // ============================================================================
 `define BR_BUS_WD           34                            // 分支总线宽度
 `define IF_TO_ID_BUS_WD     68                            // IF到ID总线
-`define ID_TO_EX_BUS_WD     293                           // ID到EX总线
+`define ID_TO_EX_BUS_WD     299                           // ID到EX总线（+6: cacop）
 `define EX_TO_MEM_BUS_WD    243                           // EX到MEM总线
 `define MEM_TO_WB_BUS_WD    202                           // MEM到WB总线
 `define WB_TO_RF_BUS_WD     38                            // WB到寄存器文件
@@ -158,4 +158,11 @@
 // ============================================================================
 `define ESUBCODE_ADEF       9'd0                          // 取指地址错例外
 `define ESUBCODE_ADEM       9'd1                          // 访存指令地址错例外
+// ============================================================================
+// cache相关参数定义
+// ============================================================================
+`define WAY_NUM      2
+`define INDEX_WIDTH  8
+`define TAG_WIDTH    20
+`define OFFSET_WIDTH 4
 `endif

@@ -1,40 +1,42 @@
 `include "mycpu.h"
 
 module if_stage (
-    input  wire        clk,                          // 时钟信号
-    input  wire        reset,                        // 复位信号（高有效）
+    input  wire                     clk,                 // 时钟信号
+    input  wire                     reset,               // 复位信号（高有效）
     // allowin
-    input  wire        id_allowin,                   // ID阶段允许接收数据
+    input  wire                     id_allowin,          // ID阶段允许接收数据
     // 来自id阶段的分支总线
-    input  wire [`BR_BUS_WD-1:0] br_bus,             // 分支总线：{br_taken, br_target}
+    input  wire [`BR_BUS_WD-1:0]   br_bus,              // 分支总线：{br_taken, br_target}
     // 输出给id阶段
-    output wire        if_to_id_valid,               // IF到ID有效标志
-    output wire [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus, // IF到ID总线
-    // 与指令存储器的数据交互
-    output wire        inst_sram_req,        // 指令SRAM使能
-    output wire        inst_sram_wr,         // 指令SRAM写使能
-    output wire [ 1:0] inst_sram_size,       // 指令SRAM访问长度
-    output wire [ 3:0] inst_sram_wstrb,      // 指令SRAM写掩码
-    output wire [31:0] inst_sram_addr,       // 指令SRAM地址
-    output wire [31:0] inst_sram_wdata,      // 指令SRAM写数据（未使用）
-    input  wire        inst_sram_addr_ok,    // 地址握手成功
-    input  wire        inst_sram_data_ok,    // 数据握手成功
-    input  wire [31:0] inst_sram_rdata,      // 指令SRAM读数据
+    output wire                     if_to_id_valid,      // IF到ID有效标志
+    output wire [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus,     // IF到ID总线
+    // 与 ICache 的接口
+    output wire                     icache_cpu_req,      // ICache 请求有效
+    output wire                     icache_cpu_op,       // ICache 操作类型（0读）
+    output wire [`INDEX_WIDTH-1:0]   icache_cpu_index,    // ICache 组索引
+    output wire [`TAG_WIDTH-1:0]     icache_cpu_tag,      // ICache 标签
+    output wire [`OFFSET_WIDTH-1:0]  icache_cpu_offset,   // ICache 块内偏移
+    output wire [ 3:0]              icache_cpu_wstrb,    // ICache 写掩码（未使用）
+    output wire [31:0]              icache_cpu_wdata,    // ICache 写数据（未使用）
+    input  wire                     icache_cpu_addr_ok,  // ICache 地址就绪
+    input  wire                     icache_cpu_data_ok,  // ICache 数据就绪
+    input  wire [31:0]              icache_cpu_rdata,    // ICache 读数据
+    output wire                     icache_cpu_accept,   // IF 可接受 cache 数据
+    output wire                     icache_cpu_cached,   // IF 访问可缓存
     // 与MMU交互
-    output wire [31:0] if_to_mmu_vaddr,      // if发mmu虚地址
-    input  wire [31:0] padd,                 // MMU返回物理地址
-    input  wire [ 2:0] if_tlb_exc,           // MMU返回tlb异常
+    output wire [31:0]              if_to_mmu_vaddr,     // IF发MMU虚地址
+    input  wire [31:0]              padd,                // MMU返回物理地址
+    input  wire [ 2:0]              if_tlb_exc,          // MMU返回TLB异常
+    input  wire                     if_cached,           // MMU返回是否可缓存
     // 异常冲刷
-    input  wire        exc_no_rf,            // wb阶段有异常则冲刷流水线
-    input  wire        wb_ertn_flush,        // wb阶段有ertn指令则冲刷流水线
+    input  wire                     exc_no_rf,           // WB阶段有异常则冲刷流水线
+    input  wire                     wb_ertn_flush,       // WB阶段有ertn指令则冲刷流水线
     // 来自csr寄存器堆
-    input  wire [31:0] exc_entry,            // 异常处理地址
-    input  wire [31:0] exc_back_pc,          // 异常返回地址
+    input  wire [31:0]              exc_entry,           // 异常处理地址
+    input  wire [31:0]              exc_back_pc,         // 异常返回地址
     // 重取指相关
-    input  wire        rf_valid,             // 重取指信号
-    input  wire [31:0] rf_pc,                // 重取指地址
-    // cpu可接受数据
-    output wire        inst_cpu_accept       // IF可接受指令数据
+    input  wire                     rf_valid,            // 重取指信号
+    input  wire [31:0]              rf_pc                // 重取指地址
 );
 
     reg         if_valid;                    // IF阶段有效标志
@@ -69,7 +71,7 @@ module if_stage (
     reg         new_in;                 // 表明if中是否是新进入的指令
     reg         req_already;            // 表明preif的指令已经发出过访存请求
     wire        req_already_final;      // 考虑冲刷和分支后，表明preif的指令已经发出过访存请求
-    reg  [ 1:0] inst_dirty;             // 不为0就代表下一次存储器的dataok数据无效
+    reg  [ 1:0] inst_dirty;             // 不为0就代表下一次 cache 的 data_ok 数据无效
 
     // ========== 分支总线解析 ==========
     assign {br_ld_stall, br_taken, br_target} = br_bus;
@@ -80,7 +82,7 @@ module if_stage (
     // ========== 流水线控制 ==========
     assign pre_if_to_if_valid = pre_if_ready_go && pre_if_valid;              // 预取指有效逻辑
     assign pre_if_valid       = ~reset;                                       // 预取指阶段：只要不复位就一直有效
-    assign pre_if_ready_go    = (inst_sram_req && inst_sram_addr_ok) || req_already_final || (pre_if_exc_valid);
+    assign pre_if_ready_go    = (icache_cpu_req && icache_cpu_addr_ok) || req_already_final || (pre_if_exc_valid);
     // 如果下一次上跳能够握手发请求或者已经发送过请求，那么下一次上跳就可以前进
     assign seq_pc  = if_pc + 32'h4;                                            // 顺序PC = 当前PC + 4（指令长度4字节）
     assign nextpc  = exc_no_rf     ? exc_entry   :                             // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
@@ -89,15 +91,11 @@ module if_stage (
                      br_taken      ? br_target   :
                                      seq_pc      ;
     // nextpc逻辑中异常和ertn的优先级高于brtaken，如果id和wb同时发来信号，优先处理wb的信号
-    assign if_ready_go    = !(br_taken || exc_no_rf || wb_ertn_flush || rf_valid || fork_r) && (inst_sram_data_ok || (|if_exc)) && !inst_dirty;
+    assign if_ready_go    = !(br_taken || exc_no_rf || wb_ertn_flush || rf_valid || fork_r) && (icache_cpu_data_ok || (|if_exc)) && !inst_dirty;
     // 分支/跳转会阻塞if指令前进；数据从桥直连进入if，不再经if_inst_r暂存
     assign if_allowin     = !if_valid || (if_ready_go && id_allowin) || br_taken || wb_ertn_flush || rf_valid || exc_no_rf || fork_r;
     // 分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
     assign if_to_id_valid = if_valid && if_ready_go;
-
-    // ========== CPU可接受数据 ==========
-    // IF指令可进入ID时拉高，有脏数据时也拉高（数据需被消耗以清空桥中FIFO）
-    assign inst_cpu_accept = (if_to_id_valid && id_allowin) || (|inst_dirty);
 
     // 取值阶段有效标志更新
     // 只有if的valid不受wb冲刷信号影响，preif中的正确指令进入if不会失效
@@ -124,12 +122,12 @@ module if_stage (
         end
     end
 
-    // ========== 实现类sram总线 ==========
+    // ========== ICache 请求控制 ==========
     always @(posedge clk) begin
         if (reset || (pre_if_ready_go && if_allowin)) begin
             req_already <= 1'b0;
         end
-        else if ((inst_sram_req && inst_sram_addr_ok) && !(pre_if_ready_go && if_allowin)) begin
+        else if ((icache_cpu_req && icache_cpu_addr_ok) && !(pre_if_ready_go && if_allowin)) begin
             req_already <= 1'b1;
         end
     end
@@ -154,11 +152,11 @@ module if_stage (
     // 如果有寄存信号，代表收到了跳转或者冲刷信号但是还没发出访存请求，需要持续更改访存地址
     // 尤其是对于跳转信号，还需要一直保证if的指令不忘后面走
     always @(posedge clk) begin
-        if (reset || (inst_sram_req && inst_sram_addr_ok)) begin
+        if (reset || (icache_cpu_req && icache_cpu_addr_ok)) begin
             fork_r   <= 1'b0;
             nextpc_r <= 32'b0;
         end
-        else if (!(inst_sram_req && inst_sram_addr_ok) && !(pre_if_exc_valid)) begin
+        else if (!(icache_cpu_req && icache_cpu_addr_ok) && !(pre_if_exc_valid)) begin
             if (br_taken || exc_no_rf || wb_ertn_flush || rf_valid) begin
                 fork_r   <= 1'b1;
                 nextpc_r <= nextpc;
@@ -173,33 +171,36 @@ module if_stage (
     // 第一周期如果preif可以发请求但是不能进入if，那么一定是if中有一条有效指令但是不能往后走
     // 所以pre_if_ready_go_r && !new_in的时候if第二周期中的一定是第一周期中的那一条指令
     // 如果if中没有有效数据那么就要废2条，如果刚返回或者早就有数据存在if_inst_r中那么就只废一次
-    // 注意：现在指令数据存于桥的FIFO中，if_inst_r已移除，inst_sram_data_ok直接反映数据可用性
+    // 注意：现在指令数据存于桥的FIFO中，if_inst_r已移除，icache_cpu_data_ok直接反映数据可用性
     always @(posedge clk) begin
         if (reset) begin
             inst_dirty <= 2'b0;
         end
         else if (wb_ertn_flush || exc_no_rf || br_taken || rf_valid) begin
-            if (!if_exc && !inst_sram_data_ok && !new_in && !pre_if_exc_r && pre_if_ready_go_r)
+            if (!if_exc && !icache_cpu_data_ok && !new_in && !pre_if_exc_r && pre_if_ready_go_r)
                 inst_dirty <= 2'b10;
-            else if (!if_exc && (!inst_sram_data_ok || (!new_in && !pre_if_exc_r && pre_if_ready_go_r)))
+            else if (!if_exc && (!icache_cpu_data_ok || (!new_in && !pre_if_exc_r && pre_if_ready_go_r)))
                 inst_dirty <= 2'b01;
             else
                 inst_dirty <= 2'b00;
         end
-        else if (inst_sram_data_ok && (inst_dirty != 2'b00))
+        else if (icache_cpu_data_ok && (inst_dirty != 2'b00))
             inst_dirty <= inst_dirty - 1'b1;
     end
 
-    // ========== 指令存储器控制 ==========
-    assign inst_sram_req   = pre_if_valid && !req_already_final && !br_ld_stall && !(pre_if_exc_valid);
+    // ========== ICache 输出信号 ==========
+    assign if_to_mmu_vaddr = fork_r ? nextpc_r : nextpc;                                  // 发mmu虚地址
+    assign icache_cpu_req   = pre_if_valid && !req_already_final && !br_ld_stall && !(pre_if_exc_valid);
     // preif有效才能发请求；已经发过的话不能重复发请求；跳转指令遇上lduse冒险未取得正确数据时也不能访存
-    assign if_to_mmu_vaddr = fork_r ? nextpc_r : nextpc;                               // 发mmu虚地址
-    assign inst_sram_wr    = 1'b0;                                                     // 不写指令存储器
-    assign inst_sram_size  = 2'b10;                                                    // 读指令读一个字
-    assign inst_sram_wstrb = 4'h0;                                                     // 不写指令存储器
-    assign inst_sram_addr  = padd;                                                     // padd为访存地址
-    assign inst_sram_wdata = 32'b0;                                                    // 不写指令存储器
-    assign if_inst         = inst_sram_rdata;                                          // 指令数据直连桥输出，不再经if_inst_r暂存
+    assign icache_cpu_op    = 1'b0;                                                       // ICache 只读
+    assign icache_cpu_index  = (fork_r ? nextpc_r[`OFFSET_WIDTH +: `INDEX_WIDTH] : nextpc[`OFFSET_WIDTH +: `INDEX_WIDTH]); // 虚地址中的index部分
+    assign icache_cpu_tag    = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];             // 实地址中的tag部分
+    assign icache_cpu_offset = (fork_r ? nextpc_r[0 +: `OFFSET_WIDTH] : nextpc[0 +: `OFFSET_WIDTH]);           // 虚地址中的offset部分
+    assign icache_cpu_wstrb  = 4'h0;                                                      // ICache 只读
+    assign icache_cpu_wdata  = 32'b0;                                                     // ICache 只读
+    assign icache_cpu_cached = if_cached;                                                 // 来自 MMU 的缓存判断
+    assign icache_cpu_accept = (if_to_id_valid && id_allowin) || (|inst_dirty);           // IF阶段能接受数据的条件：1. IF到ID的总线有效且ID允许接收；2. 当前指令是脏指令（需要被冲刷掉）
+    assign if_inst           = icache_cpu_rdata;                                          // 指令数据直连 cache 输出
 
     // ========== 检测异常 ==========
     assign pre_if_adef = (fork_r ? nextpc_r[1:0] : nextpc[1:0]) != 2'b00 && pre_if_valid;

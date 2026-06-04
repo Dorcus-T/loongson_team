@@ -2,49 +2,57 @@
 
 module exe_stage (
     // 时钟与复位
-    input  wire        clk,              // 时钟信号
-    input  wire        reset,            // 复位信号（高有效）
+    input  wire                     clk,                // 时钟信号
+    input  wire                     reset,              // 复位信号（高有效）
     // allowin
-    input  wire        mem_allowin,      // MEM阶段允许接收
-    output wire        ex_allowin,       // EX阶段允许接收
+    input  wire                     mem_allowin,        // MEM阶段允许接收
+    output wire                     ex_allowin,         // EX阶段允许接收
     // 来自ID阶段
-    input  wire        id_to_ex_valid,   // ID到EX有效
-    input  wire [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus, // 来自ID的控制信号和操作数
+    input  wire                     id_to_ex_valid,     // ID到EX有效
+    input  wire [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus,    // 来自ID的控制信号和操作数
     // 输出给MEM阶段
-    output wire        ex_to_mem_valid,  // EX到MEM有效
-    output wire [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus, // EX到MEM总线
+    output wire                     ex_to_mem_valid,    // EX到MEM有效
+    output wire [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus,  // EX到MEM总线
     // 访问MMU信号
-    output wire [31:0] ex_to_mmu_vaddr,  // 虚地址输出
-    output wire [35:0] vtlb_enop,        // {tlbsrch_valid, invtlb_valid, invtlb_op, invtlb_asid, invtlb_vaddr}
-    output wire [ 1:0] ld_and_str,       // 输出操作是load还是store
-    input  wire [31:0] padd,             // MMU物理地址返回
-    input  wire [ 5:0] srch_value,       // {s1_found, index}
-    input  wire [ 4:0] mem_tlb_exc,      // MMU返回tlb异常
-    // 与数据存储器交互
-    output wire        data_sram_req,    // 数据SRAM请求
-    output wire        data_sram_wr,     // 数据SRAM写使能
-    output wire [ 1:0] data_sram_size,   // 数据SRAM访问长度
-    output wire [ 3:0] data_sram_wstrb,  // 数据SRAM写掩码
-    output wire [31:0] data_sram_addr,   // 数据SRAM地址
-    output wire [31:0] data_sram_wdata,  // 数据SRAM写数据
-    input  wire        data_sram_addr_ok,// 数据SRAM握手信号
+    output wire [31:0]              ex_to_mmu_vaddr,    // 虚地址输出
+    output wire [35:0]              vtlb_enop,          // {tlbsrch_valid, invtlb_valid, invtlb_op, invtlb_asid, invtlb_vaddr}
+    output wire [ 1:0]              ld_and_str,         // 输出操作是load还是store
+    input  wire [31:0]              padd,               // MMU物理地址返回
+    input  wire [ 5:0]              srch_value,         // {s1_found, index}
+    input  wire [ 4:0]              mem_tlb_exc,        // MMU返回tlb异常
+    input  wire                     ex_cached,          // MMU返回是否可缓存
+    // 与 DCache 的接口
+    output wire                     dcache_cpu_req,     // DCache 请求有效
+    output wire                     dcache_cpu_op,      // DCache 操作类型（1=写）
+    output wire [`INDEX_WIDTH-1:0]   dcache_cpu_index,   // DCache 组索引
+    output wire [ `TAG_WIDTH-1:0]    dcache_cpu_tag,     // DCache 标签
+    output wire [`OFFSET_WIDTH-1:0]  dcache_cpu_offset,  // DCache 块内偏移
+    output wire [ 3:0]              dcache_cpu_wstrb,   // DCache 写字节掩码
+    output wire [31:0]              dcache_cpu_wdata,   // DCache 写数据
+    input  wire                     dcache_cpu_addr_ok, // DCache 地址就绪
+    output wire                     dcache_cpu_cached,  // DCache 访问可缓存
     // 前递控制
-    output wire [ 4:0] ex_to_id_dest,    // EX阶段写回寄存器号
-    output wire [31:0] ex_to_id_result,  // EX阶段计算结果
-    output wire        ex_to_id_load_op, // EX阶段是否是加载指令
-    output wire        ex_exc_valid,     // EX阶段存在异常
+    output wire [ 4:0]              ex_to_id_dest,      // EX阶段写回寄存器号
+    output wire [31:0]              ex_to_id_result,    // EX阶段计算结果
+    output wire                     ex_to_id_load_op,   // EX阶段是否是加载指令
+    output wire                     ex_exc_valid,       // EX阶段存在异常
     // 异常冲刷
-    input  wire        wb_exc_valid,     // WB阶段存在异常，冲刷流水线
-    input  wire        wb_ertn_flush,    // WB阶段有ertn指令则冲刷流水线
-    input  wire        mem_exc_valid,    // MEM阶段存在异常，防止访存
-    input  wire        mem_ertn_flush,   // 防止ertn位于mem时,ex发出访存请求
+    input  wire                     wb_exc_valid,       // WB阶段存在异常，冲刷流水线
+    input  wire                     wb_ertn_flush,      // WB阶段有ertn指令则冲刷流水线
+    input  wire                     mem_exc_valid,      // MEM阶段存在异常，防止访存
+    input  wire                     mem_ertn_flush,     // 防止ertn位于mem时,ex发出访存请求
     // CSR与ERTN冒险
-    output wire        ex_csr_we,        // ex阶段确定要写csr
-    output wire [13:0] ex_csr_num,       // ex阶段写csr的号码
-    output wire        ex_ertn_flush,    // ex阶段为ertn指令
+    output wire                     ex_csr_we,          // ex阶段确定要写csr
+    output wire [13:0]              ex_csr_num,         // ex阶段写csr的号码
+    output wire                     ex_ertn_flush,      // ex阶段为ertn指令
     // 读取计数器
-    input  wire [63:0] timer_value       // 计数器数值
-);
+    input  wire [63:0]              timer_value,        // 计数器数值
+    // cacop相关
+    output wire [4:0]              cache_code,          // cache操作类型
+    output wire                    cache_en_final,      // 有效使能（过异常门控）
+    output wire [31:0]             cache_va,            // cache操作虚地址
+    input  wire                    icache_cacop_rdy    // ICache 空闲可接 CACOP
+    );
 
     reg  ex_valid;                               // EX阶段有效标志
     wire ex_ready_go;                            // EX阶段就绪标志（除法指令需等待）
@@ -101,12 +109,14 @@ module exe_stage (
     // 计数器数值筛选
     wire        res_from_timer;         // 结果来自计数器
     wire [31:0] timer_finalval;         // 筛选后的计数器读取数据
-    // 实现类SRAM总线
+    // DCache 接口
     wire is_mem_inst;                   // 是访存指令
     reg  req_already;                   // 已经发送过访存请求
-
+    
     // ========== 解析来自ID阶段的总线 ==========
     assign {
+        cache_code,     // 298:294 cache操作类型
+        cache_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
         invtlb_en,      // 291     invtlb使能
         tlbrd_en,       // 290     tlbrd使能
@@ -170,7 +180,9 @@ module exe_stage (
     assign ex_inst_valid = ex_valid && !mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid;
     assign is_div_inst   = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
     assign ex_ready_go   = is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
-                                        ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (data_sram_req && data_sram_addr_ok) || req_already : 1'b1;
+                                        ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already :
+                                        ex_valid && cache_en && (cache_code[2:0] == 3'd0) ? (icache_cacop_rdy || cacop_req_already) :
+                                        ex_valid && cache_en && (cache_code[2:0] == 3'd1) ? (dcache_cacop_rdy || req_already) : 1'b1;
     // 如果是除法指令，要么正确握手并且算完了发出ready信号，要么由于后面有异常和ertn导致除法指令不发出除法请求就直接走
     // 如果是访存指令，就必须发出访存请求之后才能往后走
     // ex阶段的异常中除了ale异常都不应该发出除法请求，不能添加ale，因为ale异常依赖alu结果，alu结果依赖除法结果，除法结果又依赖异常判断形成闭环，虽然二者互斥但是不能有闭环
@@ -193,13 +205,26 @@ module exe_stage (
         end
     end
 
-    // ========== 实现类sram总线 ==========
+    // ========== DCache 请求控制 ==========
+    wire dcache_cacop_rdy;
+    assign dcache_cacop_rdy = dcache_cpu_addr_ok;  // cache 通过 accept_new_req(cacop_en) 应答
     always @(posedge clk) begin
         if (reset || (ex_ready_go && mem_allowin)) begin
             req_already <= 1'b0;
         end
-        else if ((data_sram_req && data_sram_addr_ok) && !(ex_ready_go && mem_allowin)) begin
+        else if ((dcache_cpu_req && dcache_cpu_addr_ok
+                  || cache_en && (cache_code[2:0] == 3'd1) && dcache_cacop_rdy)
+                 && !(ex_ready_go && mem_allowin)) begin
             req_already <= 1'b1;
+        end
+    end
+    reg cacop_req_already;
+    always @(posedge clk) begin
+        if (reset || (ex_ready_go && mem_allowin)) begin
+            cacop_req_already <= 1'b0;
+        end
+        else if (cache_en && (cache_code[2:0] == 3'd0) && icache_cacop_rdy && !(ex_ready_go && mem_allowin)) begin
+            cacop_req_already <= 1'b1;
         end
     end
     //指令往后走就清零，指令发请求且不往后走就置1。ex中的指令不存在preif中的因为冲刷和brtaken而立马变化，ex中的指令只会从id中来，如果阻塞指令就一定不变
@@ -253,22 +278,34 @@ module exe_stage (
     };
     assign final_csr_wmask  = tlbsrch_en && srch_value[5] ? 32'h8000001f : csr_wmask;
     assign final_csr_wvalue = tlbsrch_en && srch_value[5] ? {27'b0,srch_value[4:0]} : csr_wvalue;
-    assign ld_and_str       = {ex_load_op, mem_we} & {2{ex_valid}};
+    assign ld_and_str       = {ex_load_op || (cache_en &&cache_code[4:3] ==2'b10), mem_we} & {2{ex_valid}};
+    // ========== cacop相关信号 ==========
+    assign cache_va    = alu_result;
+    // Hit 模式(code[4:3]=2)需要 MMU 翻译 → 有 TLB 异常则关使能
+    // CACOP 操作 Cache 行粒度 → 不考虑地址对齐(ALE)
+    wire cacop_hit_mode;
+    assign cacop_hit_mode = cache_en && (cache_code[4:3] == 2'b10);
+    assign cache_en_final = cache_en && ex_valid
+                          && !ex_exc_valid && !mem_exc_valid
+                          && !(|mem_exc || ex_rf_valid)
+                          && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid
+                          && !(cacop_hit_mode && |mem_tlb_exc)
+                          && !cacop_req_already && !req_already;
 
-    // ========== 数据存储器写控制 ==========
-    assign data_sram_req   = ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);
+    // ========== DCache 输出信号 ==========
+    assign dcache_cpu_req   = ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);
     // 只有访存指令，且是有效指令,并且mem和ex和wb阶段无异常、不是ertn,之前没发送过请求的指令才能发送访存请求
-    assign data_sram_wr    = mem_we && ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
-    assign data_sram_size  = mem_size[0] ? 2'b00 :
-                             mem_size[1] ? 2'b01 :
-                             2'b10;
-    assign data_sram_wstrb = mem_size[0] ? (4'b0001 << alu_result[1:0]) :          // 字节访问
-                             mem_size[1] ? (alu_result[1] ? 4'b1100 : 4'b0011) :   // 半字访问
-                             4'b1111;                                              // 字访问
-    assign data_sram_addr  = padd;                                                 // 地址
-    assign data_sram_wdata = mem_size[0] ? {4{rkd_value[7:0]}} :                   // 字节：4份
-                             mem_size[1] ? {2{rkd_value[15:0]}} :                  // 半字：2份
-                             rkd_value;                                            // 字：原值
+    assign dcache_cpu_op    = mem_we && ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
+    assign dcache_cpu_index = alu_result[`OFFSET_WIDTH +: `INDEX_WIDTH];
+    assign dcache_cpu_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
+    assign dcache_cpu_offset= alu_result[0 +: `OFFSET_WIDTH];
+    assign dcache_cpu_wstrb  = mem_size[0] ? (4'b0001 << alu_result[1:0]) :          // 字节访问
+                               mem_size[1] ? (alu_result[1] ? 4'b1100 : 4'b0011) :   // 半字访问
+                               4'b1111;                                              // 字访问
+    assign dcache_cpu_wdata  = mem_size[0] ? {4{rkd_value[7:0]}} :                   // 字节：4份
+                               mem_size[1] ? {2{rkd_value[15:0]}} :                  // 半字：2份
+                               rkd_value;                                            // 字：原值
+    assign dcache_cpu_cached = ex_cached;                                            // 来自 MMU 的缓存判断
 
     // ========== 前递输出 ==========
     assign ex_to_id_dest    = dest & {5{ex_valid}} & {5{gr_we}};

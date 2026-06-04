@@ -79,12 +79,10 @@ module mycpu_top (
     wire [`BR_BUS_WD-1:0]        br_bus;         // 分支总线
 
     // ========== 数据前递信号（解决RAW数据冒险） ==========
-    // 前递控制：各级的目的寄存器号
     wire [ 4:0] ex_to_id_dest;            // EX阶段写回的寄存器号
     wire [ 4:0] mem_to_id_dest;           // MEM阶段写回的寄存器号
     wire [ 4:0] wb_to_id_dest;            // WB阶段写回的寄存器号
 
-    // 前递数据：各级的计算结果
     wire [31:0] ex_to_id_result;         // EX阶段计算结果
     wire [31:0] mem_to_id_result;        // MEM阶段计算结果
     wire [31:0] wb_to_id_result;         // WB阶段计算结果
@@ -105,18 +103,14 @@ module mycpu_top (
     wire [31:0] wb_pc_back;  // 发if重取指pc
 
     // ========== csr有关信号 ==========
-    wire [31:0] exc_entry;          // 异常入口地址，CSR输出给IF阶段，用于异常发生时PC跳转
-    wire [31:0] exc_back_pc;        // 异常返回地址，CSR输出给IF阶段，用于ERTN指令恢复PC
-    wire [31:0] csr_rvalue;         // CSR读数据，CSR输出给ID阶段，用于csrrd指令读取CSR值
-    wire [13:0] csr_id_num;         // CSR读号码，ID阶段输出给CSR，用于指定要读取的CSR寄存器
-    wire        has_int;            // 中断有效标志，CSR输出给ID阶段，表示有待处理的中断
-    wire [31:0] coreid_in;          // 核心ID输入，来自顶层，用于初始化TID寄存器
-    wire        hw_inter;           // 硬件中断有效标志，来自顶层，表示有外部硬件中断
-    wire [ 7:0] hw_inter_num;       // 硬件中断号，来自顶层，对应ESTAT寄存器的bit2-9
-    wire        ipi_inter;          // 核间中断，来自顶层，对应ESTAT寄存器的bit12
+    wire [31:0] exc_entry;          // 异常入口地址
+    wire [31:0] exc_back_pc;        // 异常返回地址
+    wire [31:0] csr_rvalue;         // CSR读数据
+    wire [13:0] csr_id_num;         // CSR读号码
+    wire        has_int;            // 中断有效标志
     wire [13:0] ex_csr_num;         // ex阶段写csr寄存器号
     wire        ex_csr_we;          // ex阶段写csr使能
-    wire [13:0] mem_csr_num;        // meme阶段写csr寄存器号
+    wire [13:0] mem_csr_num;        // mem阶段写csr寄存器号
     wire        mem_csr_we;         // mem阶段写csr使能
     wire [13:0] wb_csr_num;         // wb阶段写csr寄存器号
     wire        wb_csr_we;          // wb阶段写csr使能
@@ -124,7 +118,11 @@ module mycpu_top (
     wire [ 1:0] plv_out;            // 特权等级输出
     wire [ 5:0] ecode_out;          // 异常码输出
     wire [ 1:0] da_pg_out;          // 虚实转换方式输出
+    wire [ 1:0] datf_out;           // CRMD.DATF — IF 直接翻译 MAT
+    wire [ 1:0] datm_out;           // CRMD.DATM — MEM 直接翻译 MAT
     wire [63:0] dmw_out;            // dmw输出
+    wire [ 7:0] hw_inter_num = 8'b0; // 硬件中断号（占位）
+    wire        ipi_inter    = 1'b0;  // 核间中断（占位）
     wire [`TLBCSR_BUS_WD-1:0] tlbcsr_bus; // tlb相关csr输出
 
     // ========== 与MMU交互信号 ==========
@@ -135,74 +133,129 @@ module mycpu_top (
     wire [ 2:0] tlbrwf_valid;       // tlbrd tlbwr tlbfill使能
     wire [31:0] paddr_to_if;        // 发if实地址
     wire [ 2:0] if_tlb_exc;         // 发if tlb相关异常
-    wire [ 1:0] if_mat;             // if 访存方式，//占位
+    wire [ 1:0] if_mat;             // if 访存方式
+    wire        if_cached;          // if 访问可缓存
     wire [31:0] paddr_to_ex;        // 发ex实地址
     wire [ 5:0] srch_value;         // 发ex tlbsrch查询结果
     wire [ 4:0] ex_tlb_exc;         // 发ex tlb相关异常
     wire [ 1:0] ex_mat;             // ex 访存方式
+    wire        ex_cached;          // ex 访问可缓存
     wire [`TLBRD_BUS_WD-1:0] tlbrd_value; // 发csr tlbrd使能和数据
 
     // ========== 计数器数值 ==========
     wire [63:0] timer_value;        // 计数器输出
 
-    // ========== SRAM侧内部连线（CPU与桥模块之间） ==========
-    // --- 取指 SRAM 信号 ---
-    wire        inst_sram_req;
-    wire        inst_sram_wr;
-    wire [ 1:0] inst_sram_size;
-    wire [ 3:0] inst_sram_wstrb;
-    wire [31:0] inst_sram_addr;
-    wire [31:0] inst_sram_wdata;
-    wire        inst_sram_addr_ok;
-    wire        inst_sram_data_ok;
-    wire [31:0] inst_sram_rdata;
-    wire        inst_cpu_accept;      
-    // --- 数据 SRAM 信号 ---
-    wire        data_sram_req;
-    wire        data_sram_wr;
-    wire [ 1:0] data_sram_size;
-    wire [ 3:0] data_sram_wstrb;
-    wire [31:0] data_sram_addr;
-    wire [31:0] data_sram_wdata;
-    wire        data_sram_addr_ok;
-    wire        data_sram_data_ok_wr;
-    wire        data_sram_data_ok_rd;
-    wire [31:0] data_sram_rdata;
-    wire        data_cpu_accept;
-    // ============================================================
+    // ================================================================
+    // ICache — CPU 侧连线
+    // ================================================================
+    wire        icache_cpu_req;
+    wire        icache_cpu_op;
+    wire [ 7:0] icache_cpu_index;
+    wire [19:0] icache_cpu_tag;
+    wire [ 3:0] icache_cpu_offset;
+    wire [ 3:0] icache_cpu_wstrb;
+    wire [31:0] icache_cpu_wdata;
+    wire        icache_cpu_cached;
+    wire        icache_cpu_addr_ok;
+    wire        icache_cpu_data_ok;
+    wire [31:0] icache_cpu_rdata;
+    wire        icache_cpu_accept;
+
+    // ================================================================
+    // DCache — CPU 侧连线
+    // ================================================================
+    wire        dcache_cpu_req;
+    wire        dcache_cpu_op;
+    wire [ 7:0] dcache_cpu_index;
+    wire [19:0] dcache_cpu_tag;
+    wire [ 3:0] dcache_cpu_offset;
+    wire [ 3:0] dcache_cpu_wstrb;
+    wire [31:0] dcache_cpu_wdata;
+    wire        dcache_cpu_cached;
+    wire        dcache_cpu_addr_ok;
+    wire        dcache_cpu_data_ok;
+    wire [31:0] dcache_cpu_rdata;
+    wire        dcache_cpu_accept;
+
+    // ================================================================
+    // CACOP 连线（EX → ICache / DCache）
+    // ================================================================
+    wire [4:0]  cache_code;
+    wire        cache_en_final;
+    wire [31:0] cache_va;
+    wire        icache_cacop_en;
+    wire        dcache_cacop_en;
+    assign icache_cacop_en = cache_en_final && (cache_code[2:0] == 3'd0);
+    assign dcache_cacop_en = cache_en_final && (cache_code[2:0] == 3'd1);
+
+    // ================================================================
+    // ICache — AXI 侧连线（ICache 只读，写信号未使用）
+    // ================================================================
+    wire        icache_rd_req;
+    wire [ 2:0] icache_rd_type;
+    wire [31:0] icache_rd_addr;
+    wire        icache_rd_rdy;
+    wire        icache_return_valid;
+    wire        icache_return_last;
+    wire [31:0] icache_return_data;
+    wire        icache_bus_accept;
+
+    // ================================================================
+    // DCache — AXI 侧连线
+    // ================================================================
+    wire        dcache_rd_req;
+    wire [ 2:0] dcache_rd_type;
+    wire [31:0] dcache_rd_addr;
+    wire        dcache_rd_rdy;
+    wire        dcache_return_valid;
+    wire        dcache_return_last;
+    wire [31:0] dcache_return_data;
+    wire        dcache_wr_req;
+    wire [ 2:0] dcache_wr_type;
+    wire [31:0] dcache_wr_addr;
+    wire [ 3:0] dcache_wr_wstrb;
+    wire [127:0] dcache_wr_data;
+    wire        dcache_wr_rdy;
+    wire        dcache_wr_done;
+    wire        dcache_bus_accept;
+
+    // ================================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
-    // ============================================================
+    // ================================================================
     if_stage u_if_stage (
-        .clk               (clk),
-        .reset             (reset),
-        .id_allowin        (id_allowin),
-        .br_bus            (br_bus),
-        .if_to_id_valid    (if_to_id_valid),
-        .if_to_id_bus      (if_to_id_bus),
-        .inst_sram_req     (inst_sram_req),
-        .inst_sram_wr      (inst_sram_wr),
-        .inst_sram_size    (inst_sram_size),
-        .inst_sram_wstrb   (inst_sram_wstrb),
-        .inst_sram_addr    (inst_sram_addr),
-        .inst_sram_wdata   (inst_sram_wdata),
-        .inst_sram_addr_ok (inst_sram_addr_ok),
-        .inst_sram_data_ok (inst_sram_data_ok),
-        .inst_sram_rdata   (inst_sram_rdata),
-        .if_to_mmu_vaddr   (if_to_mmu_vaddr),
-        .padd              (paddr_to_if),
-        .if_tlb_exc        (if_tlb_exc),
-        .exc_no_rf         (exc_not_rf),
-        .wb_ertn_flush     (wb_ertn_flush),
-        .exc_entry         (exc_entry),
-        .exc_back_pc       (exc_back_pc),
-        .rf_valid          (rf_valid),
-        .rf_pc             (wb_pc_back),
-        .inst_cpu_accept     (inst_cpu_accept)
+        .clk                (clk),
+        .reset              (reset),
+        .id_allowin         (id_allowin),
+        .br_bus             (br_bus),
+        .if_to_id_valid     (if_to_id_valid),
+        .if_to_id_bus       (if_to_id_bus),
+        .icache_cpu_req   (icache_cpu_req),
+        .icache_cpu_op      (icache_cpu_op),
+        .icache_cpu_index   (icache_cpu_index),
+        .icache_cpu_tag     (icache_cpu_tag),
+        .icache_cpu_offset  (icache_cpu_offset),
+        .icache_cpu_wstrb   (icache_cpu_wstrb),
+        .icache_cpu_wdata   (icache_cpu_wdata),
+        .icache_cpu_cached  (icache_cpu_cached),
+        .icache_cpu_addr_ok (icache_cpu_addr_ok),
+        .icache_cpu_data_ok (icache_cpu_data_ok),
+        .icache_cpu_rdata   (icache_cpu_rdata),
+        .icache_cpu_accept  (icache_cpu_accept),
+        .if_to_mmu_vaddr    (if_to_mmu_vaddr),
+        .padd               (paddr_to_if),
+        .if_tlb_exc         (if_tlb_exc),
+        .if_cached          (if_cached),
+        .exc_no_rf          (exc_not_rf),
+        .wb_ertn_flush      (wb_ertn_flush),
+        .exc_entry          (exc_entry),
+        .exc_back_pc        (exc_back_pc),
+        .rf_valid           (rf_valid),
+        .rf_pc              (wb_pc_back)
     );
 
-    // ============================================================
+    // ================================================================
     // 第二阶段：译码阶段 (ID - Instruction Decode)
-    // ============================================================
+    // ================================================================
     id_stage u_id_stage (
         .clk               (clk),
         .reset             (reset),
@@ -240,48 +293,56 @@ module mycpu_top (
         .csr_da_pg         (da_pg_out)
     );
 
-    // ============================================================
+    // ================================================================
     // 第三阶段：执行阶段 (EX - Execute)
-    // ============================================================
+    // ================================================================
     exe_stage u_exe_stage (
-        .clk               (clk),
-        .reset             (reset),
-        .mem_allowin       (mem_allowin),
-        .ex_allowin        (ex_allowin),
-        .id_to_ex_valid    (id_to_ex_valid),
-        .id_to_ex_bus      (id_to_ex_bus),
-        .ex_to_mem_valid   (ex_to_mem_valid),
-        .ex_to_mem_bus     (ex_to_mem_bus),
-        .ex_to_mmu_vaddr   (ex_to_mmu_vaddr),
-        .data_sram_req     (data_sram_req),
-        .data_sram_wr      (data_sram_wr),
-        .data_sram_size    (data_sram_size),
-        .data_sram_wstrb   (data_sram_wstrb),
-        .vtlb_enop         (vtlb_enop),
-        .ld_and_str        (ld_and_str),
-        .padd              (paddr_to_ex),
-        .srch_value        (srch_value),
-        .mem_tlb_exc       (ex_tlb_exc),
-        .data_sram_addr    (data_sram_addr),
-        .data_sram_wdata   (data_sram_wdata),
-        .data_sram_addr_ok (data_sram_addr_ok),
-        .ex_to_id_dest     (ex_to_id_dest),
-        .ex_to_id_result   (ex_to_id_result),
-        .ex_to_id_load_op  (ex_to_id_load_op),
-        .ex_exc_valid      (ex_exc_valid),
-        .wb_exc_valid      (wb_exc_valid),
-        .wb_ertn_flush     (wb_ertn_flush),
-        .mem_exc_valid     (mem_exc_valid),
-        .mem_ertn_flush    (mem_ertn_flush),
-        .ex_csr_we         (ex_csr_we),
-        .ex_csr_num        (ex_csr_num),
-        .ex_ertn_flush     (ex_ertn_flush),
-        .timer_value       (timer_value)
+        .clk                (clk),
+        .reset              (reset),
+        .mem_allowin        (mem_allowin),
+        .ex_allowin         (ex_allowin),
+        .id_to_ex_valid     (id_to_ex_valid),
+        .id_to_ex_bus       (id_to_ex_bus),
+        .ex_to_mem_valid    (ex_to_mem_valid),
+        .ex_to_mem_bus      (ex_to_mem_bus),
+        .ex_to_mmu_vaddr    (ex_to_mmu_vaddr),
+        .dcache_cpu_req   (dcache_cpu_req),
+        .dcache_cpu_op      (dcache_cpu_op),
+        .dcache_cpu_index   (dcache_cpu_index),
+        .dcache_cpu_tag     (dcache_cpu_tag),
+        .dcache_cpu_offset  (dcache_cpu_offset),
+        .dcache_cpu_wstrb   (dcache_cpu_wstrb),
+        .dcache_cpu_wdata   (dcache_cpu_wdata),
+        .dcache_cpu_cached  (dcache_cpu_cached),
+        .dcache_cpu_addr_ok (dcache_cpu_addr_ok),
+        .vtlb_enop          (vtlb_enop),
+        .ld_and_str         (ld_and_str),
+        .padd               (paddr_to_ex),
+        .srch_value         (srch_value),
+        .mem_tlb_exc        (ex_tlb_exc),
+        .ex_cached          (ex_cached),
+        .ex_to_id_dest      (ex_to_id_dest),
+        .ex_to_id_result    (ex_to_id_result),
+        .ex_to_id_load_op   (ex_to_id_load_op),
+        .ex_exc_valid       (ex_exc_valid),
+        .wb_exc_valid       (wb_exc_valid),
+        .wb_ertn_flush      (wb_ertn_flush),
+        .mem_exc_valid      (mem_exc_valid),
+        .mem_ertn_flush     (mem_ertn_flush),
+        .ex_csr_we          (ex_csr_we),
+        .ex_csr_num         (ex_csr_num),
+        .ex_ertn_flush      (ex_ertn_flush),
+        .timer_value        (timer_value),
+        // CACOP
+        .cache_code         (cache_code),
+        .cache_en_final     (cache_en_final),
+        .cache_va           (cache_va),
+        .icache_cacop_rdy   (icache_cpu_addr_ok)
     );
 
-    // ============================================================
+    // ================================================================
     // 第四阶段：访存阶段 (MEM - Memory Access)
-    // ============================================================
+    // ================================================================
     mem_stage u_mem_stage (
         .clk                  (clk),
         .reset                (reset),
@@ -291,9 +352,8 @@ module mycpu_top (
         .ex_to_mem_bus        (ex_to_mem_bus),
         .mem_to_wb_valid      (mem_to_wb_valid),
         .mem_to_wb_bus        (mem_to_wb_bus),
-        .data_sram_rdata      (data_sram_rdata),
-        .data_sram_data_ok_wr (data_sram_data_ok_wr),
-        .data_sram_data_ok_rd (data_sram_data_ok_rd),
+        .dcache_cpu_rdata     (dcache_cpu_rdata),
+        .dcache_cpu_data_ok   (dcache_cpu_data_ok),
         .mem_to_id_dest       (mem_to_id_dest),
         .mem_to_id_result     (mem_to_id_result),
         .mem_to_id_data_ok    (mem_to_id_data_ok),
@@ -303,11 +363,12 @@ module mycpu_top (
         .mem_ertn_flush       (mem_ertn_flush),
         .mem_csr_we           (mem_csr_we),
         .mem_csr_num          (mem_csr_num),
-        .data_cpu_accept      (data_cpu_accept)
+        .dcache_cpu_accept    (dcache_cpu_accept)
     );
-    // ============================================================
+
+    // ================================================================
     // 第五阶段：写回阶段 (WB - Write Back)
-    // ============================================================
+    // ================================================================
     wb_stage u_wb_stage (
         .clk               (clk),
         .reset             (reset),
@@ -331,9 +392,10 @@ module mycpu_top (
         .wb_pc_back        (wb_pc_back),
         .tlbrwf_valid      (tlbrwf_valid)
     );
-    // ============================================================
+
+    // ================================================================
     // csr寄存器堆
-    // ============================================================
+    // ================================================================
     csr_regfile u_csr_regfile (
         .clk           (clk),
         .reset         (reset),
@@ -344,19 +406,21 @@ module mycpu_top (
         .has_int       (has_int),
         .wb_to_csr_bus (wb_to_csr_bus),
         .coreid_in     (32'd0),
-        // 中断输入暂时全部接0
-        .hw_inter_num  (8'b0),
-        .ipi_inter     (1'b0),
+        .hw_inter_num  (hw_inter_num),
+        .ipi_inter     (ipi_inter),
         .plv_out       (plv_out),
         .ecode_out     (ecode_out),
         .da_pg_out     (da_pg_out),
+        .datf_out      (datf_out),
+        .datm_out      (datm_out),
         .dmw_out       (dmw_out),
         .tlbrd_bus     (tlbrd_value),
         .tlbcsr_bus    (tlbcsr_bus)
     );
-    // ============================================================
+
+    // ================================================================
     // MMU
-    // ============================================================
+    // ================================================================
     mmu u_mmu (
         .clk           (clk),
         .reset         (reset),
@@ -366,6 +430,7 @@ module mycpu_top (
         .paddr_to_if   (paddr_to_if),
         .if_tlb_exc    (if_tlb_exc),
         .if_mat        (if_mat),
+        .if_cached     (if_cached),
 
         // ex interact
         .vaddr_from_ex (ex_to_mmu_vaddr),
@@ -375,6 +440,7 @@ module mycpu_top (
         .srch_value    (srch_value),
         .ex_tlb_exc    (ex_tlb_exc),
         .ex_mat        (ex_mat),
+        .ex_cached     (ex_cached),
 
         // wb interact
         .tlbrwf_en     (tlbrwf_valid),
@@ -383,50 +449,142 @@ module mycpu_top (
         .plv_in        (plv_out),
         .ecode_in      (ecode_out),
         .dapg_in       (da_pg_out),
+        .datf_in       (datf_out),
+        .datm_in       (datm_out),
         .dmw           (dmw_out),
         .tlbcsr        (tlbcsr_bus),
         .tlbrd_value   (tlbrd_value)
     );
 
-    // ============================================================
+    // ================================================================
     // 计数器
-    // ============================================================
+    // ================================================================
     timer_64bit u_timer_64bit (
         .clk         (clk),
         .reset       (reset),
         .timer_value (timer_value)
     );
 
-    // ============================================================
-    // SRAM-to-AXI 桥模块
-    // ============================================================
-    sram_to_axi_bridge u_sram_to_axi_bridge (
+    // ================================================================
+    // ICache
+    // ================================================================
+    cache u_icache (
+        .clk          (clk),
+        .resetn       (~reset),
+        // CPU 接口
+        .cpu_req      (icache_cpu_req),
+        .cpu_op       (icache_cpu_op),
+        .cpu_index    (icache_cpu_index),
+        .cpu_tag      (icache_cpu_tag),
+        .cpu_offset   (icache_cpu_offset),
+        .cpu_wstrb    (icache_cpu_wstrb),
+        .cpu_wdata    (icache_cpu_wdata),
+        .cpu_cached   (icache_cpu_cached),
+        .cpu_addr_ok  (icache_cpu_addr_ok),
+        .cpu_data_ok  (icache_cpu_data_ok),
+        .cpu_rdata    (icache_cpu_rdata),
+        .cpu_accept   (icache_cpu_accept),
+        // CACOP
+        .cacop_en     (icache_cacop_en),
+        .cacop_code   (cache_code),
+        .cacop_va     (cache_va),
+        // AXI 接口
+        .rd_req       (icache_rd_req),
+        .rd_type      (icache_rd_type),
+        .rd_addr      (icache_rd_addr),
+        .rd_rdy       (icache_rd_rdy),
+        .return_valid (icache_return_valid),
+        .return_last  (icache_return_last),
+        .return_data  (icache_return_data),
+        .wr_req       (),
+        .wr_type      (),
+        .wr_addr      (),
+        .wr_wstrb     (),
+        .wr_data      (),
+        .wr_rdy       (1'b1),
+        .wr_done      (1'b0),
+        .bus_accept   (icache_bus_accept)
+    );
+
+    // ================================================================
+    // DCache
+    // ================================================================
+    cache u_dcache (
+        .clk          (clk),
+        .resetn       (~reset),
+        // CPU 接口
+        .cpu_req      (dcache_cpu_req),
+        .cpu_op       (dcache_cpu_op),
+        .cpu_index    (dcache_cpu_index),
+        .cpu_tag      (dcache_cpu_tag),
+        .cpu_offset   (dcache_cpu_offset),
+        .cpu_wstrb    (dcache_cpu_wstrb),
+        .cpu_wdata    (dcache_cpu_wdata),
+        .cpu_cached   (dcache_cpu_cached),
+        .cpu_addr_ok  (dcache_cpu_addr_ok),
+        .cpu_data_ok  (dcache_cpu_data_ok),
+        .cpu_rdata    (dcache_cpu_rdata),
+        .cpu_accept   (dcache_cpu_accept),
+        // CACOP
+        .cacop_en     (dcache_cacop_en),
+        .cacop_code   (cache_code),
+        .cacop_va     (cache_va),
+        // AXI 接口
+        .rd_req       (dcache_rd_req),
+        .rd_type      (dcache_rd_type),
+        .rd_addr      (dcache_rd_addr),
+        .rd_rdy       (dcache_rd_rdy),
+        .return_valid (dcache_return_valid),
+        .return_last  (dcache_return_last),
+        .return_data  (dcache_return_data),
+        .wr_req       (dcache_wr_req),
+        .wr_type      (dcache_wr_type),
+        .wr_addr      (dcache_wr_addr),
+        .wr_wstrb     (dcache_wr_wstrb),
+        .wr_data      (dcache_wr_data),
+        .wr_rdy       (dcache_wr_rdy),
+        .wr_done      (dcache_wr_done),
+        .bus_accept   (dcache_bus_accept)
+    );
+
+    // ================================================================
+    // Cache-AXI 转接桥
+    // ================================================================
+    cache_axi_bridge u_cache_axi_bridge (
         .clk                  (clk),
         .reset                (reset),
-        // 取指 SRAM 侧  
-        .inst_sram_req        (inst_sram_req),
-        .inst_sram_wr         (inst_sram_wr),
-        .inst_sram_size       (inst_sram_size),
-        .inst_sram_wstrb      (inst_sram_wstrb),
-        .inst_sram_addr       (inst_sram_addr),
-        .inst_sram_wdata      (inst_sram_wdata),
-        .inst_sram_addr_ok    (inst_sram_addr_ok),
-        .inst_sram_data_ok    (inst_sram_data_ok),
-        .inst_sram_rdata      (inst_sram_rdata),
-        .inst_cpu_accept      (inst_cpu_accept),
-        // 访存 SRAM 侧  
-        .data_sram_req        (data_sram_req),
-        .data_sram_wr         (data_sram_wr),
-        .data_sram_size       (data_sram_size),
-        .data_sram_wstrb      (data_sram_wstrb),
-        .data_sram_addr       (data_sram_addr),
-        .data_sram_wdata      (data_sram_wdata),
-        .data_sram_addr_ok    (data_sram_addr_ok),
-        .data_sram_data_ok_wr (data_sram_data_ok_wr),
-        .data_sram_data_ok_rd (data_sram_data_ok_rd),
-        .data_sram_rdata      (data_sram_rdata),
-        .data_cpu_accept      (data_cpu_accept),
-        // AXI 读地址通道
+        // ICache 接口
+        .icache_rd_req        (icache_rd_req),
+        .icache_rd_type       (icache_rd_type),
+        .icache_rd_addr       (icache_rd_addr),
+        .icache_rd_rdy        (icache_rd_rdy),
+        .icache_return_valid  (icache_return_valid),
+        .icache_return_last   (icache_return_last),
+        .icache_return_data   (icache_return_data),
+        .icache_accept        (icache_bus_accept),
+        .icache_wr_req        (1'b0),
+        .icache_wr_type       (3'b0),
+        .icache_wr_addr       (32'b0),
+        .icache_wr_wstrb      (4'b0),
+        .icache_wr_data       (128'b0),
+        .icache_wr_rdy        (),
+        // DCache 接口
+        .dcache_rd_req        (dcache_rd_req),
+        .dcache_rd_type       (dcache_rd_type),
+        .dcache_rd_addr       (dcache_rd_addr),
+        .dcache_rd_rdy        (dcache_rd_rdy),
+        .dcache_return_valid  (dcache_return_valid),
+        .dcache_return_last   (dcache_return_last),
+        .dcache_return_data   (dcache_return_data),
+        .dcache_accept        (dcache_bus_accept),
+        .dcache_wr_req        (dcache_wr_req),
+        .dcache_wr_type       (dcache_wr_type),
+        .dcache_wr_addr       (dcache_wr_addr),
+        .dcache_wr_wstrb      (dcache_wr_wstrb),
+        .dcache_wr_data       (dcache_wr_data),
+        .dcache_wr_rdy        (dcache_wr_rdy),
+        .dcache_wr_done       (dcache_wr_done),
+        // AXI 接口
         .arid           (arid),
         .araddr         (araddr),
         .arlen          (arlen),
@@ -437,14 +595,12 @@ module mycpu_top (
         .arprot         (arprot),
         .arvalid        (arvalid),
         .arready        (arready),
-        // AXI 读数据通道
         .rid            (rid),
         .rdata          (rdata),
         .rresp          (rresp),
         .rlast          (rlast),
         .rvalid         (rvalid),
         .rready         (rready),
-        // AXI 写地址通道
         .awid           (awid),
         .awaddr         (awaddr),
         .awlen          (awlen),
@@ -455,17 +611,16 @@ module mycpu_top (
         .awprot         (awprot),
         .awvalid        (awvalid),
         .awready        (awready),
-        // AXI 写数据通道
         .wid            (wid),
         .wdata          (wdata),
         .wstrb          (wstrb),
         .wlast          (wlast),
         .wvalid         (wvalid),
         .wready         (wready),
-        // AXI 写响应通道
         .bid            (bid),
         .bresp          (bresp),
         .bvalid         (bvalid),
         .bready         (bready)
     );
+
 endmodule

@@ -25,6 +25,10 @@ module sram_to_axi_bridge (
     output wire         data_sram_data_ok_rd,
     output wire [31:0]  data_sram_rdata,
 
+    // CPU 可接受读数据（取指/访存各自独立）
+    input  wire         inst_cpu_accept,
+    input  wire         data_cpu_accept,
+
     // AXI3 Master
     output wire [ 3:0]  arid,
     output wire [31:0]  araddr,
@@ -82,15 +86,21 @@ module sram_to_axi_bridge (
     reg  [31:0] wdata_r;
     reg  [ 3:0] wstrb_r;
 
-    reg         rready_r;
-    reg         bready_r;
+    // ========== 写请求追踪器（4项 FIFO，用于地址冲突检测） ==========
+    reg [31:0] wr_pend_addr [0:3];
+    reg [ 2:0] wr_pend_size [0:3];
+    reg [ 3:0] wr_pend_wstrb[0:3];
+    reg [ 1:0] wr_pend_wptr;
+    reg [ 1:0] wr_pend_rptr;
+    reg [ 2:0] wr_pend_cnt;
+    wire       wr_pend_full;
+    wire       wr_pend_empty;
+    wire       wr_pend_push;
+    wire       wr_pend_pop;
+    wire       aw_w_done;
 
-    // ========== 写请求追踪器（用于地址冲突检测） ==========
-    reg         wr_pend0_valid, wr_pend1_valid;
-    reg  [31:0] wr_pend0_addr,  wr_pend1_addr;
-    reg  [ 2:0] wr_pend0_size,  wr_pend1_size;
-    reg  [ 3:0] wr_pend0_wstrb, wr_pend1_wstrb;
-    wire        aw_w_done;
+    assign wr_pend_full  = (wr_pend_cnt == 3'd4);
+    assign wr_pend_empty = (wr_pend_cnt == 3'd0);
 
     // ========== 尺寸映射 ==========
     function [2:0] map_size;
@@ -120,20 +130,17 @@ module sram_to_axi_bridge (
         input [ 3:0] rd_wstrb;
         reg   [31:0] rd_end;
         reg   [31:0] wr_end;
+        integer       k;
         begin
             addr_conflict = 1'b0;
             rd_end = rd_addr + size_bytes(rd_size) - 1;
-
-            if (wr_pend0_valid) begin
-                wr_end = wr_pend0_addr + size_bytes(wr_pend0_size) - 1;
-                if (!(rd_end < wr_pend0_addr || rd_addr > wr_end))
-                    addr_conflict = 1'b1;
-            end
-
-            if (wr_pend1_valid && !addr_conflict) begin
-                wr_end = wr_pend1_addr + size_bytes(wr_pend1_size) - 1;
-                if (!(rd_end < wr_pend1_addr || rd_addr > wr_end))
-                    addr_conflict = 1'b1;
+            for (k = 0; k < 4; k = k + 1) begin
+                if (((k - wr_pend_rptr) & 2'd3) < wr_pend_cnt) begin
+                    wr_end = wr_pend_addr[k] + size_bytes(wr_pend_size[k]) - 1;
+                    if (!(rd_end < wr_pend_addr[k] || rd_addr > wr_end)) begin
+                        addr_conflict = 1'b1;
+                    end
+                end
             end
         end
     endfunction
@@ -151,13 +158,50 @@ module sram_to_axi_bridge (
     wire mem_conflict;
     wire data_sram_addr_ok_rd;
 
-    // ========== 读响应相关信号 ==========
-    reg         inst_data_valid;    // 取指读数据就绪
-    reg  [31:0] inst_data_r;        // 取指读数据锁存
+    // ========== inst 读响应 FIFO（4项） ==========
+    reg [31:0] inst_fifo_mem [0:3];
+    reg [ 1:0] inst_fifo_wptr;
+    reg [ 1:0] inst_fifo_rptr;
+    reg [ 2:0] inst_fifo_cnt;
 
-    reg         mem_data_valid;     // 访存读数据就绪
-    reg  [31:0] mem_data_r;         // 访存读数据锁存
+    wire       inst_fifo_full;
+    wire       inst_fifo_empty;
+    wire       inst_fifo_we;
+    wire       inst_fifo_re;
 
+    assign inst_fifo_full  = (inst_fifo_cnt == 3'd4);
+    assign inst_fifo_empty = (inst_fifo_cnt == 3'd0);
+
+    // FIFO 写：AXI 返回取指数据，FIFO 空且 CPU 可接受时直通、否则缓冲
+    assign inst_fifo_we = rvalid && rready && (rid == 4'd0) && !inst_cpu_accept;
+
+    // FIFO 读：CPU 可接受且 FIFO 非空（消费时弹出）
+    assign inst_fifo_re = inst_cpu_accept && !inst_fifo_empty;
+
+    // ========== data 读响应 FIFO（4项） ==========
+    reg [31:0] data_fifo_mem [0:3];
+    reg [ 1:0] data_fifo_wptr;
+    reg [ 1:0] data_fifo_rptr;
+    reg [ 2:0] data_fifo_cnt;
+
+    wire       data_fifo_full;
+    wire       data_fifo_empty;
+    wire       data_fifo_we;
+    wire       data_fifo_re;
+
+    assign data_fifo_full  = (data_fifo_cnt == 3'd4);
+    assign data_fifo_empty = (data_fifo_cnt == 3'd0);
+
+    // FIFO 写：AXI 返回访存数据，FIFO 空且 CPU 可接受时直通、否则缓冲
+    assign data_fifo_we = rvalid && rready && (rid == 4'd1) && !data_cpu_accept;
+
+    // FIFO 读：CPU 可接受且 FIFO 非空（消费时弹出）
+    assign data_fifo_re = data_cpu_accept && !data_fifo_empty;
+
+    // ========== rready：两侧都能接数据时才拉高 ==========
+    wire inst_ready = !inst_fifo_full || inst_cpu_accept;
+    wire data_ready = !data_fifo_full || data_cpu_accept;
+    assign rready = inst_ready && data_ready;
 
     // ========== 写请求相关信号 ==========
     localparam AW_W_IDLE = 2'd0;
@@ -167,9 +211,6 @@ module sram_to_axi_bridge (
     reg         aw_done_r;
     reg         w_done_r;
     wire        data_sram_addr_ok_wr;
-
-    // ========== 写响应相关信号 ==========
-    reg  [ 1:0] b_pending_cnt;
 
     // ========== 常量axi信号 ==========
     assign arlen   = 8'h00;
@@ -201,9 +242,6 @@ module sram_to_axi_bridge (
     assign wvalid  = wvalid_r;
     assign wdata   = wdata_r;
     assign wstrb   = wstrb_r;
-
-    assign rready  = rready_r;
-    assign bready  = bready_r;
 
     // ========== 读请求相关实现 ==========
     assign if_rd_req  = inst_sram_req;
@@ -272,48 +310,79 @@ module sram_to_axi_bridge (
         end
     end
 
-    // ========== 读响应相关实现 ==========
+    // ============================================================
+    // inst 读响应 FIFO 控制
+    // ============================================================
+    integer i;
     always @(posedge clk) begin
         if (reset) begin
-            rready_r <= 1'b1;
+            inst_fifo_wptr <= 2'd0;
+            inst_fifo_rptr <= 2'd0;
+            inst_fifo_cnt  <= 3'd0;
+            for (i = 0; i < 4; i = i + 1)
+                inst_fifo_mem[i] <= 32'b0;
         end
         else begin
-            rready_r <= 1'b1;
+            case ({inst_fifo_we, inst_fifo_re})
+                2'b10: begin
+                    inst_fifo_mem[inst_fifo_wptr] <= rdata;
+                    inst_fifo_wptr <= inst_fifo_wptr + 2'd1;
+                    inst_fifo_cnt  <= inst_fifo_cnt  + 3'd1;
+                end
+                2'b01: begin
+                    inst_fifo_rptr <= inst_fifo_rptr + 2'd1;
+                    inst_fifo_cnt  <= inst_fifo_cnt  - 3'd1;
+                end
+                2'b11: begin
+                    inst_fifo_mem[inst_fifo_wptr] <= rdata;
+                    inst_fifo_wptr <= inst_fifo_wptr + 2'd1;
+                    inst_fifo_rptr <= inst_fifo_rptr + 2'd1;
+                end
+                default: ;
+            endcase
         end
     end
 
-    // 读出数据寄存一次再送给cpu
+    // ============================================================
+    // data 读响应 FIFO 控制
+    // ============================================================
+    integer j;
     always @(posedge clk) begin
         if (reset) begin
-            inst_data_valid <= 1'b0;
-            inst_data_r     <= 32'b0;
-            mem_data_valid  <= 1'b0;
-            mem_data_r      <= 32'b0;
+            data_fifo_wptr <= 2'd0;
+            data_fifo_rptr <= 2'd0;
+            data_fifo_cnt  <= 3'd0;
+            for (j = 0; j < 4; j = j + 1)
+                data_fifo_mem[j] <= 32'b0;
         end
         else begin
-            if (rvalid && rready_r && rid == 4'd0) begin
-                inst_data_valid <= 1'b1;
-                inst_data_r     <= rdata;
-            end
-            else if (inst_data_valid) begin
-                inst_data_valid <= 1'b0;
-            end
-
-            if (rvalid && rready_r && rid == 4'd1) begin
-                mem_data_valid <= 1'b1;
-                mem_data_r     <= rdata;
-            end
-            else if (mem_data_valid) begin
-                mem_data_valid <= 1'b0;
-            end
+            case ({data_fifo_we, data_fifo_re})
+                2'b10: begin
+                    data_fifo_mem[data_fifo_wptr] <= rdata;
+                    data_fifo_wptr <= data_fifo_wptr + 2'd1;
+                    data_fifo_cnt  <= data_fifo_cnt  + 3'd1;
+                end
+                2'b01: begin
+                    data_fifo_rptr <= data_fifo_rptr + 2'd1;
+                    data_fifo_cnt  <= data_fifo_cnt  - 3'd1;
+                end
+                2'b11: begin
+                    data_fifo_mem[data_fifo_wptr] <= rdata;
+                    data_fifo_wptr <= data_fifo_wptr + 2'd1;
+                    data_fifo_rptr <= data_fifo_rptr + 2'd1;
+                end
+                default: ;
+            endcase
         end
     end
 
-    // 读相关的data_ok
-    assign inst_sram_rdata      = inst_data_r;
-    assign inst_sram_data_ok    = inst_data_valid;
-    assign data_sram_data_ok_rd = mem_data_valid;
-    assign data_sram_rdata      = mem_data_r;
+    // ============================================================
+    // 读响应输出（纯数据可用性，不依赖 cpu_accept）
+    // ============================================================
+    assign inst_sram_data_ok = !inst_fifo_empty || (rvalid && (rid == 4'd0));
+    assign inst_sram_rdata   = inst_fifo_empty ? rdata : inst_fifo_mem[inst_fifo_rptr];
+    assign data_sram_data_ok_rd = !data_fifo_empty || (rvalid && (rid == 4'd1));
+    assign data_sram_rdata      = data_fifo_empty ? rdata : data_fifo_mem[data_fifo_rptr];
 
     // ========== 写请求相关实现 ==========
     always @(posedge clk) begin
@@ -382,71 +451,58 @@ module sram_to_axi_bridge (
         end
     end
 
-    assign data_sram_addr_ok_wr = (aw_w_state == AW_W_IDLE);
+    assign data_sram_addr_ok_wr = (aw_w_state == AW_W_IDLE) && !wr_pend_full;
 
-    // ========== 写请求追踪器（用于地址冲突检测） ==========
+    // ========== 写请求追踪器 ==========
     // 写请求和写数据已经握手的信号
     assign aw_w_done = (aw_w_state == AW_W_BUSY) &&
                        (aw_done_r || (awvalid_r && awready)) &&
                        (w_done_r  || (wvalid_r && wready));
 
+    assign wr_pend_push = aw_w_done;
+    assign wr_pend_pop  = bvalid && bready;
+
+    integer p;
     always @(posedge clk) begin
         if (reset) begin
-            wr_pend0_valid <= 1'b0;
-            wr_pend1_valid <= 1'b0;
-            wr_pend0_addr  <= 32'b0;
-            wr_pend1_addr  <= 32'b0;
-            wr_pend0_size  <= 3'b010;
-            wr_pend1_size  <= 3'b010;
-            wr_pend0_wstrb <= 4'b0;
-            wr_pend1_wstrb <= 4'b0;
-        end
-        else begin
-            // 写请求和数据握手成功，就存入追踪器
-            if (aw_w_done) begin
-                if (!wr_pend0_valid) begin
-                    wr_pend0_valid <= 1'b1;
-                    wr_pend0_addr  <= awaddr_r;
-                    wr_pend0_size  <= awsize_r;
-                    wr_pend0_wstrb <= wstrb_r;
-                end
-                else if (!wr_pend1_valid) begin
-                    wr_pend1_valid <= 1'b1;
-                    wr_pend1_addr  <= awaddr_r;
-                    wr_pend1_size  <= awsize_r;
-                    wr_pend1_wstrb <= wstrb_r;
-                end
-            end
-
-            // 写响应握手就释放一次
-            if (bvalid && bready_r) begin
-                if (wr_pend0_valid)
-                    wr_pend0_valid <= 1'b0;
-                else if (wr_pend1_valid)
-                    wr_pend1_valid <= 1'b0;
+            wr_pend_wptr <= 2'd0;
+            wr_pend_rptr <= 2'd0;
+            wr_pend_cnt  <= 3'd0;
+            for (p = 0; p < 4; p = p + 1) begin
+                wr_pend_addr[p]  <= 32'b0;
+                wr_pend_size[p]  <= 3'b010;
+                wr_pend_wstrb[p] <= 4'b0;
             end
         end
-    end
-
-    // ========== 写响应相关实现 ==========
-    always @(posedge clk) begin
-        if (reset) begin
-            b_pending_cnt <= 2'd0;
-            bready_r      <= 1'b1;
-        end
         else begin
-            bready_r <= 1'b1;
-
-            case ({aw_w_done, bvalid && bready_r})
-                2'b10: b_pending_cnt <= b_pending_cnt + 2'd1;
-                2'b01: b_pending_cnt <= b_pending_cnt - 2'd1;
-                2'b11: b_pending_cnt <= b_pending_cnt;
-                default: b_pending_cnt <= b_pending_cnt;
+            case ({wr_pend_push, wr_pend_pop})
+                2'b10: begin
+                    wr_pend_addr[wr_pend_wptr]  <= awaddr_r;
+                    wr_pend_size[wr_pend_wptr]  <= awsize_r;
+                    wr_pend_wstrb[wr_pend_wptr] <= wstrb_r;
+                    wr_pend_wptr <= wr_pend_wptr + 2'd1;
+                    wr_pend_cnt  <= wr_pend_cnt  + 3'd1;
+                end
+                2'b01: begin
+                    wr_pend_rptr <= wr_pend_rptr + 2'd1;
+                    wr_pend_cnt  <= wr_pend_cnt  - 3'd1;
+                end
+                2'b11: begin
+                    wr_pend_addr[wr_pend_wptr]  <= awaddr_r;
+                    wr_pend_size[wr_pend_wptr]  <= awsize_r;
+                    wr_pend_wstrb[wr_pend_wptr] <= wstrb_r;
+                    wr_pend_wptr <= wr_pend_wptr + 2'd1;
+                    wr_pend_rptr <= wr_pend_rptr + 2'd1;
+                end
+                default: ;
             endcase
         end
     end
 
+    // ========== 写响应相关实现 ==========
+    assign bready = !wr_pend_empty;
+
     // 写有关data_ok生成
-    assign data_sram_data_ok_wr = bvalid && bready_r && (b_pending_cnt > 0);
+    assign data_sram_data_ok_wr = bvalid && bready && !wr_pend_empty;
 
 endmodule

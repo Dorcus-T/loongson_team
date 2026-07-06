@@ -27,7 +27,9 @@ module mem_stage (
     output wire                         mem_ertn_flush,        // 防止ertn位于mem时,ex发出访存请求
     // csr与ertn冒险
     output wire                         mem_csr_we,            // mem阶段确定要写csr
-    output wire [13:0]                  mem_csr_num            // mem阶段写csr的号码
+    output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
+    // cpu可接受数据
+    output wire                         data_cpu_accept        // MEM可接受读数据
 );
 
     reg  mem_valid;                                   // MEM阶段有效标志
@@ -66,19 +68,19 @@ module mem_stage (
     wire [31:0] timer_finalval;           // 筛选后的计数器读取数据
     // 实现类sram总线
     wire        is_mem_inst;              // 是访存指令
-    reg  [ 1:0] inst_dirty;               // 不为0就代表下一次存储器的dataok数据无效
-
+    wire        mem_we;                   // 存储器写使能
     // ========== 类sram实现所需信号 ==========
     reg         new_in;                   // 表明mem中的指令是新进入的
     reg         data_sram_data_ok_r;      // 数据sram数据ok寄存，避免wr和rd重叠导致丢失
 
     // ========== 解析来自EX阶段的总线 ==========
     assign {
-        tlbrd_en,            // 241     tlbrd使能
-        tlbwr_en,            // 240     tlbwf使能
-        tlbfill_en,          // 239
-        mem_rf_valid,        // 238     重取指标志
-        is_mem_inst,         // 237     是访存指令
+        tlbrd_en,            // 242     tlbrd使能
+        tlbwr_en,            // 241     tlbwf使能
+        tlbfill_en,          // 240
+        mem_rf_valid,        // 239     重取指标志
+        is_mem_inst,         // 238     是访存指令
+        mem_we,              // 237     存储器写使能
         timer_finalval,      // 236:205 筛选后的计数器数据
         res_from_timer,      // 204     结果来自计数器
         res_from_csr,        // 203     结果来自csr寄存器堆
@@ -121,6 +123,10 @@ module mem_stage (
     assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? data_sram_data_ok_wr || data_sram_data_ok_rd || data_sram_data_ok_r: 1'b1;
     assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
     assign mem_to_wb_valid = mem_valid && mem_ready_go;
+
+    // ========== CPU可接受数据 ==========
+    // load指令有效、无异常、WB就绪时拉高，告诉桥可以发送/弹出读数据
+    assign data_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we) && !mem_exc_valid;
 
     // 访存级有效标志更新
     always @(posedge clk) begin

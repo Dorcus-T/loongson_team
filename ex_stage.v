@@ -141,11 +141,12 @@ module exe_stage (
 
     // ========== 输出到MEM阶段的总线 ==========
     assign ex_to_mem_bus = {
-        tlbrd_en,              // 241     tlbrd使能
-        tlbwr_en,              // 240     tlbwf使能
-        tlbfill_en,            // 239
-        ex_rf_valid,           // 238     重取指标志
-        is_mem_inst,           // 237     是访存指令
+        tlbrd_en,              // 242     tlbrd使能
+        tlbwr_en,              // 241     tlbwf使能
+        tlbfill_en,            // 240
+        ex_rf_valid,           // 239     重取指标志
+        is_mem_inst,           // 238     是访存指令
+        mem_we,                // 237     存储器写使能
         timer_finalval,        // 236:205 筛选后的计数器数据
         res_from_timer,        // 204     结果来自计数器
         res_from_csr,          // 203     结果来自csr寄存器堆

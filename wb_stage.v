@@ -153,7 +153,7 @@ module wb_stage (
     assign wb_to_id_result = final_result;
 
     // ========== MMU读写控制 ==========
-    assign tlbrwf_valid = {tlbrd_en, tlbwr_en, tlbfill_en} & {3{!wb_exc_valid}};
+    assign tlbrwf_valid = {tlbrd_en, tlbwr_en, tlbfill_en} & {3{!wb_exc_valid}} & {3{wb_valid}};
 
     // ========== 重取指控制 ==========
     assign wb_pc_back  = wb_pc;

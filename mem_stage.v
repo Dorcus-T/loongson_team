@@ -123,7 +123,7 @@ module mem_stage (
 
     // ========== DCache 数据接受 ==========
     // load指令有效、无异常、WB就绪时拉高，告知 cache 可弹出 FIFO 数据
-    assign dcache_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we) && !mem_exc_valid;
+    assign dcache_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we);
 
     // 访存级有效标志更新
     always @(posedge clk) begin

@@ -54,7 +54,6 @@ module if_stage (
     wire        br_taken;               // 分支/跳转是否发生
     reg         fork_r;                 // 分叉寄存
     wire [31:0] br_target;              // 分支/跳转目标地址
-    wire        br_ld_stall;            // 跳转指令没得到正确数据不能发起取值请求
     // brtaken和冲刷信号的任务：让if中的错误指令不动，让preif输入特定的取值请求且preif可以前进
     // 冲刷通过inst_dirty机制丢弃桥FIFO中的旧数据，确保新指令进入if时拿到的是新读出的数据
     // brtaken_r和两个冲刷寄存信号会让nextpc一直指向跳转地址，且不会让if中的错误指令往前走，也会让preif可以前进
@@ -74,7 +73,7 @@ module if_stage (
     reg  [ 1:0] inst_dirty;             // 不为0就代表下一次 cache 的 data_ok 数据无效
 
     // ========== 分支总线解析 ==========
-    assign {br_ld_stall, br_taken, br_target} = br_bus;
+    assign {br_taken, br_target} = br_bus;
 
     // ========== 输出到ID阶段的总线 ==========
     assign if_to_id_bus = {if_exc, if_inst, if_pc};
@@ -165,21 +164,24 @@ module if_stage (
     end
 
     always @(posedge clk) pre_if_ready_go_r <= pre_if_ready_go; // 表明上周期preif维护的指令是否发送过访存请求
-    always @(posedge clk) pre_if_exc_r <= pre_if_exc_valid;    // 表明上周期preif是不是异常指令
-
+    always @(posedge clk) pre_if_exc_r <= pre_if_exc_valid;     // 表明上周期preif是不是异常指令
     // 冲刷和跳转会立马改变nextpc，假设第一到第二周期的上跳产生冲刷或者跳转信号，第三周期会得到脏数据信号
     // 第一周期如果preif可以发请求但是不能进入if，那么一定是if中有一条有效指令但是不能往后走
     // 所以pre_if_ready_go_r && !new_in的时候if第二周期中的一定是第一周期中的那一条指令
     // 如果if中没有有效数据那么就要废2条，如果刚返回或者早就有数据存在if_inst_r中那么就只废一次
-    // 注意：现在指令数据存于桥的FIFO中，if_inst_r已移除，icache_cpu_data_ok直接反映数据可用性
+    // 注意：现在指令数据存于桥的FIFO中，if_inst_r已移除。
+    // IF 数据是否已被消耗用 if_to_id_valid && id_allowin 判断，
+    // 同时覆盖 data_ok=0（未到）和 data_ok=1 但 IF 阻塞（到了未接）
     always @(posedge clk) begin
         if (reset) begin
             inst_dirty <= 2'b0;
         end
         else if (wb_ertn_flush || exc_no_rf || br_taken || rf_valid) begin
-            if (!if_exc && !icache_cpu_data_ok && !new_in && !pre_if_exc_r && pre_if_ready_go_r)
+            if ((!if_exc && if_valid && !(if_to_id_valid && id_allowin))
+                && (!pre_if_exc_r && pre_if_ready_go_r) && !new_in)
                 inst_dirty <= 2'b10;
-            else if (!if_exc && (!icache_cpu_data_ok || (!new_in && !pre_if_exc_r && pre_if_ready_go_r)))
+            else if ((!if_exc && if_valid && !(if_to_id_valid && id_allowin))
+                  || (!pre_if_exc_r && pre_if_ready_go_r) && !new_in)
                 inst_dirty <= 2'b01;
             else
                 inst_dirty <= 2'b00;
@@ -190,7 +192,7 @@ module if_stage (
 
     // ========== ICache 输出信号 ==========
     assign if_to_mmu_vaddr = fork_r ? nextpc_r : nextpc;                                  // 发mmu虚地址
-    assign icache_cpu_req   = pre_if_valid && !req_already_final && !br_ld_stall && !(pre_if_exc_valid);
+    assign icache_cpu_req   = pre_if_valid && !req_already_final && !(pre_if_exc_valid);
     // preif有效才能发请求；已经发过的话不能重复发请求；跳转指令遇上lduse冒险未取得正确数据时也不能访存
     assign icache_cpu_op    = 1'b0;                                                       // ICache 只读
     assign icache_cpu_index  = (fork_r ? nextpc_r[`OFFSET_WIDTH +: `INDEX_WIDTH] : nextpc[`OFFSET_WIDTH +: `INDEX_WIDTH]); // 虚地址中的index部分

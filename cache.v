@@ -65,13 +65,23 @@ module cache (
     reg  [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
 
     // ========== 统一 RAM 读地址 ==========
-    wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = accept_new_req             ? (cacop_en ? cacop_index : cpu_index) :
-                       (main_miss && wr_rdy && (req_cached || cacop_en_r))  ? (cacop_en_r ? cacop_index_r : req_index) :
-                                                                      {`INDEX_WIDTH{1'b0}};
+    // cacop 地址直接索引模式 (code 00/01) → 用 VA index 寻址
+    // cacop 查询索引模式     (code 10) → 用 PA index（同普通 load，经 MMU）
+    // 普通请求                           → 用 PA index（cpu_index / req_index）
+    wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
+    wire [`INDEX_WIDTH-1:0] ram_raddr_miss;    // MISS→REPLACE 时的读地址
+    assign ram_raddr_req  = cacop_is_index ? cacop_index : cpu_index;
+    assign ram_raddr_miss = cacop_is_index_r ? cacop_index_r : req_index;
 
     wire ram_read_en;
-    assign ram_read_en = accept_new_req || (main_miss && wr_rdy && (req_cached || cacop_en_r));
+    wire ram_read_miss_en;
+    assign ram_read_miss_en = main_miss && wr_rdy && (req_cached || cacop_en_r);
+    assign ram_read_en      = accept_new_req || ram_read_miss_en;
+
+    wire [`INDEX_WIDTH-1:0] ram_raddr;
+    assign ram_raddr = accept_new_req    ? ram_raddr_req  :
+                       ram_read_miss_en  ? ram_raddr_miss :
+                                           {`INDEX_WIDTH{1'b0}};
 
     // ========== CACOP 逻辑 ==========
     wire cacop_is_index;
@@ -100,6 +110,8 @@ module cache (
     reg  [4:0]              cacop_code_r;
     reg                     cacop_way_r;
     reg  [`INDEX_WIDTH-1:0] cacop_index_r;
+    reg                     cacop_is_index_r;
+    reg                     cacop_is_hit_r;
     // ========== Miss Buffer ==========
     reg         miss_replace_way;
     reg  [ 1:0] miss_refill_cnt;
@@ -204,7 +216,8 @@ module cache (
                             (cpu_req && !hit_write_conflict) ? MAIN_LOOKUP : MAIN_IDLE;
             end
             MAIN_MISS: begin
-                main_next = wr_rdy ? MAIN_REPLACE : MAIN_MISS;
+                main_next = miss_needs_write ? (wr_rdy ? MAIN_REPLACE : MAIN_MISS)
+                                             : MAIN_REPLACE;
             end
             MAIN_REPLACE: begin
                 if (need_bus_rd) begin
@@ -274,9 +287,11 @@ module cache (
             req_wdata   <= cpu_wdata;
             req_cached  <= cpu_cached;
             cacop_en_r  <= cacop_en;
-            cacop_code_r <= cacop_code;
-            cacop_way_r <= cacop_way;
-            cacop_index_r <= cacop_index;
+            cacop_code_r    <= cacop_code;
+            cacop_way_r     <= cacop_way;
+            cacop_index_r   <= cacop_index;
+            cacop_is_index_r <= cacop_is_index;
+            cacop_is_hit_r   <= cacop_is_hit;
         end
     end
 
@@ -380,6 +395,16 @@ module cache (
     assign refill_tagv_we = main_refill && return_valid && return_last && req_cached
                           || main_refill && cacop_en_r;
 
+    // ========== TagV RAM 仿真初始化（V 位清零，防止 X 传播） ==========
+    integer tagv_init_w, tagv_init_i;
+    initial begin
+        for (tagv_init_w = 0; tagv_init_w < `WAY_NUM; tagv_init_w = tagv_init_w + 1) begin
+            for (tagv_init_i = 0; tagv_init_i < INDEX_DEPTH; tagv_init_i = tagv_init_i + 1) begin
+                tagv_ram[tagv_init_w][tagv_init_i] = 0;
+            end
+        end
+    end
+
     integer tv_i;
     always @(posedge clk) begin
         for (tv_i = 0; tv_i < `WAY_NUM; tv_i = tv_i + 1) begin
@@ -394,6 +419,9 @@ module cache (
                     if(way_hit[0] || way_hit[1]) begin
                         tagv_ram[tv_i][req_index][0] <= 1'b0;
                     end
+                end
+                else if(cacop_en_r && cacop_code_r[4:3]==2'b11) begin
+                    // 实现自定义操作，当前无操作
                 end
                 else begin
                     tagv_ram[tv_i][req_index] <= {req_tag, 1'b1};
@@ -483,9 +511,15 @@ module cache (
     wire read_result_ready;
     wire [31:0] live_rdata;
     assign read_result_ready = read_hit_done || read_miss_done;
-    assign live_rdata = read_hit_done  ? lookup_rdata
-                      : read_miss_done ? miss_load_result
-                                       : 32'd0;
+    // 最后一拍且目标 word 恰好在当前 beat 时，miss_load_result 是 NBA 来不及更新，
+    // 直接 bypass return_data。uncached 单拍返回也在此列
+    wire miss_data_bypass;
+    assign miss_data_bypass = main_refill && return_valid && return_last
+                            && (miss_refill_cnt == req_offset[3:2] || !req_cached);
+    assign live_rdata = read_hit_done              ? lookup_rdata
+                      : (read_miss_done && miss_data_bypass) ? return_data
+                      : read_miss_done             ? miss_load_result
+                                                   : 32'd0;
     // cacop 结果就绪
     wire cacop_result_ready;
     assign cacop_result_ready = main_refill && cacop_en_r;
@@ -559,8 +593,20 @@ module cache (
     // ========== AXI 写请求 — 写回脏行 / uncached store ==========
     wire cached_wr;
     wire uncached_wr;
+    // CACOP 写回类型识别 — 必须由 cacop_en_r 门控，code 10 额外要求命中
+    wire cacop_wb_index;       // code 01: 地址直接索引写回无效
+    wire cacop_wb_hit;         // code 10: 查询索引写回无效（仅 |way_hit）
     wire cacop_wb;
-    assign cacop_wb = cacop_code_r[4:3]==2'b01 || cacop_code_r[4:3]==2'b10;
+    assign cacop_wb_index = cacop_en_r && (cacop_code_r[4:3] == 2'b01);
+    assign cacop_wb_hit   = cacop_en_r && (cacop_code_r[4:3] == 2'b10) && (|way_hit);
+    assign cacop_wb       = cacop_wb_index || cacop_wb_hit;
+
+    // MISS 状态是否需要等写通道就绪：cached（可能有脏行，保守等）| uncached store | cacop 写回
+    wire miss_needs_write;
+    assign miss_needs_write = req_cached
+                            || is_uncached_store
+                            || cacop_wb;
+
     assign cached_wr = main_replace && (req_cached || cacop_wb)
                     && d_rdata[miss_replace_way]
                     && tagv_rdata[miss_replace_way][0];
@@ -568,8 +614,10 @@ module cache (
 
     assign wr_req = (cached_wr || uncached_wr) && !wr_req_accepted;
     assign wr_type  = (req_cached || cacop_wb) ? 3'b100 : uncached_rd_type;
+    // cacop_wb_index (code 01) 用 VA index；cacop_wb_hit (code 10) 用 PA index
     assign wr_addr  = (req_cached || cacop_wb)
-                    ? {tagv_rdata[miss_replace_way][`TAG_WIDTH:1], req_index, 4'b0000}
+                    ? {tagv_rdata[miss_replace_way][`TAG_WIDTH:1],
+                       cacop_wb_index ? cacop_index_r : req_index, 4'b0000}
                     : {req_tag, req_index, req_offset};
     assign wr_wstrb = (req_cached || cacop_wb) ? 4'b1111 : req_wstrb_4b;
     assign wr_data  = (req_cached || cacop_wb) ? replace_line_data : {96'd0, req_wdata};

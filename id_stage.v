@@ -263,7 +263,6 @@ module id_stage (
     wire id_load_op;                     // ID阶段是否为加载指令
     wire load_use_stall;                 // load-use冒险需要停顿
     wire branch_stall;                   // 分支指令数据冒险需要停顿
-    wire br_ld_stall;                    // 分支与ld冒险，但ld没取得数据
     wire csr_stall;                      // csr与ertn有关冒险
     wire int_csr_stall;                  // 中断与csr有关冒险
     wire inst_csr_stall;                 // csr指令有关冒险
@@ -562,16 +561,13 @@ module id_stage (
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
 
-    //id，ex，mem有异常或者ertn可以不管brtaken，因为不论是否跳转都会冲刷，wb若有异常或者ertn，其发出的冲刷信号优先级也高于id的brtaken
-    assign br_ld_stall = branch_stall && load_use_stall && id_valid; // id为跳转指令，ex为load指令，此时会发出错误的brtarget，不能发出取值请求
-
     // 分支目标地址计算
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b ||
                         inst_blt || inst_bge || inst_bltu || inst_bgeu) ?
                        (id_pc + br_offs) : (rj_value + jirl_offs);
 
     // 分支总线输出（跳转标志 + 目标地址）
-    assign br_bus = {br_ld_stall, br_taken, br_target};
+    assign br_bus = {br_taken, br_target};
 
     // ========== 解析来自if阶段的总线 ==========
     assign {id_exc[8:5], id_inst, id_pc} = if_to_id_bus_r;
@@ -640,7 +636,7 @@ module id_stage (
         else if (id_to_ex_valid && ex_allowin) begin
             id_rf_valid <= ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
                                        || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cache_code[2:0] == 3'b000)) && id_valid;
+                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cache_code[2:0] == 3'b000) && cache_en) && id_valid;
         end
     end
     // ========== 冒险检测、前递处理、阻塞处理 ==========

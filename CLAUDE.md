@@ -134,3 +134,17 @@ endgenerate
 - `wire` 和 `reg` 关键字不等长，通过补空格使**信号名**起始列对齐
 - 有/无位宽的信号之间，通过类型关键字后的空格补位，使信号名起始列一致
 - **同一组内**上下行的右侧 `//` 注释必须对齐到相同列
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues，使用 `gh` CLI 操作。详见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用默认标签名：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human`、`wontfix`。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文仓库，`CONTEXT.md` + `docs/adr/` 位于仓库根目录。详见 `docs/agents/domain.md`。

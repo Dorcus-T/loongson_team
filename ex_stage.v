@@ -48,10 +48,11 @@ module exe_stage (
     // 读取计数器
     input  wire [63:0]              timer_value,        // 计数器数值
     // cacop相关
-    output wire [4:0]              cache_code,          // cache操作类型
-    output wire                    cache_en_final,      // 有效使能（过异常门控）
-    output wire [31:0]             cache_va,            // cache操作虚地址
-    input  wire                    icache_cacop_rdy    // ICache 空闲可接 CACOP
+    output wire [4:0]              cacop_code,          // cache操作类型
+    output wire                    cacop_en_final,      // 有效使能（过异常门控）
+    output wire [31:0]             cacop_va,            // cache操作虚地址
+    input  wire                    icache_cacop_rdy,   // ICache CACOP 就绪
+    input  wire                    dcache_cacop_rdy    // DCache CACOP 就绪
     );
 
     reg  ex_valid;                               // EX阶段有效标志
@@ -115,8 +116,8 @@ module exe_stage (
     
     // ========== 解析来自ID阶段的总线 ==========
     assign {
-        cache_code,     // 298:294 cache操作类型
-        cache_en,       // 293     cache操作使能
+        cacop_code,     // 298:294 cache操作类型
+        cacop_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
         invtlb_en,      // 291     invtlb使能
         tlbrd_en,       // 290     tlbrd使能
@@ -185,8 +186,8 @@ module exe_stage (
 
     assign ex_ready_go   = is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
                                         ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || ex_flush_pending :
-                                        ex_valid && cache_en && (cache_code[2:0] == 3'd0) ? (icache_cacop_rdy || cacop_req_already || ex_flush_pending) :
-                                        ex_valid && cache_en && (cache_code[2:0] == 3'd1) ? (dcache_cacop_rdy || req_already || ex_flush_pending) : 1'b1;
+                                        ex_valid && cacop_en && (cacop_code[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || ex_flush_pending) :
+                                        ex_valid && cacop_en && (cacop_code[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || ex_flush_pending) : 1'b1;
     // 如果是除法指令，要么正确握手并且算完了发出ready信号，要么由于后面有异常和ertn导致除法指令不发出除法请求就直接走
     // 如果是访存指令，就必须发出访存请求之后才能往后走
     // ex阶段的异常中除了ale异常都不应该发出除法请求，不能添加ale，因为ale异常依赖alu结果，alu结果依赖除法结果，除法结果又依赖异常判断形成闭环，虽然二者互斥但是不能有闭环
@@ -210,25 +211,30 @@ module exe_stage (
     end
 
     // ========== DCache 请求控制 ==========
-    wire dcache_cacop_rdy;
-    assign dcache_cacop_rdy = dcache_cpu_addr_ok;  // cache 通过 accept_new_req(cacop_en) 应答
     always @(posedge clk) begin
         if (reset || (ex_ready_go && mem_allowin)) begin
             req_already <= 1'b0;
         end
-        else if ((dcache_cpu_req && dcache_cpu_addr_ok
-                  || cache_en && (cache_code[2:0] == 3'd1) && dcache_cacop_rdy)
-                 && !(ex_ready_go && mem_allowin)) begin
+        else if ((dcache_cpu_req && dcache_cpu_addr_ok) && !(ex_ready_go && mem_allowin)) begin
             req_already <= 1'b1;
         end
     end
-    reg cacop_req_already;
+    reg i_cacop_req_already;
     always @(posedge clk) begin
         if (reset || (ex_ready_go && mem_allowin)) begin
-            cacop_req_already <= 1'b0;
+            i_cacop_req_already <= 1'b0;
         end
-        else if (cache_en && (cache_code[2:0] == 3'd0) && icache_cacop_rdy && !(ex_ready_go && mem_allowin)) begin
-            cacop_req_already <= 1'b1;
+        else if (cacop_en && (cacop_code[2:0] == 3'd0) && icache_cacop_rdy && !(ex_ready_go && mem_allowin)) begin
+            i_cacop_req_already <= 1'b1;
+        end
+    end
+    reg d_cacop_req_already;
+    always @(posedge clk) begin
+        if (reset || (ex_ready_go && mem_allowin)) begin
+            d_cacop_req_already <= 1'b0;
+        end
+        else if (cacop_en && (cacop_code[2:0] == 3'd1) && dcache_cacop_rdy && !(ex_ready_go && mem_allowin)) begin
+            d_cacop_req_already <= 1'b1;
         end
     end
     //指令往后走就清零，指令发请求且不往后走就置1。ex中的指令不存在preif中的因为冲刷和brtaken而立马变化，ex中的指令只会从id中来，如果阻塞指令就一定不变
@@ -282,19 +288,17 @@ module exe_stage (
     };
     assign final_csr_wmask  = tlbsrch_en && srch_value[5] ? 32'h8000001f : csr_wmask;
     assign final_csr_wvalue = tlbsrch_en && srch_value[5] ? {27'b0,srch_value[4:0]} : csr_wvalue;
-    assign ld_and_str       = {ex_load_op || (cache_en &&cache_code[4:3] ==2'b10), mem_we} & {2{ex_valid}};
+    assign ld_and_str       = {ex_load_op || (cacop_en &&cacop_code[4:3] ==2'b10), mem_we} & {2{ex_valid}};
     // ========== cacop相关信号 ==========
-    assign cache_va    = alu_result;
-    // Hit 模式(code[4:3]=2)需要 MMU 翻译 → 有 TLB 异常则关使能
-    // CACOP 操作 Cache 行粒度 → 不考虑地址对齐(ALE)
+    assign cacop_va    = alu_result;
     wire cacop_hit_mode;
-    assign cacop_hit_mode = cache_en && (cache_code[4:3] == 2'b10);
-    assign cache_en_final = cache_en && ex_valid
+    assign cacop_hit_mode = cacop_en && (cacop_code[4:3] == 2'b10);
+    assign cacop_en_final = cacop_en && ex_valid
                           && !ex_exc_valid && !mem_exc_valid
                           && !(|mem_exc || ex_rf_valid)
                           && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid
                           && !(cacop_hit_mode && |mem_tlb_exc)
-                          && !cacop_req_already && !req_already;
+                          && !i_cacop_req_already && !d_cacop_req_already;
 
     // ========== DCache 输出信号 ==========
     assign dcache_cpu_req   = ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);

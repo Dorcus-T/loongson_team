@@ -19,6 +19,12 @@ module cache (
     output wire [31:0]             cpu_rdata,
     input  wire                    cpu_accept,
 
+    // 重定向冲刷（清空 cpu_fifo）
+    input  wire                    flush,
+
+    // IF 读请求在途标志（排除 cacop）
+    output wire                    pipeline_active,
+
     // AXI 总线接口
     output wire                 rd_req,
     output wire [ 2:0]          rd_type,
@@ -131,6 +137,7 @@ module cache (
     reg  [31:0]          wb_wdata;
 
     // ========== 状态机节点 ==========
+    assign pipeline_active = (main_state != MAIN_IDLE) && !cacop_en_r;
     wire main_idle    = (main_state == MAIN_IDLE);
     wire main_lookup  = (main_state == MAIN_LOOKUP);
     wire main_miss    = (main_state == MAIN_MISS);
@@ -546,7 +553,7 @@ module cache (
 
     integer oi;
     always @(posedge clk) begin
-        if (~resetn) begin
+        if (~resetn || flush) begin
             cpu_fifo_wptr <= 2'd0;
             cpu_fifo_rptr <= 2'd0;
             cpu_fifo_cnt  <= 3'd0;

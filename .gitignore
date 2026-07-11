@@ -7,3 +7,4 @@ sim/
 *.swp
 *.swo
 .VSCodeCounter
+tmp/

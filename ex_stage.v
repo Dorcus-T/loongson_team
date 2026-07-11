@@ -271,7 +271,7 @@ module exe_stage (
     assign ex_to_mmu_vaddr = alu_result;
     assign vtlb_enop = {
         tlbsrch_en,
-        ex_valid && !mem_exc_valid && !(|ex_exc[12:3]) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid ? invtlb_en : 1'b0,
+        ex_valid && !mem_exc_valid && !(|ex_exc[12:3]) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid && !ex_rf_valid ? invtlb_en : 1'b0,
         dest,
         rj_value[9:0],
         rkd_value[31:13]

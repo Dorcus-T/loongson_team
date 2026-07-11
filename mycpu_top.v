@@ -156,6 +156,8 @@ module mycpu_top (
     wire [ 3:0] icache_cpu_wstrb;
     wire [31:0] icache_cpu_wdata;
     wire        icache_cpu_cached;
+    wire        icache_flush;            // IF 重定向时清空 ICache cpu_fifo
+    wire        icache_pipeline_active;  // ICache 在途 IF 读（不含 cacop）
     wire        icache_cpu_addr_ok;
     wire        icache_cpu_data_ok;
     wire [31:0] icache_cpu_rdata;
@@ -251,8 +253,10 @@ module mycpu_top (
         .wb_ertn_flush      (wb_ertn_flush),
         .exc_entry          (exc_entry),
         .exc_back_pc        (exc_back_pc),
-        .rf_valid           (rf_valid),
-        .rf_pc              (wb_pc_back)
+        .rf_valid               (rf_valid),
+        .rf_pc                  (wb_pc_back),
+        .icache_flush           (icache_flush),
+        .icache_pipeline_active (icache_pipeline_active)
     );
 
     // ================================================================
@@ -486,12 +490,15 @@ module mycpu_top (
         .cpu_addr_ok  (icache_cpu_addr_ok),
         .cpu_data_ok  (icache_cpu_data_ok),
         .cpu_rdata    (icache_cpu_rdata),
-        .cpu_accept   (icache_cpu_accept),
+        .cpu_accept       (icache_cpu_accept),
+        .flush            (icache_flush),
+        .pipeline_active  (icache_pipeline_active),
         // CACOP
-        .cacop_en     (icache_cacop_en),
-        .cacop_code   (cacop_code),
-        .cacop_va     (cacop_va),
-        .cacop_rdy    (icache_cacop_rdy),
+        .cacop_en         (icache_cacop_en),
+        .cacop_code       (cacop_code),
+        .cacop_va         (cacop_va),
+        .cacop_tag        (paddr_to_ex[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH]),
+        .cacop_rdy        (icache_cacop_rdy),
         // AXI 接口
         .rd_req       (icache_rd_req),
         .rd_type      (icache_rd_type),
@@ -528,12 +535,15 @@ module mycpu_top (
         .cpu_addr_ok  (dcache_cpu_addr_ok),
         .cpu_data_ok  (dcache_cpu_data_ok),
         .cpu_rdata    (dcache_cpu_rdata),
-        .cpu_accept   (dcache_cpu_accept),
+        .cpu_accept       (dcache_cpu_accept),
+        .flush            (1'b0),
+        .pipeline_active  (),
         // CACOP
-        .cacop_en     (dcache_cacop_en),
-        .cacop_code   (cacop_code),
-        .cacop_va     (cacop_va),
-        .cacop_rdy    (dcache_cacop_rdy),
+        .cacop_en         (dcache_cacop_en),
+        .cacop_code       (cacop_code),
+        .cacop_va         (cacop_va),
+        .cacop_tag        (paddr_to_ex[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH]),
+        .cacop_rdy        (dcache_cacop_rdy),
         // AXI 接口
         .rd_req       (dcache_rd_req),
         .rd_type      (dcache_rd_type),

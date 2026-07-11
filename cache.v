@@ -19,6 +19,12 @@ module cache (
     output wire [31:0]             cpu_rdata,
     input  wire                    cpu_accept,
 
+    // 重定向冲刷（清空 cpu_fifo）
+    input  wire                    flush,
+
+    // IF 读请求在途标志（排除 cacop）
+    output wire                    pipeline_active,
+
     // AXI 总线接口
     output wire                 rd_req,
     output wire [ 2:0]          rd_type,
@@ -36,11 +42,12 @@ module cache (
     input  wire                 wr_done,
     output wire                 bus_accept,
 
-    // CACOP 接口（tag 复用 cpu_tag）
-    input  wire                 cacop_en,
-    input  wire [ 4:0]          cacop_code,
-    input  wire [31:0]          cacop_va,
-    output wire                 cacop_rdy
+    // CACOP 接口
+    input  wire                    cacop_en,
+    input  wire [ 4:0]             cacop_code,
+    input  wire [31:0]             cacop_va,
+    input  wire [`TAG_WIDTH-1:0]   cacop_tag,
+    output wire                    cacop_rdy
 );
 
     // ========== 局部参数 ==========
@@ -68,7 +75,7 @@ module cache (
     // ========== 统一 RAM 读地址 ==========
     wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
     wire [`INDEX_WIDTH-1:0] ram_raddr_miss;    // MISS→REPLACE 时的读地址
-    assign ram_raddr_req  = cacop_is_index ? cacop_index : cpu_index;
+    assign ram_raddr_req  = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
     assign ram_raddr_miss = cacop_is_index_r ? cacop_index_r : req_index;
 
     wire ram_read_en;
@@ -128,6 +135,7 @@ module cache (
     reg  [31:0]          wb_wdata;
     reg                  hit_write_lookup_r;
     // ========== 状态机节点 ==========
+    assign pipeline_active = (main_state != MAIN_IDLE) && !cacop_en_r;
     wire main_idle    = (main_state == MAIN_IDLE);
     wire main_lookup  = (main_state == MAIN_LOOKUP);
     wire main_miss    = (main_state == MAIN_MISS);
@@ -275,8 +283,8 @@ module cache (
     always @(posedge clk) begin
         if (accept_new_req) begin
             req_op      <= cpu_op;
-            req_index   <= cpu_index;
-            req_tag     <= cpu_tag;
+            req_index   <= cacop_en ? cacop_index : cpu_index;
+            req_tag     <= (cacop_en && cacop_is_hit) ? cacop_tag : cpu_tag;
             req_offset  <= cpu_offset;
             req_wstrb_mask <= { {8{cpu_wstrb[3]}}, {8{cpu_wstrb[2]}},
                                 {8{cpu_wstrb[1]}}, {8{cpu_wstrb[0]}} };
@@ -550,7 +558,7 @@ module cache (
 
     integer oi;
     always @(posedge clk) begin
-        if (~resetn) begin
+        if (~resetn || flush) begin
             cpu_fifo_wptr <= 2'd0;
             cpu_fifo_rptr <= 2'd0;
             cpu_fifo_cnt  <= 3'd0;

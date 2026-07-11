@@ -36,10 +36,11 @@ module cache (
     input  wire                 wr_done,
     output wire                 bus_accept,
 
-    // CACOP 接口（tag 复用 cpu_tag）
-    input  wire                 cacop_en,
-    input  wire [ 4:0]          cacop_code,
-    input  wire [31:0]          cacop_va
+    // CACOP 接口
+    input  wire                    cacop_en,
+    input  wire [ 4:0]             cacop_code,
+    input  wire [31:0]             cacop_va,
+    input  wire [`TAG_WIDTH-1:0]   cacop_tag
 );
 
     // ========== 局部参数 ==========
@@ -70,7 +71,7 @@ module cache (
     // 普通请求                           → 用 PA index（cpu_index / req_index）
     wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
     wire [`INDEX_WIDTH-1:0] ram_raddr_miss;    // MISS→REPLACE 时的读地址
-    assign ram_raddr_req  = cacop_is_index ? cacop_index : cpu_index;
+    assign ram_raddr_req  = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
     assign ram_raddr_miss = cacop_is_index_r ? cacop_index_r : req_index;
 
     wire ram_read_en;
@@ -279,8 +280,8 @@ module cache (
     always @(posedge clk) begin
         if (accept_new_req) begin
             req_op      <= cpu_op;
-            req_index   <= cpu_index;
-            req_tag     <= cpu_tag;
+            req_index   <= cacop_en ? cacop_index : cpu_index;
+            req_tag     <= (cacop_en && cacop_is_hit) ? cacop_tag : cpu_tag;
             req_offset  <= cpu_offset;
             req_wstrb_mask <= { {8{cpu_wstrb[3]}}, {8{cpu_wstrb[2]}},
                                 {8{cpu_wstrb[1]}}, {8{cpu_wstrb[0]}} };

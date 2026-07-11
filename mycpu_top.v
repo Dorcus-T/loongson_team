@@ -488,7 +488,8 @@ module mycpu_top (
         .cacop_en     (icache_cacop_en),
         .cacop_code   (cache_code),
         .cacop_va     (cache_va),
-        // AXI 接口
+        .cacop_tag    (paddr_to_ex[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH]),
+        // AXI 接口 (ICache)
         .rd_req       (icache_rd_req),
         .rd_type      (icache_rd_type),
         .rd_addr      (icache_rd_addr),
@@ -529,7 +530,8 @@ module mycpu_top (
         .cacop_en     (dcache_cacop_en),
         .cacop_code   (cache_code),
         .cacop_va     (cache_va),
-        // AXI 接口
+        .cacop_tag    (paddr_to_ex[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH]),
+        // AXI 接口 (DCache)
         .rd_req       (dcache_rd_req),
         .rd_type      (dcache_rd_type),
         .rd_addr      (dcache_rd_addr),

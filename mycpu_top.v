@@ -180,13 +180,15 @@ module mycpu_top (
     // ================================================================
     // CACOP 连线（EX → ICache / DCache）
     // ================================================================
-    wire [4:0]  cache_code;
-    wire        cache_en_final;
-    wire [31:0] cache_va;
+    wire [4:0]  cacop_code;
+    wire        cacop_en_final;
+    wire [31:0] cacop_va;
     wire        icache_cacop_en;
     wire        dcache_cacop_en;
-    assign icache_cacop_en = cache_en_final && (cache_code[2:0] == 3'd0);
-    assign dcache_cacop_en = cache_en_final && (cache_code[2:0] == 3'd1);
+    assign icache_cacop_en = cacop_en_final && (cacop_code[2:0] == 3'd0);
+    assign dcache_cacop_en = cacop_en_final && (cacop_code[2:0] == 3'd1);
+    wire        icache_cacop_rdy;
+    wire        dcache_cacop_rdy;
 
     // ================================================================
     // ICache — AXI 侧连线（ICache 只读，写信号未使用）
@@ -334,10 +336,11 @@ module mycpu_top (
         .ex_ertn_flush      (ex_ertn_flush),
         .timer_value        (timer_value),
         // CACOP
-        .cache_code         (cache_code),
-        .cache_en_final     (cache_en_final),
-        .cache_va           (cache_va),
-        .icache_cacop_rdy   (icache_cpu_addr_ok)
+        .cacop_code         (cacop_code),
+        .cacop_en_final     (cacop_en_final),
+        .cacop_va           (cacop_va),
+        .icache_cacop_rdy   (icache_cacop_rdy),
+        .dcache_cacop_rdy   (dcache_cacop_rdy)
     );
 
     // ================================================================
@@ -486,8 +489,9 @@ module mycpu_top (
         .cpu_accept   (icache_cpu_accept),
         // CACOP
         .cacop_en     (icache_cacop_en),
-        .cacop_code   (cache_code),
-        .cacop_va     (cache_va),
+        .cacop_code   (cacop_code),
+        .cacop_va     (cacop_va),
+        .cacop_rdy    (icache_cacop_rdy),
         // AXI 接口
         .rd_req       (icache_rd_req),
         .rd_type      (icache_rd_type),
@@ -527,8 +531,9 @@ module mycpu_top (
         .cpu_accept   (dcache_cpu_accept),
         // CACOP
         .cacop_en     (dcache_cacop_en),
-        .cacop_code   (cache_code),
-        .cacop_va     (cache_va),
+        .cacop_code   (cacop_code),
+        .cacop_va     (cacop_va),
+        .cacop_rdy    (dcache_cacop_rdy),
         // AXI 接口
         .rd_req       (dcache_rd_req),
         .rd_type      (dcache_rd_type),

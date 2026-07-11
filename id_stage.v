@@ -76,7 +76,7 @@ module id_stage (
     wire [19:0] i20;                     // 20位立即数[24:5]
     wire [15:0] i16;                     // 16位立即数[25:10]
     wire [25:0] i26;                     // 26位立即数（用于分支）
-    wire [4:0] cache_code;               // cache操作类型
+    wire [4:0] cacop_code;               // cache操作类型
     // ========== 解码器输出（用于指令识别） ==========
     wire [63:0] op_31_26_d;              // 6位操作码的1-of-64解码
     wire [15:0] op_25_22_d;              // 4位操作码的1-of-16解码
@@ -210,7 +210,7 @@ module id_stage (
     wire tlbrd_en;                       // WB读tlb并写csr
     wire tlbwr_en;                       // tlbwrWB写tlb
     wire tlbfill_en;
-    wire cache_en;                       // cache操作使能
+    wire cacop_en;                       // cache操作使能
     // ========== 立即数控制信号 ==========
     wire need_ui5;                       // 5位无符号立即数（移位量）
     wire need_si12;                      // 12位有符号立即数
@@ -283,7 +283,7 @@ module id_stage (
     assign i26      = {id_inst[9:0], id_inst[25:10]};
     assign csr_id_num = inst_rdcntid ? 14'h40
                       : inst_tlbsrch ? 14'h10 : id_inst[23:10];
-    assign cache_code = id_inst[4:0];
+    assign cacop_code = id_inst[4:0];
     // ========== 指令解码器实例化（将位向量转换为独热码） ==========
     decoder_6_64 u_dec0 (
         .in  (op_31_26),
@@ -473,7 +473,7 @@ module id_stage (
     assign tlbrd_en      = inst_tlbrd;
     assign tlbwr_en      = inst_tlbwr;
     assign tlbfill_en    = inst_tlbfill;
-    assign cache_en      = inst_cacop;
+    assign cacop_en      = inst_cacop;
     // 访存大小编码
     assign mem_size[0]   = inst_ld_b | inst_ld_bu | inst_st_b;    // 字节访问
     assign mem_size[1]   = inst_ld_h | inst_ld_hu | inst_st_h;    // 半字访问
@@ -575,8 +575,8 @@ module id_stage (
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装
     assign id_to_ex_bus = {
-        cache_code,     // 298:294 cache操作类型
-        cache_en,       // 293     cache操作使能
+        cacop_code,     // 298:294 cache操作类型
+        cacop_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
         invtlb_en,      // 291     invtlb使能
         tlbrd_en,       // 290     tlbrd使能
@@ -636,7 +636,7 @@ module id_stage (
         else if (id_to_ex_valid && ex_allowin) begin
             id_rf_valid <= ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
                                        || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cache_code[2:0] == 3'b000) && cache_en) && id_valid;
+                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && id_valid;
         end
     end
     // ========== 冒险检测、前递处理、阻塞处理 ==========

@@ -39,7 +39,8 @@ module cache (
     // CACOP 接口（tag 复用 cpu_tag）
     input  wire                 cacop_en,
     input  wire [ 4:0]          cacop_code,
-    input  wire [31:0]          cacop_va
+    input  wire [31:0]          cacop_va,
+    output wire                 cacop_rdy
 );
 
     // ========== 局部参数 ==========
@@ -65,9 +66,6 @@ module cache (
     reg  [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
 
     // ========== 统一 RAM 读地址 ==========
-    // cacop 地址直接索引模式 (code 00/01) → 用 VA index 寻址
-    // cacop 查询索引模式     (code 10) → 用 PA index（同普通 load，经 MMU）
-    // 普通请求                           → 用 PA index（cpu_index / req_index）
     wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
     wire [`INDEX_WIDTH-1:0] ram_raddr_miss;    // MISS→REPLACE 时的读地址
     assign ram_raddr_req  = cacop_is_index ? cacop_index : cpu_index;
@@ -118,7 +116,7 @@ module cache (
     reg  [31:0] miss_load_result;
     reg         wr_req_accepted;
 
-    // ========== LFSR — 伪随机替换 ==========
+    // ========== LFSR - 伪随机替换 ==========
     reg  [7:0] lfsr;
 
     // ========== Write Buffer ==========
@@ -128,7 +126,7 @@ module cache (
     reg  [ 1:0]          wb_bank;
     reg  [31:0]          wb_wstrb_mask;
     reg  [31:0]          wb_wdata;
-
+    reg                  hit_write_lookup_r;
     // ========== 状态机节点 ==========
     wire main_idle    = (main_state == MAIN_IDLE);
     wire main_lookup  = (main_state == MAIN_LOOKUP);
@@ -142,22 +140,20 @@ module cache (
     wire new_is_load;
     assign new_is_load = (cpu_op == 1'b0);
 
-    wire conflict_lookup;
-    assign conflict_lookup = main_lookup
-                             && cache_hit
-                             && req_op
-                             && cpu_req
-                             && new_is_load
-                             && (cpu_offset[3:2] == req_offset[3:2]);
+    wire hit_write_lookup;
+    assign hit_write_lookup = main_lookup
+                            && cache_hit
+                            && req_op
+                            && cpu_req
+                            && new_is_load
+                            && (cpu_offset[3:2] == req_offset[3:2])
+                            && (cpu_index == req_index);
 
-    wire conflict_wb;
-    assign conflict_wb = wb_write
+    wire hit_write_wb;
+    assign hit_write_wb = wb_write
                        && cpu_req
                        && new_is_load
                        && (cpu_offset[3:2] == wb_bank);
-
-    wire hit_write_conflict;
-    assign hit_write_conflict = conflict_lookup || conflict_wb;
 
     // ========== Tag 比较与命中判断 ==========
     wire [`WAY_NUM-1:0] way_hit;
@@ -182,10 +178,10 @@ module cache (
 
     // ========== 新请求接受标志 ==========
     wire accept_new_req;
-    assign accept_new_req =  (main_idle   && !hit_write_conflict && (cpu_req || cacop_en) && accept_ok)
-                          || (main_lookup && cache_hit && !hit_write_conflict && (cpu_req || cacop_en) && accept_ok);
+    assign accept_new_req =  (main_idle   && !hit_write_wb && accept_ok)
+                          || (main_lookup && cache_hit && !hit_write_wb && accept_ok);
 
-    // ========== 主状态机 — 时序 ==========
+    // ========== 主状态机 - 时序 ==========
     always @(posedge clk) begin
         if (~resetn) begin
             main_state <= MAIN_IDLE;
@@ -195,7 +191,7 @@ module cache (
         end
     end
 
-    // ========== Write Buffer 状态机 — 时序 ==========
+    // ========== Write Buffer 状态机 - 时序 ==========
     always @(posedge clk) begin
         if (~resetn) begin
             wb_state <= WB_IDLE;
@@ -205,15 +201,15 @@ module cache (
         end
     end
 
-    // ========== 主状态机 — 下一状态逻辑 ==========
+    // ========== 主状态机 - 下一状态逻辑 ==========
     always @(*) begin
         case (main_state)
             MAIN_IDLE: begin
-                main_next = (cpu_req || cacop_en) && !hit_write_conflict ? MAIN_LOOKUP : MAIN_IDLE;
+                main_next = (cpu_req || cacop_en) && !hit_write_wb ? MAIN_LOOKUP : MAIN_IDLE;
             end
             MAIN_LOOKUP: begin
                 main_next = !cache_hit                         ? MAIN_MISS :
-                            (cpu_req && !hit_write_conflict) ? MAIN_LOOKUP : MAIN_IDLE;
+                            (cpu_req && !hit_write_wb) ? MAIN_LOOKUP : MAIN_IDLE;
             end
             MAIN_MISS: begin
                 main_next = miss_needs_write ? (wr_rdy ? MAIN_REPLACE : MAIN_MISS)
@@ -247,7 +243,7 @@ module cache (
         endcase
     end
 
-    // ========== Write Buffer 状态机 — 下一状态逻辑 ==========
+    // ========== Write Buffer 状态机 - 下一状态逻辑 ==========
     wire wb_new_store_hit;
     assign wb_new_store_hit = main_lookup && lookup_store_hit;
 
@@ -265,7 +261,7 @@ module cache (
         endcase
     end
 
-    // ========== LFSR — 伪随机数步进 ==========
+    // ========== LFSR - 伪随机数步进 ==========
     always @(posedge clk) begin
         if (~resetn) begin
             lfsr <= 8'h5A;
@@ -275,7 +271,7 @@ module cache (
         end
     end
 
-    // ========== Request Buffer — 接受新请求时锁存 ==========
+    // ========== Request Buffer - 接受新请求时锁存 ==========
     always @(posedge clk) begin
         if (accept_new_req) begin
             req_op      <= cpu_op;
@@ -295,7 +291,7 @@ module cache (
         end
     end
 
-    // ========== Miss Buffer — 替换路号 / refill 计数 / load 结果 ==========
+    // ========== Miss Buffer - 替换路号 / refill 计数 / load 结果 ==========
     always @(posedge clk) begin
         if (~resetn) begin
             miss_replace_way <= 1'b0;
@@ -343,7 +339,7 @@ module cache (
         end
     end
 
-    // ========== Write Buffer — 锁存命中 store ==========
+    // ========== Write Buffer - 锁存命中 store ==========
     always @(posedge clk) begin
         if (main_lookup && lookup_store_hit) begin
             wb_valid   <= 1'b1;
@@ -356,9 +352,15 @@ module cache (
         else if (wb_write && !wb_new_store_hit) begin
             wb_valid <= 1'b0;
         end
+        if (main_lookup && lookup_store_hit) begin
+            hit_write_lookup_r <= hit_write_lookup;
+        end
+        else  begin
+            hit_write_lookup_r <= 1'b0;
+        end
     end
 
-    // ========== 替换行 128bit 数据 — 组合逻辑 ==========
+    // ========== 替换行 128bit 数据 - 组合逻辑 ==========
     wire [127:0] replace_line_data;
     assign replace_line_data = {
         bank_rdata[miss_replace_way][3],
@@ -367,17 +369,19 @@ module cache (
         bank_rdata[miss_replace_way][0]
     };
 
-    // ========== Data Select — LOOKUP 时选字 ==========
+    // ========== Data Select - LOOKUP 时选字 ==========
     wire [31:0] way0_word;
     wire [31:0] way1_word;
+    wire [31:0] hit_write_data;
     assign way0_word = bank_rdata[0][req_offset[3:2]];
     assign way1_word = bank_rdata[1][req_offset[3:2]];
+    assign hit_write_data = (wb_wdata & wb_wstrb_mask)
+                          | ((({32{way_hit[0]}} & way0_word) | ({32{way_hit[1]}} & way1_word)) & ~wb_wstrb_mask);
 
     wire [31:0] lookup_rdata;
-    assign lookup_rdata = ({32{way_hit[0]}} & way0_word)
-                        | ({32{way_hit[1]}} & way1_word);
+    assign lookup_rdata = hit_write_lookup_r ? hit_write_data : ({32{way_hit[0]}} & way0_word) | ({32{way_hit[1]}} & way1_word);
 
-    // ========== REFILL 合并写数据 — 把 store wdata 覆盖到 ret_data 上 ==========
+    // ========== REFILL 合并写数据 - 把 store wdata 覆盖到 ret_data 上 ==========
     wire [3:0] req_wstrb_4b;
     assign req_wstrb_4b = {req_wstrb_mask[31], req_wstrb_mask[23],
                            req_wstrb_mask[15], req_wstrb_mask[ 7]};
@@ -390,7 +394,7 @@ module cache (
                               ? ((req_wdata & req_wstrb_mask) | (return_data & ~req_wstrb_mask))
                               : return_data;
 
-    // ========== {Tag, V} RAM — 同步读/写 ==========
+    // ========== {Tag, V} RAM - 同步读/写 ==========
     wire refill_tagv_we;
     assign refill_tagv_we = main_refill && return_valid && return_last && req_cached
                           || main_refill && cacop_en_r;
@@ -433,7 +437,7 @@ module cache (
         end
     end
 
-    // ========== D RAM — 同步读/写/复位 ==========
+    // ========== D RAM - 同步读/写/复位 ==========
     wire refill_d_we;
     assign refill_d_we = main_refill && return_valid && return_last && req_cached;
 
@@ -462,7 +466,7 @@ module cache (
         end
     end
 
-    // ========== Data Bank RAM — 同步读/字节写 ==========
+    // ========== Data Bank RAM - 同步读/字节写 ==========
     integer bk_i;
     integer bk_j;
     always @(posedge clk) begin
@@ -487,7 +491,7 @@ module cache (
         end
     end
 
-    // ========== 输出 FIFO — 缓冲读结果，等 CPU 接受 ==========
+    // ========== 输出 FIFO - 缓冲读结果，等 CPU 接受 ==========
     reg  [31:0] cpu_fifo_mem [0:3];
     reg  [ 1:0] cpu_fifo_wptr;
     reg  [ 1:0] cpu_fifo_rptr;
@@ -538,7 +542,8 @@ module cache (
                      || (cpu_fifo_cnt == 3'd3 && req_op);
 
     // 输出到 CPU
-    assign cpu_addr_ok = accept_new_req;
+    assign cpu_addr_ok = accept_new_req && !cacop_en;
+    assign cacop_rdy    = accept_new_req && cacop_en;
     assign bus_accept   = 1'b1;  // 直通桥，cache 在 REFILL 期间照单全收
     assign cpu_data_ok = read_result_ready || !cpu_fifo_empty || write_done || cacop_result_ready;
     assign cpu_rdata   = cpu_fifo_empty ? live_rdata : cpu_fifo_mem[cpu_fifo_rptr];
@@ -573,7 +578,7 @@ module cache (
         end
     end
 
-    // ========== AXI 读请求 — REPLACE 时发出，进 REFILL 自动清零 ==========
+    // ========== AXI 读请求 - REPLACE 时发出，进 REFILL 自动清零 ==========
     assign rd_req = main_replace && need_bus_rd;
 
     wire wstrb_hw;
@@ -590,10 +595,10 @@ module cache (
                    ? {req_tag, req_index, 4'b0000}
                    : {req_tag, req_index, req_offset};
 
-    // ========== AXI 写请求 — 写回脏行 / uncached store ==========
+    // ========== AXI 写请求 - 写回脏行 / uncached store ==========
     wire cached_wr;
     wire uncached_wr;
-    // CACOP 写回类型识别 — 必须由 cacop_en_r 门控，code 10 额外要求命中
+    // CACOP 写回类型识别 - 必须由 cacop_en_r 门控，code 10 额外要求命中
     wire cacop_wb_index;       // code 01: 地址直接索引写回无效
     wire cacop_wb_hit;         // code 10: 查询索引写回无效（仅 |way_hit）
     wire cacop_wb;

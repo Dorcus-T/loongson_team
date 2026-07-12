@@ -532,9 +532,7 @@ module cache (
                       : (read_miss_done && miss_data_bypass) ? return_data
                       : read_miss_done             ? miss_load_result
                                                    : 32'd0;
-    // cacop 结果就绪
-    wire cacop_result_ready;
-    assign cacop_result_ready = main_refill && cacop_en_r;
+
     // 写 FIFO：有就绪数据且 CPU 不会从实时路径直接拿走
     wire cpu_takes_live;
     assign cpu_takes_live = cpu_accept && cpu_fifo_empty && read_result_ready;
@@ -553,7 +551,7 @@ module cache (
     assign cpu_addr_ok = accept_new_req && !cacop_en;
     assign cacop_rdy    = accept_new_req && cacop_en;
     assign bus_accept   = 1'b1;  // 直通桥，cache 在 REFILL 期间照单全收
-    assign cpu_data_ok = read_result_ready || !cpu_fifo_empty || write_done || cacop_result_ready;
+    assign cpu_data_ok = read_result_ready || !cpu_fifo_empty || write_done;
     assign cpu_rdata   = cpu_fifo_empty ? live_rdata : cpu_fifo_mem[cpu_fifo_rptr];
 
     integer oi;

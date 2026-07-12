@@ -90,7 +90,7 @@ module mycpu_top (
     wire        mem_to_id_data_ok;       // MEM前递给id的数据是否准备好
 
     // ========== 异常信号与ertn ==========
-    wire ex_exc_valid;       // EX阶段异常有效
+    wire ex_mem_exc_valid;       // EX阶段异常有效
     wire wb_exc_valid;       // WB阶段异常有效
     wire wb_ertn_flush;      // WB阶段有ertn指令
     wire mem_exc_valid;      // MEM阶段异常有效
@@ -156,8 +156,6 @@ module mycpu_top (
     wire [ 3:0] icache_cpu_wstrb;
     wire [31:0] icache_cpu_wdata;
     wire        icache_cpu_cached;
-    wire        icache_flush;            // IF 重定向时清空 ICache cpu_fifo
-    wire        icache_pipeline_active;  // ICache 在途 IF 读（不含 cacop）
     wire        icache_cpu_addr_ok;
     wire        icache_cpu_data_ok;
     wire [31:0] icache_cpu_rdata;
@@ -254,9 +252,7 @@ module mycpu_top (
         .exc_entry          (exc_entry),
         .exc_back_pc        (exc_back_pc),
         .rf_valid               (rf_valid),
-        .rf_pc                  (wb_pc_back),
-        .icache_flush           (icache_flush),
-        .icache_pipeline_active (icache_pipeline_active)
+        .rf_pc                  (wb_pc_back)
     );
 
     // ================================================================
@@ -288,7 +284,7 @@ module mycpu_top (
         .mem_csr_we        (mem_csr_we),
         .mem_csr_num       (mem_csr_num),
         .mem_ertn_flush    (mem_ertn_flush),
-        .ex_exc_valid      (ex_exc_valid),
+        .ex_mem_exc_valid   (ex_mem_exc_valid),
         .wb_csr_we         (wb_csr_we),
         .wb_csr_num        (wb_csr_num),
         .wb_exc_valid      (wb_exc_valid),
@@ -330,7 +326,7 @@ module mycpu_top (
         .ex_to_id_dest      (ex_to_id_dest),
         .ex_to_id_result    (ex_to_id_result),
         .ex_to_id_load_op   (ex_to_id_load_op),
-        .ex_exc_valid       (ex_exc_valid),
+        .ex_mem_exc_valid   (ex_mem_exc_valid),
         .wb_exc_valid       (wb_exc_valid),
         .wb_ertn_flush      (wb_ertn_flush),
         .mem_exc_valid      (mem_exc_valid),
@@ -491,8 +487,6 @@ module mycpu_top (
         .cpu_data_ok  (icache_cpu_data_ok),
         .cpu_rdata    (icache_cpu_rdata),
         .cpu_accept       (icache_cpu_accept),
-        .flush            (icache_flush),
-        .pipeline_active  (icache_pipeline_active),
         // CACOP
         .cacop_en         (icache_cacop_en),
         .cacop_code       (cacop_code),
@@ -536,8 +530,6 @@ module mycpu_top (
         .cpu_data_ok  (dcache_cpu_data_ok),
         .cpu_rdata    (dcache_cpu_rdata),
         .cpu_accept       (dcache_cpu_accept),
-        .flush            (1'b0),
-        .pipeline_active  (),
         // CACOP
         .cacop_en         (dcache_cacop_en),
         .cacop_code       (cacop_code),

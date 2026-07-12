@@ -35,7 +35,7 @@ module exe_stage (
     output wire [ 4:0]              ex_to_id_dest,      // EX阶段写回寄存器号
     output wire [31:0]              ex_to_id_result,    // EX阶段计算结果
     output wire                     ex_to_id_load_op,   // EX阶段是否是加载指令
-    output wire                     ex_exc_valid,       // EX阶段存在异常
+    output wire                     ex_mem_exc_valid,   // EX阶段存在异常
     // 异常冲刷
     input  wire                     wb_exc_valid,       // WB阶段存在异常，冲刷流水线
     input  wire                     wb_ertn_flush,      // WB阶段有ertn指令则冲刷流水线
@@ -64,6 +64,7 @@ module exe_stage (
     wire adem;
     wire ale;
     wire [12:0] ex_exc;
+    wire        ex_exc_valid;
     wire [15:0] mem_exc;
     wire [ 4:0] valid_mem_tlb_exc;
     wire        ex_rf_valid;     // EX阶段重取指标志
@@ -332,6 +333,7 @@ module exe_stage (
     assign mem_exc           = {ex_exc[12:11], ex_exc[10] || valid_mem_tlb_exc[4], ex_exc[9], ex_exc[8] || valid_mem_tlb_exc[3], ex_exc[7:0], valid_mem_tlb_exc[2:0]};
     // 将要送往mem阶段的全部例外
     assign ex_exc_valid  = (|ex_exc || ex_rf_valid) && ex_valid;
+    assign ex_mem_exc_valid = (|mem_exc || ex_rf_valid) && ex_valid;
     assign ex_ertn_flush = ertn_flush && ex_valid;                // ex阶段的ertn要在指令有效的时候才能发挥作用
     assign result_or_badv = (!ex_exc[11] && |ex_exc[10:8]) ? ex_pc : alu_result;
 endmodule

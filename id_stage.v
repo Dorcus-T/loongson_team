@@ -26,7 +26,7 @@ module id_stage (
     input  wire [31:0]                  wb_to_id_result,     // WB阶段计算结果
     input  wire                         mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
     input  wire                         mem_exc_valid,       // MEM有冲刷就不发起brtaken
-    input  wire                         ex_exc_valid,        // ex有冲刷就不发起brtaken
+    input  wire                         ex_mem_exc_valid,        // ex有冲刷就不发起brtaken
     // csr与ertn冒险
     input  wire                         ex_csr_we,           // EX阶段写CSR使能
     input  wire [13:0]                  ex_csr_num,          // EX阶段写CSR号码
@@ -556,7 +556,7 @@ module id_stage (
                        || inst_bl
                        || inst_b
                     ) && id_valid && !load_use_stall && !branch_stall && new_br
-                      && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_exc_valid) && !id_exc_valid;
+                      && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_mem_exc_valid) && !id_exc_valid;
     // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if

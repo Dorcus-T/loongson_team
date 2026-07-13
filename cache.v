@@ -111,7 +111,6 @@ module cache (
     // ========== Miss Buffer ==========
     reg         miss_replace_way;
     reg  [ 1:0] miss_refill_cnt;
-    reg  [31:0] miss_load_result;
     reg         wr_req_accepted;
 
     // ========== LRU - 每组 1 bit 最近最少使用 ==========
@@ -324,12 +323,6 @@ module cache (
             end
             else if (main_refill && return_valid) begin
                 miss_refill_cnt <= miss_refill_cnt + 2'd1;
-            end
-            // load_result: 读 miss / uncached read 保存返回数据
-            if (main_refill && return_valid) begin
-                if (miss_refill_cnt == req_offset[3:2] || !req_cached) begin
-                    miss_load_result <= return_data;
-                end
             end
             // 跟踪写请求是否被桥接受
             if (main_replace && wr_req && wr_rdy) begin
@@ -549,21 +542,18 @@ module cache (
     wire read_miss_done;
     assign read_hit_done  = main_lookup && cache_hit && !req_op;
     assign write_done     = main_lookup && req_op;
-    assign read_miss_done = main_refill && return_valid && return_last && !req_op;
+    // 早重启：关键字到达那拍即交付，不必等 return_last；此拍 return_data 就是所需字
+    assign read_miss_done = main_refill && return_valid && !req_op
+                          && (miss_refill_cnt == req_offset[3:2] || !req_cached);
 
     // 读结果就绪 + 实时数据
     wire read_result_ready;
     wire [31:0] live_rdata;
     assign read_result_ready = read_hit_done || read_miss_done;
-    // 最后一拍且目标 word 恰好在当前 beat 时，miss_load_result 是 NBA 来不及更新，
-    // 直接 bypass return_data。uncached 单拍返回也在此列
-    wire miss_data_bypass;
-    assign miss_data_bypass = main_refill && return_valid && return_last
-                            && (miss_refill_cnt == req_offset[3:2] || !req_cached);
-    assign live_rdata = read_hit_done              ? lookup_rdata
-                      : (read_miss_done && miss_data_bypass) ? return_data
-                      : read_miss_done             ? miss_load_result
-                                                   : 32'd0;
+    // read_miss_done 只在关键字拍为真，故 miss 读数据直接取 return_data
+    assign live_rdata = read_hit_done  ? lookup_rdata
+                      : read_miss_done ? return_data
+                                       : 32'd0;
 
     // 写 FIFO：有就绪数据且 CPU 不会从实时路径直接拿走
     wire cpu_takes_live;

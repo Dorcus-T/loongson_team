@@ -114,8 +114,8 @@ module cache (
     reg  [31:0] miss_load_result;
     reg         wr_req_accepted;
 
-    // ========== LFSR - 伪随机替换 ==========
-    reg  [7:0] lfsr;
+    // ========== LRU - 每组 1 bit 最近最少使用 ==========
+    reg  [INDEX_DEPTH-1:0] lru;   // lru[s] = 该组 LRU 路（默认牺牲路）
 
     // ========== Write Buffer ==========
     reg                  wb_valid;
@@ -259,13 +259,16 @@ module cache (
         endcase
     end
 
-    // ========== LFSR - 伪随机数步进 ==========
+    // ========== LRU - 命中/填充更新，被访问路变 MRU ==========
     always @(posedge clk) begin
         if (~resetn) begin
-            lfsr <= 8'h5A;
+            lru <= {INDEX_DEPTH{1'b0}};
         end
-        else if (main_miss && wr_rdy) begin
-            lfsr <= {lfsr[6:0], lfsr[7] ^ lfsr[5] ^ lfsr[4] ^ lfsr[3]};
+        else if (main_lookup && cache_hit) begin
+            lru[req_index] <= !way_hit[1];         // 命中路变 MRU，另一路变 LRU
+        end
+        else if (refill_d_we) begin
+            lru[req_index] <= !miss_replace_way;   // 新填充路变 MRU
         end
     end
 
@@ -310,7 +313,9 @@ module cache (
                     end
                 end
                 else begin
-                    miss_replace_way <= lfsr[0];
+                    miss_replace_way <= !tagv_rdata[0][0] ? 1'b0 :          // way0 空 → 填 way0
+                                        !tagv_rdata[1][0] ? 1'b1 :          // way1 空 → 填 way1
+                                                            lru[req_index]; // 都有效 → 踢 LRU 路
                 end
             end
             // refill_cnt: REPLACE→REFILL 清零，REFILL 中自增

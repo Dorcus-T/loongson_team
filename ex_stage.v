@@ -66,10 +66,9 @@ module exe_stage (
     wire ale;
     wire [12:0] ex_exc;
     wire        ex_exc_valid;
-    wire [15:0] mem_exc;
+    wire [15:0] ex_mem_exc;
     wire [ 4:0] valid_mem_tlb_exc;
     wire        ex_rf_valid;     // EX阶段重取指标志
-    wire        ex_inst_valid;   // 判断指令能否正常起效
     wire [31:0] result_or_badv;  // 若取指阶段为tlb相关异常，替换为pc
 
     // ========== 控制信号解析 ==========
@@ -169,7 +168,7 @@ module exe_stage (
         final_csr_wmask,       // 155:124 csr写掩码
         final_csr_wvalue,      // 123:92  csr写数据
         ertn_flush,            // 91      异常返回冲刷信号
-        mem_exc,               // 90:75   异常类型
+        ex_mem_exc,               // 90:75   异常类型
         res_from_mem,          // 74      结果来源
         mem_sign_ext,          // 73      符号扩展标志
         mem_size,              // 72:70   访存大小
@@ -180,20 +179,19 @@ module exe_stage (
     };
 
     // ========== 流水线控制 ==========
-    assign ex_inst_valid = ex_valid && !mem_exc_valid && !ex_exc_valid && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid;
     assign is_div_inst   = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
     // 下游异常/flush 时放行 EX：否则 EX 等 cache 但 cache 请求被阻断 → 死锁
     wire ex_flush_pending;
-    assign ex_flush_pending = |mem_exc || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid;
+    assign ex_flush_pending = |ex_mem_exc || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
 
     assign ex_ready_go   = is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
-                                        ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || ex_flush_pending :
+                                        ex_valid && (mem_we || res_from_mem) && !(|ex_mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || ex_flush_pending :
                                         ex_valid && cacop_en && (cacop_code[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || ex_flush_pending) :
                                         ex_valid && cacop_en && (cacop_code[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || ex_flush_pending) : 1'b1;
     assign ex_allowin    = !ex_valid || ex_ready_go && mem_allowin;
     assign ex_to_mem_valid = ex_valid && ex_ready_go;
 
-    // 执行级有效标志更新
+    // 执行级有效标志更新 
     always @(posedge clk) begin
         if (reset || wb_exc_valid || wb_ertn_flush) begin
             ex_valid <= 1'b0;
@@ -295,15 +293,15 @@ module exe_stage (
     assign cacop_hit_mode = cacop_en && (cacop_code[4:3] == 2'b10);
     assign cacop_en_final = cacop_en && ex_valid
                           && !ex_exc_valid && !mem_exc_valid
-                          && !(|mem_exc || ex_rf_valid)
+                          && !(|ex_mem_exc || ex_rf_valid)
                           && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid
                           && !(cacop_hit_mode && |mem_tlb_exc)
                           && !i_cacop_req_already && !d_cacop_req_already;
 
     // ========== DCache 输出信号 ==========
-    assign dcache_cpu_req   = ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);
+    assign dcache_cpu_req   = ex_valid && (!mem_exc_valid && !(|ex_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);
     // 只有访存指令，且是有效指令,并且mem和ex和wb阶段无异常、不是ertn,之前没发送过请求的指令才能发送访存请求
-    assign dcache_cpu_op    = mem_we && ex_valid && (!mem_exc_valid && !(|mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
+    assign dcache_cpu_op    = mem_we && ex_valid && (!mem_exc_valid && !(|ex_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
     assign dcache_cpu_index = alu_result[`OFFSET_WIDTH +: `INDEX_WIDTH];
     assign dcache_cpu_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
     assign dcache_cpu_offset= alu_result[0 +: `OFFSET_WIDTH];
@@ -329,10 +327,10 @@ module exe_stage (
                   (mem_size[2] && (alu_result[1:0] != 2'b00)));   // 字访问，地址bit1:0≠00
     assign ex_exc[2:0]       = {fpe, adem, ale};
     assign valid_mem_tlb_exc = mem_tlb_exc & {5{!ex_exc_valid && ex_valid && ld_and_str != 2'b0}};
-    assign mem_exc           = {ex_exc[12:11], ex_exc[10] || valid_mem_tlb_exc[4], ex_exc[9], ex_exc[8] || valid_mem_tlb_exc[3], ex_exc[7:0], valid_mem_tlb_exc[2:0]};
+    assign ex_mem_exc           = {ex_exc[12:11], ex_exc[10] || valid_mem_tlb_exc[4], ex_exc[9], ex_exc[8] || valid_mem_tlb_exc[3], ex_exc[7:0], valid_mem_tlb_exc[2:0]};
     // 将要送往mem阶段的全部例外
     assign ex_exc_valid  = (|ex_exc || ex_rf_valid) && ex_valid;
-    assign ex_mem_exc_valid = (|mem_exc || ex_rf_valid) && ex_valid;
+    assign ex_mem_exc_valid = (|ex_mem_exc || ex_rf_valid) && ex_valid; 
     assign ex_ertn_flush = ertn_flush && ex_valid;                // ex阶段的ertn要在指令有效的时候才能发挥作用
     assign result_or_badv = (!ex_exc[11] && |ex_exc[10:8]) ? ex_pc : alu_result;
 endmodule

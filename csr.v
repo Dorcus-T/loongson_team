@@ -330,21 +330,14 @@ module csr_regfile (
             csr_estat[11] <= 1'b1;
 
         csr_estat[12] <= ipi_inter;
-    end
-
-    assign timer_inter = (csr_tval == 32'b0) && csr_tcfg[`CSR_TCFG_EN];
-
-    // Ecode、EsubCode
-    always @(posedge clk) begin
-        if (reset) begin
-            csr_estat[`CSR_ESTAT_ECODE]    <= 6'b0;
-            csr_estat[`CSR_ESTAT_ESUBCODE] <= 9'b0;
-        end
-        else if (wb_exc_valid) begin
+        // 例外发生时写入 Ecode 和 EsubCode
+        if (wb_exc_valid) begin
             csr_estat[`CSR_ESTAT_ECODE]    <= wb_exc_ecode;
             csr_estat[`CSR_ESTAT_ESUBCODE] <= wb_exc_esubcode;
         end
     end
+
+    assign timer_inter = (csr_tval == 32'b0) && csr_tcfg[`CSR_TCFG_EN];
 
     // ============================================================
     // ERA 写操作（写 PC）

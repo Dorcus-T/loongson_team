@@ -116,7 +116,7 @@ module cache_axi_bridge (
             addr_conflict = 1'b0;
             rd_end = rd_addr + {27'd0, rd_total_bytes} - 32'd1;
             for (k = 0; k < 4; k = k + 1) begin
-                if (((k - wr_pend_rptr) & 2'd3) < wr_pend_cnt) begin
+                if (((k[1:0] - wr_pend_rptr) & 2'd3) < wr_pend_cnt) begin
                     wr_end = wr_pend_addr[k] + {27'd0, wr_pend_bytes[k]} - 32'd1;
                     if (!(rd_end < wr_pend_addr[k] || rd_addr > wr_end)) begin
                         addr_conflict = 1'b1;
@@ -164,6 +164,7 @@ module cache_axi_bridge (
                 if (arvalid_r && arready)
                     ar_next = AR_IDLE;
             end
+            default: ar_next = AR_IDLE;
         endcase
     end
 
@@ -316,11 +317,13 @@ module cache_axi_bridge (
     assign icache_return_valid = !icache_fifo_empty || (rvalid && rready && (rid == 4'd0));
     assign icache_return_data  = icache_fifo_empty ? rdata : icache_fifo_mem[icache_fifo_rptr][31:0];
     assign icache_return_last  = icache_fifo_empty ? rlast : icache_fifo_mem[icache_fifo_rptr][32];
+    assign icache_wr_rdy = 1'b0;  // 占位
+
 
     assign dcache_return_valid = !dcache_fifo_empty || (rvalid && rready && (rid == 4'd1));
     assign dcache_return_data  = dcache_fifo_empty ? rdata : dcache_fifo_mem[dcache_fifo_rptr][31:0];
     assign dcache_return_last  = dcache_fifo_empty ? rlast : dcache_fifo_mem[dcache_fifo_rptr][32];
-
+    
     // ================================================================
     // 写请求处理 — 状态机、写数据分拍、写追踪器、写响应、AXI 写输出
     // ================================================================
@@ -359,6 +362,7 @@ module cache_axi_bridge (
                     (w_done_r  || (wvalid_r && wready && is_last_w_beat)))
                     aw_w_next = AW_W_IDLE;
             end
+            default: aw_w_next = AW_W_IDLE;
         endcase
     end
 

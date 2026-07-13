@@ -58,10 +58,7 @@ module cache (
     localparam WB_WRITE = 1'd1;
 
     // ========== RAM 存储阵列 ==========
-    // tagv / databank 改由 sp_ram 单端口同步 RAM 实现（例化见下方各自区块）
-    // d 位仍用寄存器数组实现（需要复位一拍清空全部，RAM 做不到）
     reg                 d_ram    [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
-
     wire [`TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];   // 由 tagv RAM 输出驱动
     reg                 d_rdata    [0:`WAY_NUM-1];
     wire [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];  // 由 bank RAM 输出驱动
@@ -290,6 +287,9 @@ module cache (
             cacop_is_index_r <= cacop_is_index;
             cacop_is_hit_r   <= cacop_is_hit;
         end
+        if (main_refill && cacop_en_r) begin
+                cacop_en_r <= 1'b0;
+            end
     end
 
     // ========== Miss Buffer - 替换路号 / refill 计数 / load 结果 ==========
@@ -332,10 +332,6 @@ module cache (
             end
             else if (!main_replace) begin
                 wr_req_accepted <= 1'b0;
-            end
-            // CACOP 完成时清零，避免后续请求被误判为 miss
-            if (main_refill && cacop_en_r) begin
-                cacop_en_r <= 1'b0;
             end
         end
     end

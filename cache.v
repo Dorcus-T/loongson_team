@@ -58,11 +58,11 @@ module cache (
     localparam WB_WRITE = 1'd1;
 
     // ========== RAM 存储阵列 ==========
-    reg  [ `TAG_WIDTH:0] tagv_ram [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
+    reg  [`TAG_WIDTH:0] tagv_ram [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
     reg                 d_ram    [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
     reg  [31:0]         bank_ram [0:`WAY_NUM-1][0:BANK_NUM-1][0:INDEX_DEPTH-1];
 
-    reg  [ `TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];
+    reg  [`TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];
     reg                 d_rdata    [0:`WAY_NUM-1];
     reg  [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
 
@@ -100,7 +100,7 @@ module cache (
     // ========== Request Buffer ==========
     reg                     req_op;
     reg  [`INDEX_WIDTH-1:0]  req_index;
-    reg  [ `TAG_WIDTH-1:0]   req_tag;
+    reg  [`TAG_WIDTH-1:0]   req_tag;
     reg  [`OFFSET_WIDTH-1:0] req_offset;
     reg  [31:0]             req_wstrb_mask;
     reg  [31:0]             req_wdata;

@@ -51,6 +51,7 @@ module exe_stage (
     output wire [4:0]              cacop_code,          // cache操作类型
     output wire                    cacop_en_final,      // 有效使能（过异常门控）
     output wire [31:0]             cacop_va,            // cache操作虚地址
+    output wire [`TAG_WIDTH-1:0]   cacop_tag,           // cache操作tag
     input  wire                    icache_cacop_rdy,   // ICache CACOP 就绪
     input  wire                    dcache_cacop_rdy    // DCache CACOP 就绪
     );
@@ -292,6 +293,7 @@ module exe_stage (
     assign ld_and_str       = {ex_load_op || (cacop_en &&cacop_code[4:3] ==2'b10), mem_we} & {2{ex_valid}};
     // ========== cacop相关信号 ==========
     assign cacop_va    = alu_result;
+    assign cacop_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
     wire cacop_hit_mode;
     assign cacop_hit_mode = cacop_en && (cacop_code[4:3] == 2'b10);
     assign cacop_en_final = cacop_en && ex_valid

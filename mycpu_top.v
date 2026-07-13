@@ -183,6 +183,7 @@ module mycpu_top (
     wire [4:0]  cacop_code;
     wire        cacop_en_final;
     wire [31:0] cacop_va;
+    wire [`TAG_WIDTH-1:0] cacop_tag;
     wire        icache_cacop_en;
     wire        dcache_cacop_en;
     assign icache_cacop_en = cacop_en_final && (cacop_code[2:0] == 3'd0);
@@ -339,6 +340,7 @@ module mycpu_top (
         .cacop_code         (cacop_code),
         .cacop_en_final     (cacop_en_final),
         .cacop_va           (cacop_va),
+        .cacop_tag          (cacop_tag),
         .icache_cacop_rdy   (icache_cacop_rdy),
         .dcache_cacop_rdy   (dcache_cacop_rdy)
     );
@@ -491,7 +493,7 @@ module mycpu_top (
         .cacop_en         (icache_cacop_en),
         .cacop_code       (cacop_code),
         .cacop_va         (cacop_va),
-        .cacop_tag        (paddr_to_ex[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH]),
+        .cacop_tag        (cacop_tag),
         .cacop_rdy        (icache_cacop_rdy),
         // AXI 接口
         .rd_req       (icache_rd_req),
@@ -534,7 +536,7 @@ module mycpu_top (
         .cacop_en         (dcache_cacop_en),
         .cacop_code       (cacop_code),
         .cacop_va         (cacop_va),
-        .cacop_tag        (paddr_to_ex[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH]),
+        .cacop_tag        (cacop_tag),
         .cacop_rdy        (dcache_cacop_rdy),
         // AXI 接口
         .rd_req       (dcache_rd_req),

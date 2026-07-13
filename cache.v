@@ -58,13 +58,13 @@ module cache (
     localparam WB_WRITE = 1'd1;
 
     // ========== RAM 存储阵列 ==========
-    reg  [`TAG_WIDTH:0] tagv_ram [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
+    // tagv / databank 改由 sp_ram 单端口同步 RAM 实现（例化见下方各自区块）
+    // d 位仍用寄存器数组实现（需要复位一拍清空全部，RAM 做不到）
     reg                 d_ram    [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
-    reg  [31:0]         bank_ram [0:`WAY_NUM-1][0:BANK_NUM-1][0:INDEX_DEPTH-1];
 
-    reg  [`TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];
+    wire [`TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];   // 由 tagv RAM 输出驱动
     reg                 d_rdata    [0:`WAY_NUM-1];
-    reg  [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];  // 由 bank RAM 输出驱动
 
     // ========== 统一 RAM 读地址 ==========
     wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
@@ -86,7 +86,7 @@ module cache (
     wire cacop_is_index;
     wire cacop_is_hit;
     wire [`INDEX_WIDTH-1:0] cacop_index;
-    wire cacop_way;
+    wire [`WAY_NUM-1:0] cacop_way;
     assign cacop_is_index  = cacop_en && (cacop_code[4:3] != 2'b10);
     assign cacop_is_hit    = cacop_en && (cacop_code[4:3] == 2'b10);
     assign cacop_index = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
@@ -395,48 +395,61 @@ module cache (
                               ? ((req_wdata & req_wstrb_mask) | (return_data & ~req_wstrb_mask))
                               : return_data;
 
-    // ========== {Tag, V} RAM - 同步读/写 ==========
+    // ========== {Tag, V} RAM - 单端口同步 RAM 例化 ==========
     wire refill_tagv_we;
     assign refill_tagv_we = main_refill && return_valid && return_last && req_cached
                           || main_refill && cacop_en_r;
 
-    // ========== TagV RAM 仿真初始化（V 位清零，防止 X 传播） ==========
-    integer tagv_init_w, tagv_init_i;
-    initial begin
-        for (tagv_init_w = 0; tagv_init_w < `WAY_NUM; tagv_init_w = tagv_init_w + 1) begin
-            for (tagv_init_i = 0; tagv_init_i < INDEX_DEPTH; tagv_init_i = tagv_init_i + 1) begin
-                tagv_ram[tagv_init_w][tagv_init_i] = 0;
-            end
-        end
-    end
+    // CACOP code 分类
+    wire cacop_code00 = cacop_en_r && (cacop_code_r[4:3] == 2'b00);  // 全清行
+    wire cacop_code01 = cacop_en_r && (cacop_code_r[4:3] == 2'b01);  // 索引清 V
+    wire cacop_code10 = cacop_en_r && (cacop_code_r[4:3] == 2'b10);  // 命中清 V
 
-    integer tv_i;
-    always @(posedge clk) begin
-        for (tv_i = 0; tv_i < `WAY_NUM; tv_i = tv_i + 1) begin
-            if (refill_tagv_we && (miss_replace_way == tv_i)) begin
-                if(cacop_en_r && cacop_code_r[4:3]==2'b00) begin
-                    tagv_ram[tv_i][cacop_index_r]<= 0;
-                end
-                else if(cacop_en_r && cacop_code_r[4:3]==2'b01) begin
-                    tagv_ram[tv_i][cacop_index_r][0] <= 1'b0;
-                end
-                else if(cacop_en_r && cacop_code_r[4:3]==2'b10) begin
-                    if(way_hit[0] || way_hit[1]) begin
-                        tagv_ram[tv_i][req_index][0] <= 1'b0;
-                    end
-                end
-                else if(cacop_en_r && cacop_code_r[4:3]==2'b11) begin
-                    // 实现自定义操作，当前无操作
-                end
-                else begin
-                    tagv_ram[tv_i][req_index] <= {req_tag, 1'b1};
-                end
-            end
-            if (ram_read_en) begin
-                tagv_rdata[tv_i] <= tagv_ram[tv_i][ram_raddr];
-            end
+    // 本拍是否真的写 TagV（code 11 不写；code 10 未命中时不写）
+    wire tagv_do_write;
+    assign tagv_do_write = refill_tagv_we
+                         && ( !cacop_en_r
+                            || cacop_code00
+                            || cacop_code01
+                            || (cacop_code10 && (way_hit[0] || way_hit[1])) );
+
+    // 写参数（与路号无关，仅由写类型决定）
+    wire [`INDEX_WIDTH-1:0] tagv_waddr_sel;
+    wire [`TAG_WIDTH:0]     tagv_wmask_sel;
+    wire [`TAG_WIDTH:0]     tagv_wdata_sel;
+    assign tagv_waddr_sel = (cacop_code00 || cacop_code01) ? cacop_index_r : req_index;
+    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? { {`TAG_WIDTH{1'b0}}, 1'b1 }  // 仅写 V 位
+                                                           : { (`TAG_WIDTH+1){1'b1} };       // 整字写
+    assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }   // 全清 / 清 V：写 0
+                                       : {req_tag, 1'b1};            // 正常填充：{tag, V=1}
+
+    // 每路一块 TagV RAM。写只发生在 REFILL，读只发生在 IDLE/LOOKUP/MISS，二者永不同拍
+    wire                    tagv_en   [0:`WAY_NUM-1];
+    wire [`TAG_WIDTH:0]     tagv_wen  [0:`WAY_NUM-1];
+    wire [`INDEX_WIDTH-1:0] tagv_addr [0:`WAY_NUM-1];
+
+    genvar gt;
+    generate
+        for (gt = 0; gt < `WAY_NUM; gt = gt + 1) begin : tagv_ram_gen
+            wire tagv_wr = tagv_do_write && (miss_replace_way == gt);
+            assign tagv_en[gt]   = tagv_wr || ram_read_en;
+            assign tagv_wen[gt]  = tagv_wr ? tagv_wmask_sel : { (`TAG_WIDTH+1){1'b0} };
+            assign tagv_addr[gt] = tagv_wr ? tagv_waddr_sel : ram_raddr;
+
+            sp_ram #(
+                .WIDTH (`TAG_WIDTH + 1),
+                .DEPTH (INDEX_DEPTH),
+                .ADDRW (`INDEX_WIDTH)
+            ) u_tagv_ram (
+                .clk   (clk),
+                .en    (tagv_en[gt]),
+                .wen   (tagv_wen[gt]),
+                .addr  (tagv_addr[gt]),
+                .wdata (tagv_wdata_sel),
+                .rdata (tagv_rdata[gt])
+            );
         end
-    end
+    endgenerate
 
     // ========== D RAM - 同步读/写/复位 ==========
     wire refill_d_we;
@@ -467,30 +480,55 @@ module cache (
         end
     end
 
-    // ========== Data Bank RAM - 同步读/字节写 ==========
-    integer bk_i;
-    integer bk_j;
-    always @(posedge clk) begin
-        for (bk_i = 0; bk_i < `WAY_NUM; bk_i = bk_i + 1) begin
-            for (bk_j = 0; bk_j < BANK_NUM; bk_j = bk_j + 1) begin
-                // REFILL 逐拍写
-                if (main_refill && return_valid
-                    && (miss_refill_cnt == bk_j)
-                    && (miss_replace_way == bk_i)
-                    && req_cached) begin
-                    bank_ram[bk_i][bk_j][req_index] <= refill_merged_word;
-                end
-                // Hit Write: Write Buffer
-                else if (wb_write && wb_way_hit[bk_i] && (wb_bank == bk_j)) begin
-                    bank_ram[bk_i][bk_j][wb_index] <= (wb_wdata & wb_wstrb_mask)
-                                                    | (bank_ram[bk_i][bk_j][wb_index] & ~wb_wstrb_mask);
-                end
-                if (ram_read_en) begin
-                    bank_rdata[bk_i][bk_j] <= bank_ram[bk_i][bk_j][ram_raddr];
-                end
+    // ========== Data Bank RAM - 单端口同步 RAM 例化 ==========
+    // 每 (路 × bank) 一块独立单端口 RAM。命中写只碰命中路的对应 bank，写优先于读；
+    // 被丢弃的那次读恰为新请求用不到的 bank（同 bank 已被 hit_write_wb 挡住），故无害。
+    wire                    bank_wr_refill [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire                    bank_wr_hit    [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire                    bank_en        [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire [31:0]             bank_wen       [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire [`INDEX_WIDTH-1:0] bank_addr      [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire [31:0]             bank_wdata     [0:`WAY_NUM-1][0:BANK_NUM-1];
+
+    genvar gw, gb;
+    generate
+        for (gw = 0; gw < `WAY_NUM; gw = gw + 1) begin : bank_ram_way
+            for (gb = 0; gb < BANK_NUM; gb = gb + 1) begin : bank_ram_col
+                // REFILL 逐拍写：写整字
+                assign bank_wr_refill[gw][gb] = main_refill && return_valid
+                                              && (miss_refill_cnt == gb)
+                                              && (miss_replace_way == gw)
+                                              && req_cached;
+                // Hit Write：按字节掩码写（掩码即等价原读改写）
+                assign bank_wr_hit[gw][gb] = wb_write && wb_way_hit[gw] && (wb_bank == gb);
+
+                assign bank_en[gw][gb]    = bank_wr_refill[gw][gb]
+                                          || bank_wr_hit[gw][gb]
+                                          || ram_read_en;
+                assign bank_wen[gw][gb]   = bank_wr_refill[gw][gb] ? 32'hFFFFFFFF
+                                          : bank_wr_hit[gw][gb]    ? wb_wstrb_mask
+                                                                   : 32'b0;
+                assign bank_addr[gw][gb]  = bank_wr_refill[gw][gb] ? req_index
+                                          : bank_wr_hit[gw][gb]    ? wb_index
+                                                                   : ram_raddr;
+                assign bank_wdata[gw][gb] = bank_wr_refill[gw][gb] ? refill_merged_word
+                                                                   : wb_wdata;
+
+                sp_ram #(
+                    .WIDTH (32),
+                    .DEPTH (INDEX_DEPTH),
+                    .ADDRW (`INDEX_WIDTH)
+                ) u_bank_ram (
+                    .clk   (clk),
+                    .en    (bank_en[gw][gb]),
+                    .wen   (bank_wen[gw][gb]),
+                    .addr  (bank_addr[gw][gb]),
+                    .wdata (bank_wdata[gw][gb]),
+                    .rdata (bank_rdata[gw][gb])
+                );
             end
         end
-    end
+    endgenerate
 
     // ========== 输出 FIFO - 缓冲读结果，等 CPU 接受 ==========
     reg  [31:0] cpu_fifo_mem [0:3];

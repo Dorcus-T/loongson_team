@@ -184,6 +184,7 @@ module mycpu_top (
     wire        cacop_en_final;
     wire [31:0] cacop_va;
     wire [`TAG_WIDTH-1:0] cacop_tag;
+    wire [`WAY_NUM-1:0] cacop_way;
     wire        icache_cacop_en;
     wire        dcache_cacop_en;
     assign icache_cacop_en = cacop_en_final && (cacop_code[2:0] == 3'd0);

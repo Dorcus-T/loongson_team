@@ -190,9 +190,6 @@ module exe_stage (
                                         ex_valid && (mem_we || res_from_mem) && !(|mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || ex_flush_pending :
                                         ex_valid && cacop_en && (cacop_code[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || ex_flush_pending) :
                                         ex_valid && cacop_en && (cacop_code[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || ex_flush_pending) : 1'b1;
-    // 如果是除法指令，要么正确握手并且算完了发出ready信号，要么由于后面有异常和ertn导致除法指令不发出除法请求就直接走
-    // 如果是访存指令，就必须发出访存请求之后才能往后走
-    // ex阶段的异常中除了ale异常都不应该发出除法请求，不能添加ale，因为ale异常依赖alu结果，alu结果依赖除法结果，除法结果又依赖异常判断形成闭环，虽然二者互斥但是不能有闭环
     assign ex_allowin    = !ex_valid || ex_ready_go && mem_allowin;
     assign ex_to_mem_valid = ex_valid && ex_ready_go;
 

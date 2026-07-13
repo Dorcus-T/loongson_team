@@ -47,6 +47,8 @@ module cache (
     // ========== 局部参数 ==========
     localparam INDEX_DEPTH = 1 << `INDEX_WIDTH;
     localparam BANK_NUM    = 4;
+    localparam WAY_IDX_W   = $clog2(`WAY_NUM);   // 路号位宽（2路=1, 4路=2）
+    localparam PLRU_W      = `WAY_NUM - 1;       // 每组树状 PLRU 状态位数
 
     localparam MAIN_IDLE    = 3'd0;
     localparam MAIN_LOOKUP  = 3'd1;
@@ -83,11 +85,11 @@ module cache (
     wire cacop_is_index;
     wire cacop_is_hit;
     wire [`INDEX_WIDTH-1:0] cacop_index;
-    wire [`WAY_NUM-1:0] cacop_way;
+    wire [WAY_IDX_W-1:0] cacop_way;
     assign cacop_is_index  = cacop_en && (cacop_code[4:3] != 2'b10);
     assign cacop_is_hit    = cacop_en && (cacop_code[4:3] == 2'b10);
     assign cacop_index = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
-    assign cacop_way = cacop_va[$clog2(`WAY_NUM)-1:0];
+    assign cacop_way = cacop_va[WAY_IDX_W-1:0];
     // ========== 状态寄存器 ==========
     reg  [2:0] main_state;
     reg  [2:0] main_next;
@@ -104,17 +106,19 @@ module cache (
     reg                     req_cached;
     reg                     cacop_en_r;
     reg  [4:0]              cacop_code_r;
-    reg                     cacop_way_r;
+    reg  [WAY_IDX_W-1:0]    cacop_way_r;
     reg  [`INDEX_WIDTH-1:0] cacop_index_r;
     reg                     cacop_is_index_r;
     reg                     cacop_is_hit_r;
     // ========== Miss Buffer ==========
-    reg         miss_replace_way;
+    reg  [WAY_IDX_W-1:0] miss_replace_way;
     reg  [ 1:0] miss_refill_cnt;
     reg         wr_req_accepted;
 
-    // ========== LRU - 每组 1 bit 最近最少使用 ==========
-    reg  [INDEX_DEPTH-1:0] lru;   // lru[s] = 该组 LRU 路（默认牺牲路）
+    // ========== 树状伪 LRU - 每组 (WAY_NUM-1) bit ==========
+    // 堆式二叉树：内部节点 1..WAY_NUM-1 存于 plru[s][节点号-1]
+    // bit=0 走左子(2j)、bit=1 走右子(2j+1)，victim = 沿 bit 走到的叶
+    reg  [PLRU_W-1:0] plru [0:INDEX_DEPTH-1];
 
     // ========== Write Buffer ==========
     reg                  wb_valid;
@@ -154,15 +158,56 @@ module cache (
 
     // ========== Tag 比较与命中判断 ==========
     wire [`WAY_NUM-1:0] way_hit;
-    assign way_hit[0] = tagv_rdata[0][0]
-                      && (tagv_rdata[0][`TAG_WIDTH:1] == req_tag)
-                      && (req_cached || cacop_en_r);
-    assign way_hit[1] = tagv_rdata[1][0]
-                      && (tagv_rdata[1][`TAG_WIDTH:1] == req_tag)
-                      && (req_cached || cacop_en_r);
+    genvar gh;
+    generate
+        for (gh = 0; gh < `WAY_NUM; gh = gh + 1) begin : way_hit_gen
+            assign way_hit[gh] = tagv_rdata[gh][0]
+                               && (tagv_rdata[gh][`TAG_WIDTH:1] == req_tag)
+                               && (req_cached || cacop_en_r);
+        end
+    endgenerate
 
     wire cache_hit;
-    assign cache_hit = (way_hit[0] || way_hit[1]) && !cacop_en_r;
+    assign cache_hit = (|way_hit) && !cacop_en_r;
+
+    // ========== 替换 helper - 命中路编码 / 空路优先 / PLRU 牺牲路 ==========
+    // 命中路一热 → 二进制路号
+    reg  [WAY_IDX_W-1:0] hit_way_idx;
+    integer hwi;
+    always @(*) begin
+        hit_way_idx = {WAY_IDX_W{1'b0}};
+        for (hwi = 0; hwi < `WAY_NUM; hwi = hwi + 1)
+            if (way_hit[hwi]) hit_way_idx = hwi[WAY_IDX_W-1:0];
+    end
+
+    // 空路检测（取最低号无效路）
+    reg  [WAY_IDX_W-1:0] invalid_way;
+    reg                  has_invalid;
+    integer vwi;
+    always @(*) begin
+        has_invalid = 1'b0;
+        invalid_way = {WAY_IDX_W{1'b0}};
+        for (vwi = `WAY_NUM-1; vwi >= 0; vwi = vwi - 1)
+            if (!tagv_rdata[vwi][0]) begin
+                has_invalid = 1'b1;
+                invalid_way = vwi[WAY_IDX_W-1:0];
+            end
+    end
+
+    // 沿树状 PLRU 位从根走到叶，得到牺牲路
+    reg  [WAY_IDX_W:0]   plru_node;
+    reg  [WAY_IDX_W-1:0] plru_victim;
+    integer plv;
+    always @(*) begin
+        plru_node = 1;                                  // 根节点 = 1
+        for (plv = 0; plv < WAY_IDX_W; plv = plv + 1)
+            plru_node = (plru_node << 1) + plru[req_index][plru_node-1];
+        plru_victim = plru_node - `WAY_NUM;
+    end
+
+    // 牺牲路：空路优先，否则 PLRU
+    wire [WAY_IDX_W-1:0] victim_way;
+    assign victim_way = has_invalid ? invalid_way : plru_victim;
 
     wire lookup_store_hit;
     assign lookup_store_hit = main_lookup && cache_hit && req_op;
@@ -258,16 +303,25 @@ module cache (
         endcase
     end
 
-    // ========== LRU - 命中/填充更新，被访问路变 MRU ==========
+    // ========== 树状伪 LRU - 命中/填充时把被访问路标为 MRU ==========
+    wire                 plru_upd_en;
+    wire [WAY_IDX_W-1:0] plru_upd_way;
+    assign plru_upd_en  = (main_lookup && cache_hit) || refill_d_we;
+    assign plru_upd_way = (main_lookup && cache_hit) ? hit_way_idx : miss_replace_way;
+
+    integer pnode, pparent, pui, prst;
     always @(posedge clk) begin
         if (~resetn) begin
-            lru <= {INDEX_DEPTH{1'b0}};
+            for (prst = 0; prst < INDEX_DEPTH; prst = prst + 1)
+                plru[prst] <= {PLRU_W{1'b0}};
         end
-        else if (main_lookup && cache_hit) begin
-            lru[req_index] <= !way_hit[1];         // 命中路变 MRU，另一路变 LRU
-        end
-        else if (refill_d_we) begin
-            lru[req_index] <= !miss_replace_way;   // 新填充路变 MRU
+        else if (plru_upd_en) begin
+            pnode = `WAY_NUM + plru_upd_way;                 // 被访问叶
+            for (pui = 0; pui < WAY_IDX_W; pui = pui + 1) begin
+                pparent = pnode >> 1;
+                plru[req_index][pparent-1] <= ~pnode[0];     // 指向远离被访问叶一侧
+                pnode = pparent;
+            end
         end
     end
 
@@ -297,24 +351,20 @@ module cache (
     // ========== Miss Buffer - 替换路号 / refill 计数 / load 结果 ==========
     always @(posedge clk) begin
         if (~resetn) begin
-            miss_replace_way <= 1'b0;
+            miss_replace_way <= {WAY_IDX_W{1'b0}};
             miss_refill_cnt  <= 2'd0;
         end
         else begin
             // replace_way: MISS→REPLACE 时锁存
             if (main_miss && wr_rdy) begin
-                if(cacop_en_r) begin
-                    if(cacop_code_r[4:3]==2'b10) begin
-                    miss_replace_way <= way_hit[1] ? 1'b1 : 1'b0;
-                    end
-                    else begin    
-                    miss_replace_way <= cacop_way_r;
-                    end
+                if (cacop_en_r) begin
+                    if (cacop_code_r[4:3] == 2'b10)
+                        miss_replace_way <= hit_way_idx;   // code 10：命中路
+                    else
+                        miss_replace_way <= cacop_way_r;   // code 00/01：指定路
                 end
                 else begin
-                    miss_replace_way <= !tagv_rdata[0][0] ? 1'b0 :          // way0 空 → 填 way0
-                                        !tagv_rdata[1][0] ? 1'b1 :          // way1 空 → 填 way1
-                                                            lru[req_index]; // 都有效 → 踢 LRU 路
+                    miss_replace_way <= victim_way;        // 空路优先，否则 PLRU
                 end
             end
             // refill_cnt: REPLACE→REFILL 清零，REFILL 中自增
@@ -365,16 +415,21 @@ module cache (
     };
 
     // ========== Data Select - LOOKUP 时选字 ==========
-    wire [31:0] way0_word;
-    wire [31:0] way1_word;
+    // 命中路原始 word：对所有路做一热 OR 归约
+    reg  [31:0] hit_word;
+    integer hwsi;
+    always @(*) begin
+        hit_word = 32'b0;
+        for (hwsi = 0; hwsi < `WAY_NUM; hwsi = hwsi + 1)
+            hit_word = hit_word | ({32{way_hit[hwsi]}} & bank_rdata[hwsi][req_offset[3:2]]);
+    end
+
     wire [31:0] hit_write_data;
-    assign way0_word = bank_rdata[0][req_offset[3:2]];
-    assign way1_word = bank_rdata[1][req_offset[3:2]];
     assign hit_write_data = (wb_wdata & wb_wstrb_mask)
-                          | ((({32{way_hit[0]}} & way0_word) | ({32{way_hit[1]}} & way1_word)) & ~wb_wstrb_mask);
+                          | (hit_word & ~wb_wstrb_mask);
 
     wire [31:0] lookup_rdata;
-    assign lookup_rdata = hit_write_lookup_r ? hit_write_data : ({32{way_hit[0]}} & way0_word) | ({32{way_hit[1]}} & way1_word);
+    assign lookup_rdata = hit_write_lookup_r ? hit_write_data : hit_word;
 
     // ========== REFILL 合并写数据 - 把 store wdata 覆盖到 ret_data 上 ==========
     wire [3:0] req_wstrb_4b;
@@ -405,7 +460,7 @@ module cache (
                          && ( !cacop_en_r
                             || cacop_code00
                             || cacop_code01
-                            || (cacop_code10 && (way_hit[0] || way_hit[1])) );
+                            || (cacop_code10 && (|way_hit)) );
 
     // 写参数（与路号无关，仅由写类型决定）
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel;

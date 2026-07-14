@@ -49,6 +49,7 @@ module cache (
     localparam BANK_NUM    = 4;
     localparam WAY_IDX_W   = $clog2(`WAY_NUM);   // 路号位宽（2路=1, 4路=2）
     localparam PLRU_W      = `WAY_NUM - 1;       // 每组树状 PLRU 状态位数
+    localparam TAGV_BYTES  = (`TAG_WIDTH + 1 + 7) / 8;   // tagv 占用字节数，ceil((TAG_WIDTH+1)/8)
 
     localparam MAIN_IDLE    = 3'd0;
     localparam MAIN_LOOKUP  = 3'd1;
@@ -464,17 +465,17 @@ module cache (
 
     // 写参数（与路号无关，仅由写类型决定）
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel;
-    wire [`TAG_WIDTH:0]     tagv_wmask_sel;
+    wire [ 3:0]            tagv_wmask_sel;
     wire [`TAG_WIDTH:0]     tagv_wdata_sel;
     assign tagv_waddr_sel = (cacop_code00 || cacop_code01) ? cacop_index_r : req_index;
-    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? { {`TAG_WIDTH{1'b0}}, 1'b1 }  // 仅写 V 位
-                                                           : { (`TAG_WIDTH+1){1'b1} };       // 整字写
+    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001     // 仅写 byte0（V 位所在）
+                                                           : {TAGV_BYTES{1'b1}};   // 写满 tagv 所占字节
     assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }   // 全清 / 清 V：写 0
                                        : {req_tag, 1'b1};            // 正常填充：{tag, V=1}
 
     // 每路一块 TagV RAM。写只发生在 REFILL，读只发生在 IDLE/LOOKUP/MISS，二者永不同拍
     wire                    tagv_en   [0:`WAY_NUM-1];
-    wire [`TAG_WIDTH:0]     tagv_wen  [0:`WAY_NUM-1];
+    wire [ 3:0]            tagv_wen  [0:`WAY_NUM-1];
     wire [`INDEX_WIDTH-1:0] tagv_addr [0:`WAY_NUM-1];
 
     genvar gt;
@@ -482,7 +483,7 @@ module cache (
         for (gt = 0; gt < `WAY_NUM; gt = gt + 1) begin : tagv_ram_gen
             wire tagv_wr = tagv_do_write && (miss_replace_way == gt);
             assign tagv_en[gt]   = tagv_wr || ram_read_en;
-            assign tagv_wen[gt]  = tagv_wr ? tagv_wmask_sel : { (`TAG_WIDTH+1){1'b0} };
+            assign tagv_wen[gt]  = tagv_wr ? tagv_wmask_sel : 4'b0;
             assign tagv_addr[gt] = tagv_wr ? tagv_waddr_sel : ram_raddr;
 
             sp_ram #(
@@ -494,7 +495,7 @@ module cache (
                 .en    (tagv_en[gt]),
                 .wen   (tagv_wen[gt]),
                 .addr  (tagv_addr[gt]),
-                .wdata (tagv_wdata_sel),
+                .wdata ({ {32-(`TAG_WIDTH+1){1'b0}}, tagv_wdata_sel }),
                 .rdata (tagv_rdata[gt])
             );
         end
@@ -535,7 +536,7 @@ module cache (
     wire                    bank_wr_refill [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire                    bank_wr_hit    [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire                    bank_en        [0:`WAY_NUM-1][0:BANK_NUM-1];
-    wire [31:0]             bank_wen       [0:`WAY_NUM-1][0:BANK_NUM-1];
+    wire [ 3:0]             bank_wen       [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire [`INDEX_WIDTH-1:0] bank_addr      [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire [31:0]             bank_wdata     [0:`WAY_NUM-1][0:BANK_NUM-1];
 
@@ -554,9 +555,9 @@ module cache (
                 assign bank_en[gw][gb]    = bank_wr_refill[gw][gb]
                                           || bank_wr_hit[gw][gb]
                                           || ram_read_en;
-                assign bank_wen[gw][gb]   = bank_wr_refill[gw][gb] ? 32'hFFFFFFFF
-                                          : bank_wr_hit[gw][gb]    ? wb_wstrb_mask
-                                                                   : 32'b0;
+                assign bank_wen[gw][gb]   = bank_wr_refill[gw][gb] ? 4'b1111
+                                          : bank_wr_hit[gw][gb]    ? {wb_wstrb_mask[24], wb_wstrb_mask[16], wb_wstrb_mask[8], wb_wstrb_mask[0]}
+                                                                   : 4'b0;
                 assign bank_addr[gw][gb]  = bank_wr_refill[gw][gb] ? req_index
                                           : bank_wr_hit[gw][gb]    ? wb_index
                                                                    : ram_raddr;

@@ -716,5 +716,19 @@ module cache (
                     : {req_tag, req_index, req_offset};
     assign wr_wstrb = (req_cached || cacop_wb) ? 4'b1111 : req_wstrb_4b;
     assign wr_data  = (req_cached || cacop_wb) ? replace_line_data : {96'd0, req_wdata};
-
+    // ========== 性能计数器 - 统计可缓存访问 / miss（仅仿真观测，不参与逻辑） ==========
+    // u_icache / u_dcache 各自一份。miss 定义：可缓存、非 CACOP 的 LOOKUP 未命中（每次仅 +1）
+    reg [31:0] perf_access_cnt /*verilator public*/;   // 可缓存查找总次数
+    reg [31:0] perf_miss_cnt   /*verilator public*/;   // 其中 miss 次数
+    always @(posedge clk) begin
+        if (~resetn) begin
+            perf_access_cnt <= 32'd0;
+            perf_miss_cnt   <= 32'd0;
+        end
+        else if (main_lookup && req_cached && !cacop_en_r) begin
+            perf_access_cnt <= perf_access_cnt + 32'd1;
+            if (!cache_hit)
+                perf_miss_cnt <= perf_miss_cnt + 32'd1;
+        end
+   end
 endmodule

@@ -356,7 +356,7 @@ module cache (
         end
         else begin
             // replace_way: MISS→REPLACE 时锁存
-            if (main_miss && wr_rdy) begin
+            if (main_miss && (!miss_needs_write || wr_rdy)) begin
                 if (cacop_en_r) begin
                     if (cacop_code_r[4:3] == 2'b10)
                         miss_replace_way <= hit_way_idx;   // code 10：命中路
@@ -689,11 +689,18 @@ module cache (
     assign cacop_wb_hit   = cacop_en_r && (cacop_code_r[4:3] == 2'b10) && (|way_hit);
     assign cacop_wb       = cacop_wb_index || cacop_wb_hit;
 
-    // MISS 状态是否需要等写通道就绪：cached（可能有脏行，保守等）| uncached store | cacop 写回
+    // 牺牲行 / CACOP 目标行是否脏（MISS 拍组合可得，与 cached_wr 判脏同源）
+    wire victim_dirty;
+    wire cacop_dirty;
+    assign victim_dirty = d_rdata[victim_way] && tagv_rdata[victim_way][0];
+    assign cacop_dirty  = (cacop_code_r[4:3] == 2'b10)
+                        ? (d_rdata[hit_way_idx] && tagv_rdata[hit_way_idx][0])   // code10：命中路
+                        : (d_rdata[cacop_way_r] && tagv_rdata[cacop_way_r][0]);  // code01：指定路
+
+    // 仅“真会写回”才等写通道：普通 cached / CACOP 写回都只在目标行脏时等
     wire miss_needs_write;
-    assign miss_needs_write = req_cached
-                            || is_uncached_store
-                            || cacop_wb;
+    assign miss_needs_write = cacop_en_r ? (cacop_wb && cacop_dirty)
+                            : ((req_cached && victim_dirty) || is_uncached_store);
 
     assign cached_wr = main_replace && (req_cached || cacop_wb)
                     && d_rdata[miss_replace_way]

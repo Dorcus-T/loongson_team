@@ -311,6 +311,58 @@ module core_top (
     wire [31:0] csr_pgdl_diff_0;
     wire [31:0] csr_pgdh_diff_0;
 
+    // 从 wb_to_csr_bus 提取 CSR 写信息
+    wire        wb_csr_we_bus = wb_to_csr_bus[145];
+    wire [13:0] wb_csr_num_bus = wb_to_csr_bus[159:146];
+    wire [31:0] wb_csr_wmask_bus = wb_to_csr_bus[144:113];
+    wire [31:0] wb_csr_wvalue_bus = wb_to_csr_bus[112:81];
+
+    // CSR _nxt：csr_we 写时取新值，否则取当前值（异常写不过 csr_we，自然延迟一拍）
+    `define CSR_NXT(name, CSR_ADDR) (wb_csr_we_bus && wb_csr_num_bus == CSR_ADDR) ? ((wb_csr_wmask_bus & wb_csr_wvalue_bus) | (~wb_csr_wmask_bus & csr_``name``_diff_0)) : csr_``name``_diff_0
+    wire [31:0] csr_crmd_nxt    = `CSR_NXT(crmd,    `CSR_CRMD);
+    wire [31:0] csr_prmd_nxt    = `CSR_NXT(prmd,    `CSR_PRMD);
+    wire [31:0] csr_ectl_nxt    = `CSR_NXT(ectl,    `CSR_ECFG);
+    wire [31:0] csr_estat_nxt   = `CSR_NXT(estat,   `CSR_ESTAT);
+    wire [31:0] csr_era_nxt     = `CSR_NXT(era,     `CSR_ERA);
+    wire [31:0] csr_badv_nxt    = `CSR_NXT(badv,    `CSR_BADV);
+    wire [31:0] csr_eentry_nxt  = `CSR_NXT(eentry,  `CSR_EENTRY);
+    wire [31:0] csr_tlbidx_nxt  = `CSR_NXT(tlbidx,  `CSR_TLBIDX);
+    wire [31:0] csr_tlbehi_nxt  = `CSR_NXT(tlbehi,  `CSR_TLBEHI);
+    wire [31:0] csr_tlbelo0_nxt = `CSR_NXT(tlbelo0, `CSR_TLBELO0);
+    wire [31:0] csr_tlbelo1_nxt = `CSR_NXT(tlbelo1, `CSR_TLBELO1);
+    wire [31:0] csr_asid_nxt    = `CSR_NXT(asid,    `CSR_ASID);
+    wire [31:0] csr_save0_nxt   = `CSR_NXT(save0,   `CSR_SAVE0);
+    wire [31:0] csr_save1_nxt   = `CSR_NXT(save1,   `CSR_SAVE1);
+    wire [31:0] csr_save2_nxt   = `CSR_NXT(save2,   `CSR_SAVE2);
+    wire [31:0] csr_save3_nxt   = `CSR_NXT(save3,   `CSR_SAVE3);
+    wire [31:0] csr_tid_nxt     = `CSR_NXT(tid,     `CSR_TID);
+    wire [31:0] csr_tcfg_nxt    = `CSR_NXT(tcfg,    `CSR_TCFG);
+    wire [31:0] csr_tval_nxt    = `CSR_NXT(tval,    `CSR_TVAL);
+    wire [31:0] csr_ticlr_nxt   = `CSR_NXT(ticlr,   `CSR_TICLR);
+    wire [31:0] csr_llbctl_nxt  = `CSR_NXT(llbctl,  `CSR_LLBCTL);
+    wire [31:0] csr_tlbrentry_nxt = `CSR_NXT(tlbrentry, `CSR_TLBRENTRY);
+    wire [31:0] csr_dmw0_nxt    = `CSR_NXT(dmw0,    `CSR_DMW0);
+    wire [31:0] csr_dmw1_nxt    = `CSR_NXT(dmw1,    `CSR_DMW1);
+    wire [31:0] csr_pgdl_nxt    = `CSR_NXT(pgdl,    `CSR_PGDL);
+    wire [31:0] csr_pgdh_nxt    = `CSR_NXT(pgdh,    `CSR_PGDH);
+    wire [12:0] csr_intrNo_nxt  = csr_estat_nxt[12:2];
+
+    // CSR 延迟一拍（解决异常写时序；csr_we 写通过 _nxt 补偿）
+    reg  [31:0] cmt_csr_crmd;    reg  [31:0] cmt_csr_prmd;
+    reg  [31:0] cmt_csr_ectl;    reg  [31:0] cmt_csr_estat;
+    reg  [31:0] cmt_csr_era;     reg  [31:0] cmt_csr_badv;
+    reg  [31:0] cmt_csr_eentry;  reg  [31:0] cmt_csr_tlbidx;
+    reg  [31:0] cmt_csr_tlbehi;  reg  [31:0] cmt_csr_tlbelo0;
+    reg  [31:0] cmt_csr_tlbelo1; reg  [31:0] cmt_csr_asid;
+    reg  [31:0] cmt_csr_save0;   reg  [31:0] cmt_csr_save1;
+    reg  [31:0] cmt_csr_save2;   reg  [31:0] cmt_csr_save3;
+    reg  [31:0] cmt_csr_tid;     reg  [31:0] cmt_csr_tcfg;
+    reg  [31:0] cmt_csr_tval;    reg  [31:0] cmt_csr_ticlr;
+    reg  [31:0] cmt_csr_llbctl;  reg  [31:0] cmt_csr_tlbrentry;
+    reg  [31:0] cmt_csr_dmw0;    reg  [31:0] cmt_csr_dmw1;
+    reg  [31:0] cmt_csr_pgdl;    reg  [31:0] cmt_csr_pgdh;
+    reg  [12:0] cmt_csr_intrNo;
+
     assign ws_valid = ws_valid_diff;
     assign rf_rdata = regs[reg_num];
     `endif
@@ -812,6 +864,34 @@ module core_top (
             trap_code       <= regs[10][7:0]            ;
             cycleCnt        <= cycleCnt + 1             ;
             instrCnt        <= instrCnt + inst_valid_diff;
+
+            cmt_csr_crmd        <= csr_crmd_nxt      ;
+            cmt_csr_prmd        <= csr_prmd_nxt      ;
+            cmt_csr_ectl        <= csr_ectl_nxt      ;
+            cmt_csr_estat       <= csr_estat_nxt     ;
+            cmt_csr_era         <= csr_era_nxt       ;
+            cmt_csr_badv        <= csr_badv_nxt      ;
+            cmt_csr_eentry      <= csr_eentry_nxt    ;
+            cmt_csr_tlbidx      <= csr_tlbidx_nxt    ;
+            cmt_csr_tlbehi      <= csr_tlbehi_nxt    ;
+            cmt_csr_tlbelo0     <= csr_tlbelo0_nxt   ;
+            cmt_csr_tlbelo1     <= csr_tlbelo1_nxt   ;
+            cmt_csr_asid        <= csr_asid_nxt      ;
+            cmt_csr_save0       <= csr_save0_nxt     ;
+            cmt_csr_save1       <= csr_save1_nxt     ;
+            cmt_csr_save2       <= csr_save2_nxt     ;
+            cmt_csr_save3       <= csr_save3_nxt     ;
+            cmt_csr_tid         <= csr_tid_nxt       ;
+            cmt_csr_tcfg        <= csr_tcfg_nxt      ;
+            cmt_csr_tval        <= csr_tval_nxt      ;
+            cmt_csr_ticlr       <= csr_ticlr_nxt     ;
+            cmt_csr_llbctl      <= csr_llbctl_nxt    ;
+            cmt_csr_tlbrentry   <= csr_tlbrentry_nxt ;
+            cmt_csr_dmw0        <= csr_dmw0_nxt      ;
+            cmt_csr_dmw1        <= csr_dmw1_nxt      ;
+            cmt_csr_pgdl        <= csr_pgdl_nxt      ;
+            cmt_csr_pgdh        <= csr_pgdh_nxt      ;
+            cmt_csr_intrNo      <= csr_intrNo_nxt    ;
         end
     end
 
@@ -839,7 +919,7 @@ module core_top (
         .coreid             (0              ),
         .excp_valid         (cmt_excp_flush ),
         .eret               (cmt_ertn       ),
-        .intrNo             (csr_estat_diff_0[12:2]),
+        .intrNo             (cmt_csr_intrNo ),
         .cause              (cmt_csr_ecode  ),
         .exceptionPC        (cmt_pc         ),
         .exceptionInst      (cmt_inst       )
@@ -877,33 +957,33 @@ module core_top (
     DifftestCSRRegState DifftestCSRRegState(
         .clock              (aclk               ),
         .coreid             (0                  ),
-        .crmd               (csr_crmd_diff_0    ),
-        .prmd               (csr_prmd_diff_0    ),
+        .crmd               (cmt_csr_crmd       ),
+        .prmd               (cmt_csr_prmd       ),
         .euen               (0                  ),
-        .ecfg               (csr_ectl_diff_0    ),
-        .estat              (csr_estat_diff_0   ),
-        .era                (csr_era_diff_0     ),
-        .badv               (csr_badv_diff_0    ),
-        .eentry             (csr_eentry_diff_0  ),
-        .tlbidx             (csr_tlbidx_diff_0  ),
-        .tlbehi             (csr_tlbehi_diff_0  ),
-        .tlbelo0            (csr_tlbelo0_diff_0 ),
-        .tlbelo1            (csr_tlbelo1_diff_0 ),
-        .asid               (csr_asid_diff_0    ),
-        .pgdl               (csr_pgdl_diff_0    ),
-        .pgdh               (csr_pgdh_diff_0    ),
-        .save0              (csr_save0_diff_0   ),
-        .save1              (csr_save1_diff_0   ),
-        .save2              (csr_save2_diff_0   ),
-        .save3              (csr_save3_diff_0   ),
-        .tid                (csr_tid_diff_0     ),
-        .tcfg               (csr_tcfg_diff_0    ),
-        .tval               (csr_tval_diff_0    ),
-        .ticlr              (csr_ticlr_diff_0   ),
-        .llbctl             (csr_llbctl_diff_0  ),
-        .tlbrentry          (csr_tlbrentry_diff_0),
-        .dmw0               (csr_dmw0_diff_0    ),
-        .dmw1               (csr_dmw1_diff_0    )
+        .ecfg               (cmt_csr_ectl       ),
+        .estat              (cmt_csr_estat      ),
+        .era                (cmt_csr_era        ),
+        .badv               (cmt_csr_badv       ),
+        .eentry             (cmt_csr_eentry     ),
+        .tlbidx             (cmt_csr_tlbidx     ),
+        .tlbehi             (cmt_csr_tlbehi     ),
+        .tlbelo0            (cmt_csr_tlbelo0    ),
+        .tlbelo1            (cmt_csr_tlbelo1    ),
+        .asid               (cmt_csr_asid       ),
+        .pgdl               (cmt_csr_pgdl       ),
+        .pgdh               (cmt_csr_pgdh       ),
+        .save0              (cmt_csr_save0      ),
+        .save1              (cmt_csr_save1      ),
+        .save2              (cmt_csr_save2      ),
+        .save3              (cmt_csr_save3      ),
+        .tid                (cmt_csr_tid        ),
+        .tcfg               (cmt_csr_tcfg       ),
+        .tval               (cmt_csr_tval       ),
+        .ticlr              (cmt_csr_ticlr      ),
+        .llbctl             (cmt_csr_llbctl     ),
+        .tlbrentry          (cmt_csr_tlbrentry  ),
+        .dmw0               (cmt_csr_dmw0       ),
+        .dmw1               (cmt_csr_dmw1       )
     );
 
     DifftestGRegState DifftestGRegState(

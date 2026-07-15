@@ -88,6 +88,7 @@ module wb_stage (
     wire [31:0] csr_wmask;                 // 32位 csr寄存器写掩码
     wire [31:0] csr_wvalue;                // 32位 csr寄存器写数据
 
+    `ifdef DIFFTEST_EN
     // ========== difftest 信号 ==========
     wire [31:0] dift_csr_data;
     wire        dift_csr_rstat_en;
@@ -99,10 +100,15 @@ module wb_stage (
     wire [31:0] dift_vaddr;
     wire [31:0] dift_st_data;
     wire [31:0] dift_paddr;
+    `else
+    // 占位 dummy wire（保持总线位宽不变）
+    wire [241:0] _unused_diff_pad;
+    `endif
 
     // ========== 解析来自MEM阶段的总线 ==========
     // 从锁存的执行级总线中提取各个字段
     assign {
+        `ifdef DIFFTEST_EN
         dift_csr_data,         // 443:412 csr读数据 for difftest
         dift_csr_rstat_en,     // 411     csr estat读使能 for difftest
         dift_inst_st_en,       // 410:403 store使能 for difftest
@@ -113,6 +119,9 @@ module wb_stage (
         dift_vaddr,            // 297:266 load/store虚地址 for difftest
         dift_st_data,          // 265:234 store数据 for difftest
         dift_paddr,            // 233:202 load/store物理地址 for difftest
+        `else
+        _unused_diff_pad,      // 占位：保持非difftest字段bit位置不变
+        `endif
         tlbrd_en,              // 201     tlbrd使能
         tlbwr_en,              // 200     tlbwf使能
         tlbfill_en,            // 199
@@ -185,7 +194,11 @@ module wb_stage (
     assign debug_wb_rf_we    = {4{rf_we}};                   // 扩展为4位（用于调试显示）
     assign debug_wb_rf_wnum  = dest;                         // 写回的寄存器号
     assign debug_wb_rf_wdata = final_result;                 // 写回的数据
+    `ifdef DIFFTEST_EN
     assign debug_wb_inst     = dift_id_inst;                 // 写回指令编码
+    `else
+    assign debug_wb_inst     = 32'b0;
+    `endif
 
     // ========== 前递输出 ==========
     assign wb_to_id_dest   = dest & {5{wb_valid}} & {5{gr_we}};

@@ -182,6 +182,8 @@ module id_stage (
     // TLB相关指令(写CSR)
     wire inst_tlbsrch;      // CSR写：exe阶段查找tlb，写TLBIDX
     wire inst_tlbrd;        // CSR写：读tlb，写TLBIDX,TLBEHI,TLBELO0,TLBELO1,ASID
+    // CPU配置读取指令
+    wire inst_cpucfg;       // CPUCFG：读配置信息字到rd（CSR地址 = rj + 0x00b0）
 
     // ========== 计时器访问指令 ==========
     wire inst_rdcntvl_w;    // 读取计数器低32位写入rd
@@ -258,11 +260,13 @@ module id_stage (
     wire adder_cout;                     // 加法器进位输出
     wire [31:0] adder_result;            // 加法器结果
 
+    `ifdef DIFFTEST_EN
     // ========== difftest 信号 ==========
     wire [ 7:0] inst_ld_en;
     wire [ 7:0] inst_st_en;
     wire        cnt_inst;
     wire        csr_rstat_en;
+    `endif
 
     // ========== 数据冒险检测信号 ==========
     wire src_no_rj;                      // 指令不使用rj
@@ -295,7 +299,8 @@ module id_stage (
     assign i20      = id_inst[24:5];
     assign i16      = id_inst[25:10];
     assign i26      = {id_inst[9:0], id_inst[25:10]};
-    assign csr_id_num = inst_rdcntid ? 14'h40
+    assign csr_id_num = inst_cpucfg  ? (rj_value[13:0] + 14'h00b0)
+                      : inst_rdcntid ? 14'h40
                       : inst_tlbsrch ? 14'h10 : id_inst[23:10];
     assign cacop_code = id_inst[4:0];
     // ========== 指令解码器实例化（将位向量转换为独热码） ==========
@@ -398,6 +403,7 @@ module id_stage (
     assign inst_csrrd    = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj == 5'b0);
     assign inst_csrwr    = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj == 5'b1);
     assign inst_csrxchg  = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj != 5'b0) & (rj != 5'b1);
+    assign inst_cpucfg   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h1b];
     // 计数器指令
     assign inst_rdcntvl_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & (rj == 5'b0);
     assign inst_rdcntvh_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h19] & (rj == 5'b0);
@@ -469,7 +475,7 @@ module id_stage (
                            inst_st_b | inst_st_h | inst_cacop;    // alu操作数2来自立即数
     assign res_from_mem  = inst_ld_w | inst_ld_b | inst_ld_h |
                            inst_ld_bu | inst_ld_hu;               // 结果来自存储器（加载指令）
-    assign res_from_csr  = inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid;// 结果来自csr寄存器堆
+    assign res_from_csr  = inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_cpucfg;// 结果来自csr寄存器堆
     assign res_from_timer = inst_rdcntvh_w | inst_rdcntvl_w;      // 结果来自计数器
     assign timer_high    = inst_rdcntvh_w;                        // 读取计数器高32位
     assign dst_is_r1     = inst_bl;                               // BL指令将返回地址写入R1
@@ -489,6 +495,7 @@ module id_stage (
     assign tlbfill_en    = inst_tlbfill;
     assign cacop_en      = inst_cacop;
 
+    `ifdef DIFFTEST_EN
     // ========== difftest 信号生成 ==========
     // load使能: ldw ldhu ldh ldbu ldb (无ll_w)
     assign inst_ld_en = {2'b0, inst_ld_w, inst_ld_hu, inst_ld_h, inst_ld_bu, inst_ld_b};
@@ -498,6 +505,7 @@ module id_stage (
     assign cnt_inst = res_from_timer || inst_rdcntid;
     // csr estat读使能
     assign csr_rstat_en = (inst_csrrd || inst_csrwr || inst_csrxchg) && (csr_id_num == `CSR_ESTAT);
+    `endif
 
     // 访存大小编码
     assign mem_size[0]   = inst_ld_b | inst_ld_bu | inst_st_b;    // 字节访问
@@ -607,12 +615,16 @@ module id_stage (
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装
     assign id_to_ex_bus = {
+        `ifdef DIFFTEST_EN
         csr_rstat_en,   // 412     csr estat读使能 for difftest
         inst_st_en,     // 411:404 store使能 for difftest
         inst_ld_en,     // 403:396 load使能 for difftest
         cnt_inst,       // 395     计数器指令 for difftest
         timer_64,       // 394:331 定时器值 for difftest
         id_inst,        // 330:299 指令编码 for difftest
+        `else
+        114'd0,         // 占位：保持非difftest字段bit位置不变
+        `endif
         cacop_code,     // 298:294 cache操作类型
         cacop_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
@@ -688,7 +700,7 @@ module id_stage (
                           inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
                           inst_pcaddu12i | inst_st_b | inst_st_h |
                           inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_rdcntvl_w | inst_rdcntvh_w |
-                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop;            // 不读取rk的指令
+                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop | inst_cpucfg;            // 不读取rk的指令
     assign src_has_rd   = inst_st_w | inst_beq | inst_bne |
                           inst_blt | inst_bge | inst_bltu | inst_bgeu |
                           inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;                                     // 需要读取rd的指令
@@ -759,7 +771,7 @@ module id_stage (
                inst_st_b | inst_st_h | inst_syscall | inst_break | inst_ertn |
                inst_csrrd | inst_csrwr | inst_csrxchg |
                inst_rdcntid | inst_rdcntvh_w | inst_rdcntvl_w |
-               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop |
+               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop | inst_cpucfg |
                (inst_invtlb & (rd == 5'd0 | rd == 5'd1 | rd == 5'd2 | rd == 5'd3 | rd == 5'd4 | rd == 5'd5 | rd == 5'd6)));
     assign {id_exc[9], id_exc[4:0]} = {intr, syscall, brk, ine, ipe, fpd};
     assign id_exc_valid = (|id_exc || id_rf_valid) && id_valid;

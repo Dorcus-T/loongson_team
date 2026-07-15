@@ -115,6 +115,7 @@ module exe_stage (
     wire is_mem_inst;                   // 是访存指令
     reg  req_already;                   // 已经发送过访存请求
 
+    `ifdef DIFFTEST_EN
     // difftest 信号
     wire        dift_csr_rstat_en;
     wire [ 7:0] dift_inst_st_en;
@@ -122,15 +123,23 @@ module exe_stage (
     wire        dift_cnt_inst;
     wire [63:0] dift_timer_64;
     wire [31:0] dift_id_inst;
+    `else
+    // 占位 dummy wire（保持总线位宽不变）
+    wire [113:0] _unused_diff_pad;
+    `endif
 
     // ========== 解析来自ID阶段的总线 ==========
     assign {
+        `ifdef DIFFTEST_EN
         dift_csr_rstat_en,  // 412     csr estat读使能 for difftest
         dift_inst_st_en,    // 411:404 store使能 for difftest
         dift_inst_ld_en,    // 403:396 load使能 for difftest
         dift_cnt_inst,      // 395     计数器指令 for difftest
         dift_timer_64,      // 394:331 定时器值 for difftest
         dift_id_inst,       // 330:299 指令编码 for difftest
+        `else
+        _unused_diff_pad,   // 占位：保持非difftest字段bit位置不变
+        `endif
         cacop_code,     // 298:294 cache操作类型
         cacop_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
@@ -165,13 +174,16 @@ module exe_stage (
         alu_op          // 18:0  ALU操作码
     } = id_to_ex_bus_r;
 
+    `ifdef DIFFTEST_EN
     wire [31:0] diff_vaddr;         // load/store虚地址 for difftest
     wire [31:0] diff_st_data;       // store数据 for difftest
     assign diff_vaddr  = alu_result;
     assign diff_st_data = rkd_value;
+    `endif
 
     // ========== 输出到MEM阶段的总线 ==========
     assign ex_to_mem_bus = {
+        `ifdef DIFFTEST_EN
         csr_rvalue,            // 452:421 csr读数据 for difftest
         dift_csr_rstat_en,     // 420     csr estat读使能 for difftest
         dift_inst_st_en,       // 419:412 store使能 for difftest
@@ -181,6 +193,9 @@ module exe_stage (
         dift_id_inst,          // 338:307 指令编码 for difftest
         diff_vaddr,            // 306:275 load/store虚地址 for difftest
         diff_st_data,          // 274:243 store数据 for difftest
+        `else
+        210'd0,                // 占位：保持非difftest字段bit位置不变
+        `endif
         tlbrd_en,              // 242     tlbrd使能
         tlbwr_en,              // 241     tlbwf使能
         tlbfill_en,            // 240

@@ -69,6 +69,7 @@ module mem_stage (
     wire        is_mem_inst;              // 是访存指令
     wire        mem_we;                   // 存储器写使能
 
+    `ifdef DIFFTEST_EN
     // difftest 信号
     wire [31:0] dift_csr_data;
     wire        dift_csr_rstat_en;
@@ -79,9 +80,14 @@ module mem_stage (
     wire [31:0] dift_id_inst;
     wire [31:0] dift_vaddr;
     wire [31:0] dift_st_data;
+    `else
+    // 占位 dummy wire（保持总线位宽不变）
+    wire [209:0] _unused_diff_pad;
+    `endif
 
     // ========== 解析来自EX阶段的总线 ==========
     assign {
+        `ifdef DIFFTEST_EN
         dift_csr_data,       // 452:421 csr读数据 for difftest
         dift_csr_rstat_en,   // 420     csr estat读使能 for difftest
         dift_inst_st_en,     // 419:412 store使能 for difftest
@@ -91,6 +97,9 @@ module mem_stage (
         dift_id_inst,        // 338:307 指令编码 for difftest
         dift_vaddr,          // 306:275 load/store虚地址 for difftest
         dift_st_data,        // 274:243 store数据 for difftest
+        `else
+        _unused_diff_pad,   // 占位：保持非difftest字段bit位置不变
+        `endif
         tlbrd_en,            // 242     tlbrd使能
         tlbwr_en,            // 241     tlbwf使能
         tlbfill_en,          // 240
@@ -116,11 +125,14 @@ module mem_stage (
         mem_pc               // 31:0    PC
     } = ex_to_mem_bus_r;
 
+    `ifdef DIFFTEST_EN
     wire [31:0] dift_paddr;         // load/store物理地址 for difftest
     assign dift_paddr = alu_result; // TODO: 替换为MMU转换后的物理地址
+    `endif
 
     // ========== 输出到WB阶段的总线 ==========
     assign mem_to_wb_bus = {
+        `ifdef DIFFTEST_EN
         dift_csr_data,       // 443:412 csr读数据 for difftest
         dift_csr_rstat_en,   // 411     csr estat读使能 for difftest
         dift_inst_st_en,     // 410:403 store使能 for difftest
@@ -131,6 +143,9 @@ module mem_stage (
         dift_vaddr,          // 297:266 load/store虚地址 for difftest
         dift_st_data,        // 265:234 store数据 for difftest
         dift_paddr,          // 233:202 load/store物理地址 for difftest
+        `else
+        242'd0,              // 占位：保持非difftest字段bit位置不变
+        `endif
         tlbrd_en,            // 201     tlbrd使能
         tlbwr_en,            // 200     tlbwf使能
         tlbfill_en,          // 199

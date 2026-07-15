@@ -289,12 +289,12 @@ module csr_regfile (
                       | ({32{csr_id_num == `CSR_CTAG}}      & csr_ctag_rvalue)
                       | ({32{csr_id_num == `CSR_DMW0}}      & csr_dmw0_rvalue)
                       | ({32{csr_id_num == `CSR_DMW1}}      & csr_dmw1_rvalue)
-                      | ({32{csr_id_num == 14'h0b0}}        & csr_cpucfg1_rvalue)
-                      | ({32{csr_id_num == 14'h0b1}}        & csr_cpucfg2_rvalue)
-                      | ({32{csr_id_num == 14'h0ba}}        & csr_cpucfg10_rvalue)
-                      | ({32{csr_id_num == 14'h0bb}}        & csr_cpucfg11_rvalue)
-                      | ({32{csr_id_num == 14'h0bc}}        & csr_cpucfg12_rvalue)
-                      | ({32{csr_id_num == 14'h0bd}}        & csr_cpucfg13_rvalue);
+                      | ({32{csr_id_num == 14'h0b1}}        & csr_cpucfg1_rvalue)
+                      | ({32{csr_id_num == 14'h0b2}}        & csr_cpucfg2_rvalue)
+                      | ({32{csr_id_num == 14'h0c0}}        & csr_cpucfg10_rvalue)
+                      | ({32{csr_id_num == 14'h0c1}}        & csr_cpucfg11_rvalue)
+                      | ({32{csr_id_num == 14'h0c2}}        & csr_cpucfg12_rvalue)
+                      | ({32{csr_id_num == 14'h0c3}}        & csr_cpucfg13_rvalue);
 
     // ============================================================
     // CRMD 写操作（写 PLV、IE）

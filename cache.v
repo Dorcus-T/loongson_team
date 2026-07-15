@@ -364,7 +364,7 @@ module cache (
                 end
             end
             MAIN_REFILL: begin
-                // 预错也不中断 burst：收完所有 beat，最后一拍的统一写由 prefetch_wr_kill 压掉
+                // 预错也不中断 burst：收完所有 beat，最后一拍统一写入（不浪费总线带宽）
                 // 压写的最后一拍 RAM 端口空闲，能受理即直通新请求的 LOOKUP，省一拍
                 if (return_valid && return_last || cacop_en_r) begin
                     main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
@@ -589,8 +589,7 @@ module cache (
     // ========== {Tag, V} RAM - 单端口同步 RAM 例化 ==========
     wire refill_tagv_we;
     assign refill_tagv_we = (main_refill && return_valid && return_last && req_cached
-                          || main_refill && cacop_en_r)
-                          && !prefetch_wr_kill;
+                          || main_refill && cacop_en_r);
 
     // CACOP code 分类
     wire cacop_code00 = cacop_en_r && (cacop_code_r[4:3] == 2'b00);  // 全清行
@@ -645,8 +644,7 @@ module cache (
 
     // ========== D RAM - 同步读/写/复位 ==========
     wire refill_d_we;
-    assign refill_d_we = main_refill && return_valid && return_last && req_cached
-                      && !prefetch_wr_kill;
+    assign refill_d_we = main_refill && return_valid && return_last && req_cached;
 
     integer d_wi;
     integer d_idx;
@@ -695,11 +693,10 @@ module cache (
     generate
         for (gw = 0; gw < `WAY_NUM; gw = gw + 1) begin : bank_ram_way
             for (gb = 0; gb < BANK_NUM; gb = gb + 1) begin : bank_ram_col
-                // REFILL：最后一拍统一写 4 bank（预取预错时抑制）
+                // REFILL：最后一拍统一写 4 bank
                 assign bank_wr_refill[gw][gb] = main_refill && return_valid && return_last
                                               && (miss_replace_way == gw)
-                                              && req_cached
-                                              && !prefetch_wr_kill;
+                                              && req_cached;
                 // Hit Write：按字节掩码写
                 assign bank_wr_hit[gw][gb] = wb_write && wb_way_hit[gw] && (wb_bank == gb);
 
@@ -903,16 +900,16 @@ module cache (
                     perf_miss_cnt <= perf_miss_cnt + 32'd1;
             end
             // 预取计数器：launch / abort / fill
+            // abort 仅限 LOOKUP/REPLACE 阶段（未上总线），REFILL 阶段数据一律写入算 fill
             if (launch_prefetch) begin
                 perf_prefetch_launch <= perf_prefetch_launch + 32'd1;
             end
             if (prefetch_active) begin
                 if ((main_lookup  && !cache_hit && prefetch_abort_req)
-                 || (main_replace && prefetch_abort_req)
-                 || (main_refill  && return_valid && return_last && prefetch_wr_kill)) begin
+                 || (main_replace && prefetch_abort_req)) begin
                     perf_prefetch_abort <= perf_prefetch_abort + 32'd1;
                 end
-                else if (main_refill && return_valid && return_last && !prefetch_wr_kill && req_cached) begin
+                else if (main_refill && return_valid && return_last && req_cached) begin
                     perf_prefetch_fill <= perf_prefetch_fill + 32'd1;
                 end
             end

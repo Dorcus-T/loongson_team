@@ -60,6 +60,8 @@ module cache (
     localparam WB_IDLE  = 1'd0;
     localparam WB_WRITE = 1'd1;
 
+    parameter IS_ICACHE = 0;  // I-cache 实例设 1，使能顺序预取
+
     // ========== RAM 存储阵列 ==========
     reg                 d_ram    [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
     wire [`TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];   // 由 tagv RAM 输出驱动
@@ -70,11 +72,28 @@ module cache (
     wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
     assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
 
+    // 预取发起：IDLE 用挂起的 prefetch_addr；LOOKUP 命中收尾且无新请求时跳过 IDLE 直接发起
+    wire launch_prefetch_idle;
+    wire launch_prefetch_lookup;
+    wire launch_prefetch;
+    assign launch_prefetch_idle   = IS_ICACHE && main_idle && prefetch_pending
+                                 && !cpu_req && !cacop_en;
+    assign launch_prefetch_lookup = is_ifetch && main_lookup && cache_hit
+                                 && !prefetch_active && !cpu_req && !cacop_en;
+    assign launch_prefetch = launch_prefetch_idle || launch_prefetch_lookup;
+
+    // 下一行地址：LOOKUP 直接发起时组合计算，IDLE 发起时取挂起值
+    wire [31:0] next_line_addr;
+    wire [31:0] launch_addr;
+    assign next_line_addr = {req_tag, req_index, {`OFFSET_WIDTH{1'b0}}} + 32'd16;
+    assign launch_addr    = launch_prefetch_lookup ? next_line_addr : prefetch_addr;
+
     wire ram_read_en;
-    assign ram_read_en = accept_new_req;
+    assign ram_read_en = accept_new_req || launch_prefetch;
 
     wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = ram_raddr_req;
+    assign ram_raddr = launch_prefetch ? launch_addr[`OFFSET_WIDTH +: `INDEX_WIDTH]
+                                       : ram_raddr_req;
 
     // ========== CACOP 逻辑 ==========
     wire cacop_is_index;
@@ -110,6 +129,14 @@ module cache (
     reg  [ 1:0] miss_refill_cnt;
     reg         wr_req_accepted;
 
+    // ========== Refill Buffer - 逐拍缓存返回数据，最后一拍统一写 bank ==========
+    reg  [31:0] refill_buffer [0:BANK_NUM-1];
+
+    // ========== Prefetch 寄存器 ==========
+    reg         prefetch_pending;      // IDLE 时有预取待发起
+    reg         prefetch_active;       // 当前正在处理预取请求
+    reg  [31:0] prefetch_addr;         // 预取目标物理地址
+
     // ========== 树状伪 LRU - 每组 (WAY_NUM-1) bit ==========
     // 堆式二叉树：内部节点 1..WAY_NUM-1 存于 plru[s][节点号-1]
     // bit=0 走左子(2j)、bit=1 走右子(2j+1)，victim = 沿 bit 走到的叶
@@ -131,6 +158,26 @@ module cache (
     wire main_refill  = (main_state == MAIN_REFILL);
     wire wb_idle      = (wb_state == WB_IDLE);
     wire wb_write     = (wb_state == WB_WRITE);
+
+    // ========== Prefetch 组合逻辑 ==========
+    wire is_ifetch;
+    assign is_ifetch = IS_ICACHE && !req_op && req_cached && !cacop_en_r;
+
+    wire prefetch_cpu_match;
+    assign prefetch_cpu_match = prefetch_active && cpu_req && cpu_cached
+                             && (cpu_tag == req_tag) && (cpu_index == req_index);
+
+    // 本拍发现预错（组合）：仅 CPU cacheable 取指能判匹配，uncached 一律视为不匹配
+    wire prefetch_mismatch;
+    assign prefetch_mismatch = prefetch_active && cpu_req && !prefetch_cpu_match;
+
+    // 预取中止请求（上总线前可用）：CPU 失配 + CACOP 中断（REFILL 段仅 CPU 失配可压写）
+    wire prefetch_abort_req;
+    assign prefetch_abort_req = prefetch_mismatch || (prefetch_active && cacop_en);
+
+    // 预错压写只看决策拍当拍：未握手就被冲刷的请求不留痕迹
+    wire prefetch_wr_kill;
+    assign prefetch_wr_kill = prefetch_mismatch;
 
     // ========== Hit Write 冲突检测 ==========
     wire new_is_load;
@@ -214,9 +261,18 @@ module cache (
     assign need_bus_rd = (req_cached || !req_op) && !cacop_en_r;
 
     // ========== 新请求接受标志 ==========
+    // 预取中止直通：预错/CACOP 中止的当拍 RAM 写端口空闲，可直接受理新请求，省去 IDLE 中转
+    // REFILL 最后拍仅 CPU 失配可压写受理，CACOP 不开此路（写已由 refill 占据）
+    wire prefetch_abort_accept;
+    assign prefetch_abort_accept = (main_lookup  && !cache_hit && prefetch_abort_req)
+                                || (main_replace && prefetch_abort_req)
+                                || (main_refill  && return_valid && return_last && prefetch_wr_kill);
+
     wire accept_new_req;
-    assign accept_new_req =  (main_idle   && !hit_write_wb && accept_ok)
-                          || (main_lookup && cache_hit && !hit_write_wb && accept_ok);
+    assign accept_new_req = (cpu_req || cacop_en)
+                         && (  (main_idle   && !hit_write_wb && accept_ok)
+                            || (main_lookup && cache_hit && !hit_write_wb && accept_ok)
+                            || (prefetch_abort_accept && accept_ok) );
 
     // ========== 主状态机 - 时序 ==========
     always @(posedge clk) begin
@@ -242,14 +298,37 @@ module cache (
     always @(*) begin
         case (main_state)
             MAIN_IDLE: begin
-                main_next = (cpu_req || cacop_en) && !hit_write_wb ? MAIN_LOOKUP : MAIN_IDLE;
+                if (accept_new_req) begin
+                    main_next = MAIN_LOOKUP;
+                end
+                else if (launch_prefetch_idle) begin
+                    main_next = MAIN_LOOKUP;   // 发起挂起的预取
+                end
+                else begin
+                    main_next = MAIN_IDLE;
+                end
             end
             MAIN_LOOKUP: begin
-                main_next = !cache_hit                         ? MAIN_REPLACE :
-                            (cpu_req && !hit_write_wb) ? MAIN_LOOKUP : MAIN_IDLE;
+                if (!cache_hit && prefetch_abort_req) begin
+                    // 预取 miss 且预错/CACOP，尚未上总线 → 放弃，能受理即直通新请求的 LOOKUP
+                    main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
+                end
+                else if (!cache_hit) begin
+                    main_next = MAIN_REPLACE;
+                end
+                else if (accept_new_req || launch_prefetch_lookup) begin
+                    main_next = MAIN_LOOKUP;   // 命中：衔接新请求 / 直接发起预取
+                end
+                else begin
+                    main_next = MAIN_IDLE;
+                end
             end
             MAIN_REPLACE: begin
-                if (need_bus_rd && !miss_needs_write) begin
+                if (prefetch_abort_req) begin
+                    // 预错/CACOP 且读请求尚未发出 → 放弃，能受理即直通新请求的 LOOKUP
+                    main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
+                end
+                else if (need_bus_rd && !miss_needs_write) begin
                     // 只读：干净 miss，发 rd_req 等 rd_rdy
                     main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
                 end
@@ -285,7 +364,14 @@ module cache (
                 end
             end
             MAIN_REFILL: begin
-                main_next = (return_valid && return_last || cacop_en_r) ? MAIN_IDLE : MAIN_REFILL;
+                // 预错也不中断 burst：收完所有 beat，最后一拍的统一写由 prefetch_wr_kill 压掉
+                // 压写的最后一拍 RAM 端口空闲，能受理即直通新请求的 LOOKUP，省一拍
+                if (return_valid && return_last || cacop_en_r) begin
+                    main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
+                end
+                else begin
+                    main_next = MAIN_REFILL;
+                end
             end
             default: begin
                 main_next = MAIN_IDLE;
@@ -314,7 +400,7 @@ module cache (
     // ========== 树状伪 LRU - 命中/填充时把被访问路标为 MRU ==========
     wire                 plru_upd_en;
     wire [WAY_IDX_W-1:0] plru_upd_way;
-    assign plru_upd_en  = (main_lookup && cache_hit) || refill_d_we;
+    assign plru_upd_en  = (main_lookup && cache_hit && !prefetch_active) || refill_d_we;
     assign plru_upd_way = (main_lookup && cache_hit) ? hit_way_idx : miss_replace_way;
 
     integer pnode, pparent, pui, prst;
@@ -333,7 +419,7 @@ module cache (
         end
     end
 
-    // ========== Request Buffer - 接受新请求时锁存 ==========
+    // ========== Request Buffer - 接受新请求/发起预取时锁存 ==========
     always @(posedge clk) begin
         if (accept_new_req) begin
             req_op      <= cpu_op;
@@ -350,6 +436,21 @@ module cache (
             cacop_index_r   <= cacop_index;
             cacop_is_index_r <= cacop_is_index;
             cacop_is_hit_r   <= cacop_is_hit;
+        end
+        else if (launch_prefetch) begin
+            req_op      <= 1'b0;                                           // 读
+            req_index   <= launch_addr[`OFFSET_WIDTH +: `INDEX_WIDTH];
+            req_tag     <= launch_addr[`INDEX_WIDTH + `OFFSET_WIDTH +: `TAG_WIDTH];
+            req_offset  <= 4'b0;
+            req_wstrb_mask <= 32'b0;
+            req_wdata   <= 32'b0;
+            req_cached  <= 1'b1;
+            cacop_en_r  <= 1'b0;
+            cacop_code_r    <= 5'b0;
+            cacop_way_r     <= {WAY_IDX_W{1'b0}};
+            cacop_index_r   <= {`INDEX_WIDTH{1'b0}};
+            cacop_is_index_r <= 1'b0;
+            cacop_is_hit_r   <= 1'b0;
         end
         if (main_refill && cacop_en_r) begin
                 cacop_en_r <= 1'b0;
@@ -388,6 +489,39 @@ module cache (
             end
             else if (!main_replace) begin
                 wr_req_accepted <= 1'b0;
+            end
+        end
+    end
+
+    // ========== Prefetch 状态管理 ==========
+    // 仅 CPU 取指请求完成时挂预取；排除预取自身（否则命中/refill 会无限链式预取）
+    wire set_prefetch_pending;
+    assign set_prefetch_pending = is_ifetch && !prefetch_active
+        && ((main_lookup && cache_hit && main_next == MAIN_IDLE)
+         || (main_refill && return_valid && return_last && main_next == MAIN_IDLE));
+
+    always @(posedge clk) begin
+        if (~resetn) begin
+            prefetch_pending    <= 1'b0;
+            prefetch_active     <= 1'b0;
+            prefetch_addr       <= 32'b0;
+        end
+        else begin
+            // 设置：I-fetch 完成（hit 或 refill）回 IDLE 时挂预取
+            if (set_prefetch_pending) begin
+                prefetch_pending <= 1'b1;
+                prefetch_addr    <= next_line_addr;
+            end
+            else if (accept_new_req || launch_prefetch) begin
+                prefetch_pending <= 1'b0;
+            end
+
+            // prefetch_active：跟踪预取是否正在进行
+            if (launch_prefetch) begin
+                prefetch_active <= 1'b1;
+            end
+            else if (accept_new_req || (main_next == MAIN_IDLE)) begin
+                prefetch_active <= 1'b0;
             end
         end
     end
@@ -454,8 +588,9 @@ module cache (
 
     // ========== {Tag, V} RAM - 单端口同步 RAM 例化 ==========
     wire refill_tagv_we;
-    assign refill_tagv_we = main_refill && return_valid && return_last && req_cached
-                          || main_refill && cacop_en_r;
+    assign refill_tagv_we = (main_refill && return_valid && return_last && req_cached
+                          || main_refill && cacop_en_r)
+                          && !prefetch_wr_kill;
 
     // CACOP code 分类
     wire cacop_code00 = cacop_en_r && (cacop_code_r[4:3] == 2'b00);  // 全清行
@@ -510,7 +645,8 @@ module cache (
 
     // ========== D RAM - 同步读/写/复位 ==========
     wire refill_d_we;
-    assign refill_d_we = main_refill && return_valid && return_last && req_cached;
+    assign refill_d_we = main_refill && return_valid && return_last && req_cached
+                      && !prefetch_wr_kill;
 
     integer d_wi;
     integer d_idx;
@@ -537,9 +673,17 @@ module cache (
         end
     end
 
+    // ========== Refill Buffer 累积 - REFILL 每拍存入，最后一拍写 bank ==========
+    always @(posedge clk) begin
+        if (main_refill && return_valid && req_cached) begin
+            refill_buffer[miss_refill_cnt] <= refill_merged_word;
+        end
+    end
+
     // ========== Data Bank RAM - 单端口同步 RAM 例化 ==========
-    // 每 (路 × bank) 一块独立单端口 RAM。命中写只碰命中路的对应 bank，写优先于读；
-    // 被丢弃的那次读恰为新请求用不到的 bank（同 bank 已被 hit_write_wb 挡住），故无害。
+    // 每 (路 × bank) 一块独立单端口 RAM。命中写只碰命中路的对应 bank，写优先于读。
+    // REFILL 数据逐拍缓存在 refill_buffer，return_last 统一写 4 bank，
+    // 确保预取中止不污染 cache。
     wire                    bank_wr_refill [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire                    bank_wr_hit    [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire                    bank_en        [0:`WAY_NUM-1][0:BANK_NUM-1];
@@ -551,12 +695,12 @@ module cache (
     generate
         for (gw = 0; gw < `WAY_NUM; gw = gw + 1) begin : bank_ram_way
             for (gb = 0; gb < BANK_NUM; gb = gb + 1) begin : bank_ram_col
-                // REFILL 逐拍写：写整字
-                assign bank_wr_refill[gw][gb] = main_refill && return_valid
-                                              && (miss_refill_cnt == gb)
+                // REFILL：最后一拍统一写 4 bank（预取预错时抑制）
+                assign bank_wr_refill[gw][gb] = main_refill && return_valid && return_last
                                               && (miss_replace_way == gw)
-                                              && req_cached;
-                // Hit Write：按字节掩码写（掩码即等价原读改写）
+                                              && req_cached
+                                              && !prefetch_wr_kill;
+                // Hit Write：按字节掩码写
                 assign bank_wr_hit[gw][gb] = wb_write && wb_way_hit[gw] && (wb_bank == gb);
 
                 assign bank_en[gw][gb]    = bank_wr_refill[gw][gb]
@@ -568,8 +712,10 @@ module cache (
                 assign bank_addr[gw][gb]  = bank_wr_refill[gw][gb] ? req_index
                                           : bank_wr_hit[gw][gb]    ? wb_index
                                                                    : ram_raddr;
-                assign bank_wdata[gw][gb] = bank_wr_refill[gw][gb] ? refill_merged_word
-                                                                   : wb_wdata;
+                // 最后一拍：gb==miss_refill_cnt 的 bank 取 live 数据，其余取 buffer
+                assign bank_wdata[gw][gb] = bank_wr_refill[gw][gb]
+                                          ? ((miss_refill_cnt == gb) ? refill_merged_word : refill_buffer[gb])
+                                          : wb_wdata;
 
                 sp_ram #(
                     .WIDTH (32),
@@ -603,10 +749,11 @@ module cache (
     wire read_hit_done;
     wire write_done;
     wire read_miss_done;
-    assign read_hit_done  = main_lookup && cache_hit && !req_op;
+    assign read_hit_done  = main_lookup && cache_hit && !req_op && !prefetch_active;
     assign write_done     = main_lookup && req_op;
     // 早重启：关键字到达那拍即交付，不必等 return_last；此拍 return_data 就是所需字
-    assign read_miss_done = main_refill && return_valid && !req_op
+    // 预取期间抑制——预取数据不能送给 CPU
+    assign read_miss_done = main_refill && return_valid && !req_op && !prefetch_active
                           && (miss_refill_cnt == req_offset[3:2] || !req_cached);
 
     // 读结果就绪 + 实时数据
@@ -670,8 +817,10 @@ module cache (
     end
 
     // ========== AXI 读请求 - REPLACE 时发出，进 REFILL 自动清零 ==========
+    // 预取预错/CACOP 时压掉 rd_req：REPLACE 里中止即放弃，同拍到达也不会产生孤儿 burst
     assign rd_req = main_replace && need_bus_rd
-                  && (!miss_needs_write || wr_req_accepted);
+                  && (!miss_needs_write || wr_req_accepted)
+                  && !prefetch_abort_req;
 
     wire wstrb_hw;
     assign wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);
@@ -725,19 +874,48 @@ module cache (
                     : {req_tag, req_index, req_offset};
     assign wr_wstrb = (req_cached || cacop_wb) ? 4'b1111 : req_wstrb_4b;
     assign wr_data  = (req_cached || cacop_wb) ? replace_line_data : {96'd0, req_wdata};
-    // ========== 性能计数器 - 统计可缓存访问 / miss（仅仿真观测，不参与逻辑） ==========
-    // u_icache / u_dcache 各自一份。miss 定义：可缓存、非 CACOP 的 LOOKUP 未命中（每次仅 +1）
+    // ========== 性能计数器 - 总请求 / 可缓存访问 / miss（仅仿真观测，不参与逻辑） ==========
+    // u_icache / u_dcache 各自一份。I-cache 的总请求 ≈ 取指总次数
+    // 未命中率 = perf_miss_cnt / perf_access_cnt（可缓存内）
+    // 每指令 miss 率 = perf_miss_cnt / perf_total_req
+    reg [31:0] perf_total_req  /*verilator public*/;   // 接受的总请求数（含 uncached / CACOP）
     reg [31:0] perf_access_cnt /*verilator public*/;   // 可缓存查找总次数
     reg [31:0] perf_miss_cnt   /*verilator public*/;   // 其中 miss 次数
+    reg [31:0] perf_prefetch_launch /*verilator public*/;  // 预取总发起次数
+    reg [31:0] perf_prefetch_abort  /*verilator public*/;  // 预取中止次数（任一阶段被 kill）
+    reg [31:0] perf_prefetch_fill   /*verilator public*/;  // 预取成功落盘次数
     always @(posedge clk) begin
         if (~resetn) begin
-            perf_access_cnt <= 32'd0;
-            perf_miss_cnt   <= 32'd0;
+            perf_total_req        <= 32'd0;
+            perf_access_cnt       <= 32'd0;
+            perf_miss_cnt         <= 32'd0;
+            perf_prefetch_launch  <= 32'd0;
+            perf_prefetch_abort   <= 32'd0;
+            perf_prefetch_fill    <= 32'd0;
         end
-        else if (main_lookup && req_cached && !cacop_en_r) begin
-            perf_access_cnt <= perf_access_cnt + 32'd1;
-            if (!cache_hit)
-                perf_miss_cnt <= perf_miss_cnt + 32'd1;
+        else begin
+            if (accept_new_req) begin
+                perf_total_req <= perf_total_req + 32'd1;
+            end
+            if (main_lookup && req_cached && !cacop_en_r && !prefetch_active) begin
+                perf_access_cnt <= perf_access_cnt + 32'd1;
+                if (!cache_hit)
+                    perf_miss_cnt <= perf_miss_cnt + 32'd1;
+            end
+            // 预取计数器：launch / abort / fill
+            if (launch_prefetch) begin
+                perf_prefetch_launch <= perf_prefetch_launch + 32'd1;
+            end
+            if (prefetch_active) begin
+                if ((main_lookup  && !cache_hit && prefetch_abort_req)
+                 || (main_replace && prefetch_abort_req)
+                 || (main_refill  && return_valid && return_last && prefetch_wr_kill)) begin
+                    perf_prefetch_abort <= perf_prefetch_abort + 32'd1;
+                end
+                else if (main_refill && return_valid && return_last && !prefetch_wr_kill && req_cached) begin
+                    perf_prefetch_fill <= perf_prefetch_fill + 32'd1;
+                end
+            end
         end
    end
 endmodule

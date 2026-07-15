@@ -68,19 +68,13 @@ module cache (
 
     // ========== 统一 RAM 读地址 ==========
     wire [`INDEX_WIDTH-1:0] ram_raddr_req;     // 接受新请求时的读地址
-    wire [`INDEX_WIDTH-1:0] ram_raddr_miss;    // MISS→REPLACE 时的读地址
-    assign ram_raddr_req  = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
-    assign ram_raddr_miss = cacop_is_index_r ? cacop_index_r : req_index;
+    assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
 
     wire ram_read_en;
-    wire ram_read_miss_en;
-    assign ram_read_miss_en = main_miss && wr_rdy && (req_cached || cacop_en_r);
-    assign ram_read_en      = accept_new_req || ram_read_miss_en;
+    assign ram_read_en = accept_new_req;
 
     wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = accept_new_req    ? ram_raddr_req  :
-                       ram_read_miss_en  ? ram_raddr_miss :
-                                           {`INDEX_WIDTH{1'b0}};
+    assign ram_raddr = ram_raddr_req;
 
     // ========== CACOP 逻辑 ==========
     wire cacop_is_index;
@@ -132,7 +126,7 @@ module cache (
     // ========== 状态机节点 ==========
     wire main_idle    = (main_state == MAIN_IDLE);
     wire main_lookup  = (main_state == MAIN_LOOKUP);
-    wire main_miss    = (main_state == MAIN_MISS);
+    // MAIN_MISS 已移除——LOOKUP 直通 REPLACE
     wire main_replace = (main_state == MAIN_REPLACE);
     wire main_refill  = (main_state == MAIN_REFILL);
     wire wb_idle      = (wb_state == WB_IDLE);
@@ -251,27 +245,40 @@ module cache (
                 main_next = (cpu_req || cacop_en) && !hit_write_wb ? MAIN_LOOKUP : MAIN_IDLE;
             end
             MAIN_LOOKUP: begin
-                main_next = !cache_hit                         ? MAIN_MISS :
+                main_next = !cache_hit                         ? MAIN_REPLACE :
                             (cpu_req && !hit_write_wb) ? MAIN_LOOKUP : MAIN_IDLE;
             end
-            MAIN_MISS: begin
-                main_next = miss_needs_write ? (wr_rdy ? MAIN_REPLACE : MAIN_MISS)
-                                             : MAIN_REPLACE;
-            end
             MAIN_REPLACE: begin
-                if (need_bus_rd) begin
-                    if (rd_rdy) begin
-                        main_next = MAIN_REFILL;
+                if (need_bus_rd && !miss_needs_write) begin
+                    // 只读：干净 miss，发 rd_req 等 rd_rdy
+                    main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
+                end
+                else if (need_bus_rd && miss_needs_write) begin
+                    // 又读又写：脏 miss，先 wr 握手再 rd
+                    if (wr_req_accepted) begin
+                        main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
                     end
                     else begin
                         main_next = MAIN_REPLACE;
                     end
                 end
                 else if (is_uncached_store) begin
-                    main_next = wr_done ? MAIN_IDLE : MAIN_REPLACE;
+                    // 只写：uncached store，先 wr 握手等 wr_done
+                    if (wr_req_accepted) begin
+                        main_next = wr_done ? MAIN_IDLE : MAIN_REPLACE;
+                    end
+                    else begin
+                        main_next = MAIN_REPLACE;
+                    end
                 end
-                else if(cacop_en_r) begin
-                    main_next = MAIN_REFILL;
+                else if (cacop_en_r) begin
+                    // CACOP：脏写回先等 wr 握手，否则直通 REFILL 写 tagv
+                    if (miss_needs_write && !wr_req_accepted) begin
+                        main_next = MAIN_REPLACE;
+                    end
+                    else begin
+                        main_next = MAIN_REFILL;
+                    end
                 end
                 else begin
                     main_next = MAIN_IDLE;
@@ -356,8 +363,8 @@ module cache (
             miss_refill_cnt  <= 2'd0;
         end
         else begin
-            // replace_way: MISS→REPLACE 时锁存
-            if (main_miss && (!miss_needs_write || wr_rdy)) begin
+            // replace_way: LOOKUP miss → REPLACE 入口锁存
+            if (main_lookup && !cache_hit) begin
                 if (cacop_en_r) begin
                     if (cacop_code_r[4:3] == 2'b10)
                         miss_replace_way <= hit_way_idx;   // code 10：命中路
@@ -473,7 +480,7 @@ module cache (
     assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }   // 全清 / 清 V：写 0
                                        : {req_tag, 1'b1};            // 正常填充：{tag, V=1}
 
-    // 每路一块 TagV RAM。写只发生在 REFILL，读只发生在 IDLE/LOOKUP/MISS，二者永不同拍
+    // 每路一块 TagV RAM。写只发生在 REFILL，读只发生在 IDLE/LOOKUP，二者永不同拍
     wire                    tagv_en   [0:`WAY_NUM-1];
     wire [ 3:0]            tagv_wen  [0:`WAY_NUM-1];
     wire [`INDEX_WIDTH-1:0] tagv_addr [0:`WAY_NUM-1];
@@ -663,7 +670,8 @@ module cache (
     end
 
     // ========== AXI 读请求 - REPLACE 时发出，进 REFILL 自动清零 ==========
-    assign rd_req = main_replace && need_bus_rd;
+    assign rd_req = main_replace && need_bus_rd
+                  && (!miss_needs_write || wr_req_accepted);
 
     wire wstrb_hw;
     assign wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);
@@ -690,7 +698,7 @@ module cache (
     assign cacop_wb_hit   = cacop_en_r && (cacop_code_r[4:3] == 2'b10) && (|way_hit);
     assign cacop_wb       = cacop_wb_index || cacop_wb_hit;
 
-    // 牺牲行 / CACOP 目标行是否脏（MISS 拍组合可得，与 cached_wr 判脏同源）
+    // 牺牲行 / CACOP 目标行是否脏（组合逻辑，与 cached_wr 判脏同源）
     wire victim_dirty;
     wire cacop_dirty;
     assign victim_dirty = d_rdata[victim_way] && tagv_rdata[victim_way][0];

@@ -128,6 +128,15 @@ module mem_stage (
     `ifdef DIFFTEST_EN
     wire [31:0] dift_paddr;         // load/store物理地址 for difftest
     assign dift_paddr = alu_result; // TODO: 替换为MMU转换后的物理地址
+
+    // st.b/st.h 按地址偏移定位到正确的 byte lane
+    wire [ 1:0] st_addr_offset = alu_result[1:0];
+    wire [31:0] dift_st_data_masked;
+    assign dift_st_data_masked = mem_we ? (
+        |mem_size[0] ? (dift_st_data[7:0] << (st_addr_offset * 8)) :
+        |mem_size[1] ? (dift_st_data[15:0] << ({st_addr_offset[1], 1'b0} * 8)) :
+        dift_st_data
+    ) : dift_st_data;
     `endif
 
     // ========== 输出到WB阶段的总线 ==========
@@ -141,7 +150,7 @@ module mem_stage (
         dift_timer_64,       // 393:330 定时器值 for difftest
         dift_id_inst,        // 329:298 指令编码 for difftest
         dift_vaddr,          // 297:266 load/store虚地址 for difftest
-        dift_st_data,        // 265:234 store数据 for difftest
+        dift_st_data_masked, // 265:234 store数据 for difftest (st.b/h 已截位)
         dift_paddr,          // 233:202 load/store物理地址 for difftest
         `else
         242'd0,              // 占位：保持非difftest字段bit位置不变

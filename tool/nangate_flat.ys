@@ -1,0 +1,28 @@
+# ============================================================================
+# Nangate45 打平网表 — 为 OpenSTA 生成兼容的结构级 Verilog
+# 关键: flatten 消除 yosys escaped module names ($paramod\...)
+# ============================================================================
+
+read_verilog -sv ../*.v
+hierarchy -check -top core_top
+
+read_liberty -lib -ignore_miss_dir -setattr blackbox libs/NangateOpenCellLibrary_typical.lib
+
+synth -top core_top
+
+dfflibmap -liberty libs/NangateOpenCellLibrary_typical.lib
+abc -liberty libs/NangateOpenCellLibrary_typical.lib -D 10000
+
+# 关键: 在写网表之前 flatten，消除子模块名
+flatten
+
+# 拆分 assign 语句为单 bit 连接
+splitnets -ports
+opt_clean
+
+# 写网表（不写 assign 表达式）
+write_verilog -noattr -nohex -nodec -noexpr outputs/synth_flat.v
+
+tee -q -o reports/nangate_flat_stat.txt stat -liberty libs/NangateOpenCellLibrary_typical.lib -width
+
+log "=== 打平网表: outputs/synth_flat.v ==="

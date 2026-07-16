@@ -1,0 +1,37 @@
+# ============================================================================
+# 精简时序分析
+# 用法: yosys analyze.ys 2>&1 | tee reports/full_timing_report.txt
+# ============================================================================
+
+read_verilog -sv ../*.v
+hierarchy -check -top core_top
+
+# ========== 1. 逐模块层次统计 (综合前) ==========
+echo on
+log "=== [1] 逐模块 cell 统计 (综合前) ==="
+proc
+opt
+tee -q -o reports/hierarchy_stat.txt stat -width
+
+# ========== 2. 综合 + 两个频率点 ==========
+log "=== [2] 综合 + ABC 时序优化 ==="
+
+# 100MHz
+log "--- [2a] 100MHz (10ns) ---"
+design -reset
+read_verilog -sv ../*.v
+hierarchy -check -top core_top
+synth -top core_top
+abc -D 10000
+tee -q -o reports/stat_100MHz.txt stat -width
+
+# 400MHz — 极紧约束，ABC 会报出最差路径
+log "--- [2b] 400MHz (2.5ns) 极紧约束 ---"
+design -reset
+read_verilog -sv ../*.v
+hierarchy -check -top core_top
+synth -top core_top
+abc -D 2500
+tee -q -o reports/stat_400MHz.txt stat -width
+
+log "=== 分析完成 ==="

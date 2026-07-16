@@ -1,28 +1,92 @@
 ## 项目概览
 
-LoongArch (LA) 5级顺序流水线 CPU
-- 流水级：IF → ID → EX → MEM → WB
-- 前推网络：EX/MEM/WB → ID 全旁路
-- Load-use 停顿、CSR/ERTN 互锁
-- AXI3 主接口，通过 sram_axi_bridge 桥接
+LoongArch (LA) 5级顺序流水线 CPU，FPGA 原型验证用。
+
+| 属性 | 值 |
+|------|-----|
+| 流水级 | IF → ID → EX → MEM → WB |
+| 前推网络 | EX/MEM/WB → ID 全旁路 |
+| 冒险处理 | Load-use 停顿、CSR/ERTN 互锁 |
+| 总线接口 | AXI3 Master，cache_axi_bridge 桥接 |
+| Cache | 2路组相联 ICache + DCache，各 8KB (256行×32B) |
+| TLB | 32项全相联 MTLB + STLB，虚拟地址翻译 |
+| 乘法器 | 64×64 纯组合逻辑（一拍出结果） |
+| 除法器 | 串行迭代，多拍完成，带握手停顿 |
+| 综合规模 | ~566K cells (Nangate45), ~162K DFFs |
+| 当前 fmax | ~70MHz (Nangate45 45nm 分析值) |
 
 ## 目录结构（扁平项目）
 
-- `mycpu_top.v` — 顶层，例化全部子模块
-- `if_stage.v / id_stage.v / ex_stage.v / mem_stage.v / wb_stage.v` — 5级流水
-- `alu.v` — 组合逻辑 ALU + 串行除法器
-- `csr.v` — CSR 寄存器文件（CRMD/PRMD/ERA/DMW/TLB 控制等 30 reg）
-- `mmu.v / tlb.v` — 虚实地址转换，32项 TLB，2搜索端口
-- `regfile.v` — 32×32 通用寄存器堆
-- `timer_64bit.v` — 64位周期计数器
-- `sram_axi_bridge.v` — 内部 SRAM 协议 → AXI3 转换
-- `decoder_*_*.v` — generate 实现译码器
-- `mycpu.h` — 总线位宽、CSR 地址、异常编码宏定义
+```
+mycpu_top.v          — 顶层 core_top，例化全部子模块
+if_stage.v           — IF: 取指，I-Cache 接口，分支/异常重定向
+id_stage.v           — ID: 译码（46KB，最大组合逻辑模块），前递选通
+ex_stage.v           — EX: 执行，ALU + D-Cache 地址 + TLB 查询
+mem_stage.v          — MEM: 访存，D-Cache 数据读回
+wb_stage.v           — WB: 写回寄存器堆 + CSR
+alu.v                — 组合逻辑 ALU（19种运算）+ 串行除法器握手
+csr.v                — CSR 寄存器文件（30+ reg: CRMD/PRMD/ERA/DMW/TLB 等）
+mmu.v                — 虚实地址转换顶层（DMW窗口 + TLB选择）
+tlb.v                — 32项全相联 TLB，2搜索端口（MTLB + STLB）
+regfile.v            — 32×32 通用寄存器堆，双读端口
+cache.v              — 2路组相联 Cache（例化 2 次：ICache + DCache）
+cache_axi_bridge.v   — Cache SRAM 协议 ↔ AXI3 转换
+sp_ram.v             — 单端口同步 RAM（参数化位宽/深度，字节写使能）
+mydiv.v / mydivu.v   — 有符号/无符号串行除法器（多拍握手）
+timer_64bit.v        — 64位周期计数器
+decoder_2_4/4_16/5_32/6_64.v — 译码辅助模块
+mycpu.h              — 总线位宽、CSR 地址、异常编码宏定义
+doc/                 — 文档（设计概述、时序报告等）
+tool/                — 时序分析工具链（Yosys + OpenSTA + Vivado）
+tmp/                 — 临时文件（仿真测试等）
+```
 
-## 仿真命令
+## 仿真
 
-- 综合工具：Verilator
-- lint 工具：iverilog（详见 `.vscode/settings.json`）
+- Verilator 综合
+- iverilog lint（`.vscode/settings.json`）
+- difftest 对比验证（`DIFFTEST_EN` 宏控制）
+
+## 时序分析
+
+### 工具链总览
+
+| 工具 | 用途 | 耗时 | 命令 |
+|------|------|------|------|
+| Yosys + ABC | 综合 + 面积 + 多频率对比 | ~3-15min | `cd tool && yosys analyze.ys` |
+| Yosys + Nangate45 | 标准单元映射 + 真实面积 | ~15min | `cd tool && yosys nangate_flat.ys` |
+| OpenSTA | 静态时序分析 + 精确延迟 | ~3min | `cd tool && sta -no_splash -exit sta_real.tcl` |
+| Vivado | FPGA 综合 + 布线延迟 + 彩色报告 | 双击运行 | `tool/run_vivado.bat` |
+
+详见 `tool/README.md` 和 `doc/时序分析报告.md`。
+
+### 当前关键路径 (OpenSTA + Nangate45 45nm)
+
+| 指标 | 值 |
+|------|-----|
+| WNS (setup) | -4.80 ns |
+| 最长数据到达 | 14.3 ns |
+| 等效 fmax | ~70 MHz |
+| 瓶颈模块 | ALU 乘法器 (64×64 纯组合) |
+| 延迟构成 | 门延迟 22% / 线延迟 **78%** |
+| 最大扇出 | **151** (alu_src2[3], Booth 编码输入) |
+
+### 400MHz vs 100MHz 对比 → 瓶颈定位
+
+| 模块 | Cell 增长 | 判断 |
+|------|----------|------|
+| **ALU** | **+10.5%** | 🔴 瓶颈 |
+| cache_axi_bridge | +12.7% | 🟡 次瓶颈 (绝对值小) |
+| cache | +2.9% | 🟢 非瓶颈 |
+| TLB | -0.1% | 🟢 充裕 |
+
+### 优化优先级
+
+1. **乘法器流水化** — 加 2-3 级流水，拆 14.3ns 为每拍 4-5ns，预估 fmax 翻倍
+2. **ALU 结果 MUX 平衡化** — 19路 OR 改二叉树，减 ~2 级门延迟
+3. **乘法输入 buffer** — `alu_src2` 扇出 151，插 buffer tree 减线延迟
+4. **TLB 加流水级** — 仅当 STA 确认后才改（当前非瓶颈）
+5. **前递路径** — 乘法结果不参与前递，强迫走寄存器堆转发
 
 ## 坑点
 
@@ -30,6 +94,9 @@ LoongArch (LA) 5级顺序流水线 CPU
 - **TLB 可配置**：条目数由 parameter 控制，当前 32 项
 - **SRAM 协议两通道独立**：inst_sram（取指）和 data_sram（访存）各自握手
 - **CSR 写后读冒险**：跟踪 CSR 写所在的流水级来解决 RAW
+- **STA 假路径**：除法器多拍迭代路径在 STA 中需设 false_path/multicycle，否则 WNS 虚高至 -378ns
+- **乘法器不能前递**：乘结果一拍出不来（14.3ns 路径），前递给下条指令会导致时序违规。当前设计对此未做特殊处理
+- **dcache miss 停顿**：dcache miss 时 mem_stage 一直等 data_ok，期间不能流水前进
 
 # Verilog 代码格式规范
 

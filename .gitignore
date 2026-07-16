@@ -1,2 +1,16 @@
 # 忽略所有一级子目录，只追踪当前文件夹下的文件
 /*/
+# 例外：tool/ 和 doc/ 需要追踪
+!/tool/
+!/doc/
+
+# 时序分析工具 — 生成文件不追踪
+tool/reports/
+tool/outputs/
+tool/runs/
+tool/libs/
+tool/.Xil/
+tool/vivado_*.log
+tool/vivado_*.jou
+tool/*.log
+tool/*.jou

@@ -1,0 +1,26 @@
+# ============================================================================
+# 快速时序分析 — 单次综合 + ABC 延迟估算
+# 用法: yosys quick_timing.ys > reports/timing.txt 2>&1
+# ============================================================================
+
+# 读源文件
+read_verilog -sv ../*.v
+
+# 层次检查 + 顶层
+hierarchy -check -top core_top
+
+# 综合到通用门 + ABC 延迟优化
+# synth 内部包含 proc → techmap → opt → abc，不需要单独 flatten
+# 目标: 10ns (100MHz)
+synth -top core_top
+abc -D 10000
+
+# ========== 写详细报告 ==========
+tee -q -o reports/area_100MHz.txt stat -width
+
+echo ""
+echo "============================================================"
+echo "  100MHz (10ns) 时序分析完成"
+echo "  报告: reports/area_100MHz.txt"
+echo "============================================================"
+echo ""

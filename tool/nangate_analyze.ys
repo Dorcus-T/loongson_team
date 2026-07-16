@@ -1,0 +1,27 @@
+# ============================================================================
+# Nangate45 45nm 标准单元库 — 带真实延迟的时序分析
+# 用法: yosys nangate_analyze.ys 2>&1 | tee reports/nangate_full.log
+# ============================================================================
+
+read_verilog -sv ../*.v
+hierarchy -check -top core_top
+
+# 关键：先读 liberty，yosys 才会将其传入 ABC
+read_liberty -lib -ignore_miss_dir -setattr blackbox libs/NangateOpenCellLibrary_typical.lib
+
+# 综合
+synth -top core_top
+
+# 技术映射 DFF
+dfflibmap -liberty libs/NangateOpenCellLibrary_typical.lib
+
+# ABC 技术映射 + 10ns (100MHz) 优化
+abc -liberty libs/NangateOpenCellLibrary_typical.lib -D 10000
+
+# 清理
+opt_clean
+
+# 时序/面积报告
+tee -q -o reports/nangate_stat_100MHz.txt stat -liberty libs/NangateOpenCellLibrary_typical.lib -width
+
+log "=== Nangate45 100MHz 分析完成 ==="

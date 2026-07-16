@@ -14,3 +14,4 @@ tool/vivado_*.log
 tool/vivado_*.jou
 tool/*.log
 tool/*.jou
+tool/dfx_runtime.txt

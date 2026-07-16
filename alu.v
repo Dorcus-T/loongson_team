@@ -14,7 +14,9 @@ module alu (
     input  wire        ex_valid,       // 无效的ex指令就不发起除法请求
     // 时钟与复位
     input  wire        clk,            // 时钟信号
-    input  wire        reset           // 复位信号（高有效）
+    input  wire        reset,           // 复位信号（高有效）
+    // 乘法器握手
+    output wire        mul_ready       // 乘法器结果就绪（1拍脉冲，复用除法器停顿框架）
 );
 
     // ========== ALU 操作码定义（每位代表一种运算） ==========
@@ -71,8 +73,6 @@ module alu (
     wire [31:0] sll_result;         // 逻辑左移结果
     wire [63:0] sr64_result;        // 右移中间结果（64位，算术右移符号扩展用）
     wire [31:0] sr_result;          // 右移最终结果（逻辑或算术）
-    wire [63:0] mul64_result;       // 有符号乘法64位结果
-    wire [63:0] mulu64_result;      // 无符号乘法64位结果
     wire [31:0] mul_result;         // 乘法低32位
     wire [31:0] mulh_result;        // 有符号乘法高32位
     wire [31:0] mulhu_result;       // 无符号乘法高32位
@@ -117,12 +117,59 @@ module alu (
     assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4:0];
     assign sr_result   = sr64_result[31:0];
 
-    // ========== 乘法运算 ==========
-    assign mul64_result  = $signed(alu_src1) * $signed(alu_src2);
-    assign mulu64_result = alu_src1 * alu_src2;
-    assign mul_result    = mul64_result[31:0];
-    assign mulh_result   = mul64_result[63:32];
-    assign mulhu_result  = mulu64_result[63:32];
+    // ============================================================
+    // 乘法器流水线控制（2拍握手，复用除法器 AXI-stream 模式）
+    // ============================================================
+
+    wire is_mul_inst = op_mul | op_mulh | op_mulhu;
+
+    // 乘法器握手控制信号
+    reg  s_axis_mul_tvalid;
+    wire s_axis_mul_tready;
+
+    // 握手拴 no_flush_or_exc（与除法器一致）
+    wire mul_handshake = s_axis_mul_tvalid && s_axis_mul_tready && no_flush_or_exc;
+
+    // 乘法请求去重（同除法器 div_inst_new）
+    reg mul_inst_new;
+    always @(posedge clk) begin
+        if (reset) begin
+            mul_inst_new <= 1'b1;
+        end
+        else if (mul_handshake) begin
+            mul_inst_new <= 1'b0;
+        end
+        else if (mul_ready) begin
+            mul_inst_new <= 1'b1;
+        end
+    end
+
+    // tvalid 控制（同除法器模式）
+    always @(posedge clk) begin
+        if (reset) begin
+            s_axis_mul_tvalid <= 1'b0;
+        end
+        else if (mul_handshake) begin
+            s_axis_mul_tvalid <= 1'b0;
+        end
+        else if (is_mul_inst && mul_inst_new && ex_valid && no_flush_or_exc) begin
+            s_axis_mul_tvalid <= 1'b1;
+        end
+        else begin
+            s_axis_mul_tvalid <= s_axis_mul_tvalid;
+        end
+    end
+
+    // ========== 乘法器 IP 核实例化 ==========
+    mymul u_mul_inst (
+        .aclk               (clk),
+        .s_axis_mul_tvalid  (s_axis_mul_tvalid),
+        .s_axis_mul_tready  (s_axis_mul_tready),
+        .s_axis_mul_src1    (alu_src1),
+        .s_axis_mul_src2    (alu_src2),
+        .m_axis_dout_tvalid (mul_ready),
+        .m_axis_dout_tdata  ({mulhu_result, mulh_result, mul_result})
+    );
 
     // ============================================================
     // 除法器控制逻辑
@@ -259,23 +306,43 @@ module alu (
     assign div_ready = (signed_div_inst && div_ready_signed)
                     || (unsigned_div_inst && div_ready_unsigned);
 
-    // ========== 最终结果选择（根据操作码选择对应的运算结果） ==========
-    assign alu_result = ({32{op_add|op_sub}} & add_sub_result)
-                      | ({32{op_slt       }} & slt_result)
-                      | ({32{op_sltu      }} & sltu_result)
-                      | ({32{op_and       }} & and_result)
-                      | ({32{op_nor       }} & nor_result)
-                      | ({32{op_or        }} & or_result)
-                      | ({32{op_xor       }} & xor_result)
-                      | ({32{op_lui       }} & lui_result)
-                      | ({32{op_sll       }} & sll_result)
-                      | ({32{op_srl|op_sra}} & sr_result)
-                      | ({32{op_mul       }} & mul_result)
-                      | ({32{op_mulh      }} & mulh_result)
-                      | ({32{op_mulhu     }} & mulhu_result)
-                      | ({32{op_div_w     }} & div_result_signed)
-                      | ({32{op_div_wu    }} & div_result_unsigned)
-                      | ({32{op_mod_w     }} & mod_result_signed)
-                      | ({32{op_mod_wu    }} & mod_result_unsigned);
+    // ========== 最终结果选择（二叉树 MUX，log2(17)≈5级，替代平坦OR） ==========
+    // Level 1: 17 → 9（掩码选择 + 二合一归约）
+    wire [31:0] res_l1_0 = ({32{op_add|op_sub}} & add_sub_result)
+                         | ({32{op_slt       }} & slt_result);
+    wire [31:0] res_l1_1 = ({32{op_sltu      }} & sltu_result)
+                         | ({32{op_and       }} & and_result);
+    wire [31:0] res_l1_2 = ({32{op_nor       }} & nor_result)
+                         | ({32{op_or        }} & or_result);
+    wire [31:0] res_l1_3 = ({32{op_xor       }} & xor_result)
+                         | ({32{op_lui       }} & lui_result);
+    wire [31:0] res_l1_4 = ({32{op_sll       }} & sll_result)
+                         | ({32{op_srl|op_sra}} & sr_result);
+    wire [31:0] res_l1_5 = ({32{op_mul       }} & mul_result)
+                         | ({32{op_mulh      }} & mulh_result);
+    wire [31:0] res_l1_6 = ({32{op_mulhu     }} & mulhu_result)
+                         | ({32{op_div_w     }} & div_result_signed);
+    wire [31:0] res_l1_7 = ({32{op_div_wu    }} & div_result_unsigned)
+                         | ({32{op_mod_w     }} & mod_result_signed);
+    wire [31:0] res_l1_8 = ({32{op_mod_wu    }} & mod_result_unsigned);
+
+    // Level 2: 9 → 5
+    wire [31:0] res_l2_0 = res_l1_0 | res_l1_1;
+    wire [31:0] res_l2_1 = res_l1_2 | res_l1_3;
+    wire [31:0] res_l2_2 = res_l1_4 | res_l1_5;
+    wire [31:0] res_l2_3 = res_l1_6 | res_l1_7;
+    wire [31:0] res_l2_4 = res_l1_8;
+
+    // Level 3: 5 → 3
+    wire [31:0] res_l3_0 = res_l2_0 | res_l2_1;
+    wire [31:0] res_l3_1 = res_l2_2 | res_l2_3;
+    wire [31:0] res_l3_2 = res_l2_4;
+
+    // Level 4: 3 → 2
+    wire [31:0] res_l4_0 = res_l3_0 | res_l3_1;
+    wire [31:0] res_l4_1 = res_l3_2;
+
+    // Level 5: 2 → 1
+    assign alu_result = res_l4_0 | res_l4_1;
 
 endmodule

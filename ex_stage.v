@@ -95,9 +95,12 @@ module exe_stage (
     wire ertn_flush;                    // 异常返回冲刷信号
     wire div_ready;                     // 除法器就绪脉冲信号
     reg  div_ready_r;                   // 寄存除法结果就绪脉冲信号
+    wire mul_ready;                     // 乘法器就绪脉冲信号
+    reg  mul_ready_r;                   // 寄存乘法结果就绪脉冲信号
     wire [2:0] mem_size;                // 访存大小：0=字节，1=半字，2=字
     wire mem_sign_ext;                  // 符号扩展标志
     wire is_div_inst;                   // 判断是否为除法指令，控制流水线前进
+    wire is_mul_inst;                   // 判断是否为乘法指令，控制流水线前进
     // ALU操作数
     wire [31:0] alu_src1;
     wire [31:0] alu_src2;
@@ -223,11 +226,13 @@ module exe_stage (
 
     // ========== 流水线控制 ==========
     assign is_div_inst   = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
+    assign is_mul_inst   = |alu_op[14:12];                    // 判断是否是乘法指令（ALU操作码12-14位非零）
     // 下游异常/flush 时放行 EX：否则 EX 等 cache 但 cache 请求被阻断 → 死锁
     wire ex_flush_pending;
     assign ex_flush_pending = |ex_mem_exc || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
 
-    assign ex_ready_go   = is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
+    assign ex_ready_go   = is_mul_inst ? (mul_ready || mul_ready_r) || (!ex_valid || ex_flush_pending) :
+                           is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
                                         ex_valid && (mem_we || res_from_mem) && !(|ex_mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || ex_flush_pending :
                                         ex_valid && cacop_en && (cacop_code[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || ex_flush_pending) :
                                         ex_valid && cacop_en && (cacop_code[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || ex_flush_pending) : 1'b1;
@@ -299,6 +304,7 @@ module exe_stage (
         .clk            (clk),
         .reset          (reset),
         .div_ready      (div_ready),
+        .mul_ready      (mul_ready),
         .ex_valid       (ex_valid),
         .ex_exc         (ex_exc[12:3]),
         .mem_exc_valid  (mem_exc_valid),
@@ -314,6 +320,16 @@ module exe_stage (
         end
         else if (div_ready) begin
             div_ready_r <= 1'b1;
+        end
+    end
+
+    // 乘法就绪信号需要寄存（复用除法器模式）
+    always @(posedge clk) begin
+        if (reset || (ex_to_mem_valid && mem_allowin)) begin
+            mul_ready_r <= 1'b0;
+        end
+        else if (mul_ready) begin
+            mul_ready_r <= 1'b1;
         end
     end
 

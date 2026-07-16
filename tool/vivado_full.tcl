@@ -1,5 +1,7 @@
 # ============================================================================
-# Full project timing analysis
+# Full project timing analysis: synthesis + optional implementation
+# synthesis only:  post-synth timing (estimated wire delays)
+# implementation:  post-route timing (real wire delays, most accurate)
 # ============================================================================
 
 set PROJECT "Z:/home/dorcus_t/chiplab/fpga/nscscc-team/run_vivado/project/loongson.xpr"
@@ -14,7 +16,7 @@ puts "Output: $outdir"
 puts "=== 1. Open project ==="
 open_project $PROJECT
 
-# ========== 2. Ensure all myCPU/*.v are in the project ==========
+# ========== 2. Sync source files ==========
 puts "=== 2. Sync source files ==="
 set existing [get_files -quiet -of_objects [get_filesets sources_1]]
 foreach f [lsort [glob -nocomplain "$CPU_DIR/*.v"]] {
@@ -35,42 +37,56 @@ set run_status [get_property STATUS [get_runs synth_1]]
 puts "  status: $run_status"
 
 if {$run_status ne "synth_design Complete!"} {
-    puts "  resetting and re-running..."
+    puts "  re-running synthesis..."
     reset_run synth_1
-    launch_runs synth_1 -jobs 4
+    launch_runs synth_1 -jobs 8
     wait_on_run synth_1
 }
 open_run synth_1
 
-# ========== 4. Timing reports ==========
-puts "=== 4. Timing reports ==="
-
-report_timing_summary -file "$outdir/timing_summary.rpt"
-
-report_timing -max_paths 100 -nworst 100 -delay_type max \
+# ----- Post-synth reports -----
+puts "--- 3a. Post-synth reports ---"
+report_timing_summary -file "$outdir/timing_summary_synth.rpt"
+report_timing -max_paths 50 -nworst 50 -delay_type max \
   -sort_by slack -input_pins -nets \
-  -file "$outdir/critical_paths.rpt"
+  -file "$outdir/critical_paths_synth.rpt"
+report_high_fanout_nets -max_nets 20 -file "$outdir/high_fanout_synth.rpt"
+report_utilization -file "$outdir/utilization_synth.rpt"
 
-report_high_fanout_nets -max_nets 30 -file "$outdir/high_fanout.rpt"
-report_utilization -file "$outdir/utilization.rpt"
+# ========== 4. Implementation ==========
+puts "=== 4. Implementation ==="
+
+# 4a. opt_design (逻辑优化)
+puts "--- 4a. opt_design ---"
+opt_design
+
+# 4b. place_design (布局)
+puts "--- 4b. place_design ---"
+place_design
+
+report_timing_summary -file "$outdir/timing_summary_placed.rpt"
+
+# 4c. route_design (布线 — 真实延迟)
+puts "--- 4c. route_design ---"
+route_design
+
+# ----- Post-route reports (most accurate) -----
+puts "--- 4d. Post-route reports ---"
+report_timing_summary -file "$outdir/timing_summary_routed.rpt"
+report_timing -max_paths 50 -nworst 50 -delay_type max \
+  -sort_by slack -input_pins -nets \
+  -file "$outdir/critical_paths_routed.rpt"
+report_high_fanout_nets -max_nets 20 -file "$outdir/high_fanout_routed.rpt"
+report_utilization -file "$outdir/utilization_routed.rpt"
 report_clock_interaction -file "$outdir/clock_interaction.rpt"
-
-# Post-route if available
-if {[get_property STATUS [get_runs impl_1]] eq "route_design Complete!"} {
-    puts "=== 4b. Post-route timing ==="
-    open_run impl_1
-    report_timing_summary -file "$outdir/timing_summary_post_route.rpt"
-    report_timing -max_paths 50 -nworst 50 -delay_type max \
-      -sort_by slack -input_pins -nets \
-      -file "$outdir/critical_paths_post_route.rpt"
-}
-
 report_methodology -file "$outdir/methodology.rpt"
+
+write_checkpoint -force "$outdir/post_route.dcp"
 
 puts ""
 puts "============================================================"
 puts "  Done -> $outdir/"
 puts "============================================================"
 foreach f [lsort [glob -nocomplain "$outdir/*"]] {
-    puts "  [file tail $f]  [file size $f]"
+    puts "  [file tail $f]  [format {%8d} [file size $f]]"
 }

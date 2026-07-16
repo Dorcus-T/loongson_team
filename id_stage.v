@@ -18,19 +18,27 @@ module id_stage (
     input  wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,        // WB阶段写回数据
     // 前递控制
     input  wire [ 4:0]                  ex_to_id_dest,       // EX阶段的目的寄存器号
+    input  wire [ 4:0]                  pre_mem_to_id_dest,  // PRE_MEM阶段写回寄存器号
     input  wire [ 4:0]                  mem_to_id_dest,      // MEM阶段的目的寄存器号
     input  wire [ 4:0]                  wb_to_id_dest,       // WB阶段的目的寄存器号
     input  wire                         ex_to_id_load_op,    // EX阶段是否为加载指令（用于检测load-use冒险）
-    input  wire [31:0]                  ex_to_id_result,     // EX阶段计算结果
-    input  wire [31:0]                  mem_to_id_result,    // MEM阶段计算结果
-    input  wire [31:0]                  wb_to_id_result,     // WB阶段计算结果
+    input  wire                         pre_mem_to_id_load_op,  // PRE_MEM阶段是否有load指令（用于检测load-use冒险）
+    input  wire [31:0]                  ex_to_id_result,       // EX阶段计算结果
+    input  wire [31:0]                  pre_mem_to_id_result,  // PRE_MEM阶段前递数据
+    input  wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
+    input  wire [31:0]                  wb_to_id_result,       // WB阶段计算结果
     input  wire                         mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
+    input  wire                         ex_exc_valid,        // ex有冲刷就不发起brtaken
+    input  wire                         pre_mem_exc_valid,   // PRE_MEM阶段存在异常
     input  wire                         mem_exc_valid,       // MEM有冲刷就不发起brtaken
-    input  wire                         ex_mem_exc_valid,    // ex有冲刷就不发起brtaken
+
     // csr与ertn冒险
     input  wire                         ex_csr_we,           // EX阶段写CSR使能
     input  wire [13:0]                  ex_csr_num,          // EX阶段写CSR号码
     input  wire                         ex_ertn_flush,       // EX阶段有ertn指令
+    input  wire                         pre_mem_csr_we,      // PRE_MEM阶段写CSR使能
+    input  wire [13:0]                  pre_mem_csr_num,     // PRE_MEM阶段写CSR号码
+    input  wire                         pre_mem_ertn_flush,  // PRE_MEM阶段有ertn指令
     input  wire                         mem_csr_we,          // MEM阶段写CSR使能
     input  wire [13:0]                  mem_csr_num,         // MEM阶段写CSR号码
     input  wire                         mem_ertn_flush,      // MEM阶段有ertn指令
@@ -546,17 +554,20 @@ module id_stage (
     // ========== 操作数前递 ==========
     // rj值前递：如果rj需要等待且与EX/MEM/WB阶段的目的寄存器匹配，则使用前递结果
     assign rj_value = rj_wait ?
-                      ((rj == ex_to_id_dest) ? ex_to_id_result :
-                       (rj == mem_to_id_dest) ? mem_to_id_result : wb_to_id_result)
+                      ((rj == ex_to_id_dest)      ? ex_to_id_result :
+                       (rj == pre_mem_to_id_dest) ? pre_mem_to_id_result :
+                       (rj == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result)
                       : rf_rdata1;
 
     // rkd值前递：类似地处理第二操作数
     assign rkd_value = rk_wait ?
-                       ((rk == ex_to_id_dest) ? ex_to_id_result :
-                        (rk == mem_to_id_dest) ? mem_to_id_result : wb_to_id_result) :
+                       ((rk == ex_to_id_dest)      ? ex_to_id_result :
+                        (rk == pre_mem_to_id_dest) ? pre_mem_to_id_result :
+                        (rk == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result) :
                        rd_wait ?
-                       ((rd == ex_to_id_dest) ? ex_to_id_result :
-                        (rd == mem_to_id_dest) ? mem_to_id_result : wb_to_id_result) :
+                       ((rd == ex_to_id_dest)      ? ex_to_id_result :
+                        (rd == pre_mem_to_id_dest) ? pre_mem_to_id_result :
+                        (rd == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result) :
                        rf_rdata2;
 
     // ========== 条件分支比较逻辑 ===========
@@ -596,7 +607,7 @@ module id_stage (
                        || inst_bl
                        || inst_b
                     ) && id_valid && !load_use_stall && !branch_stall && new_br
-                      && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_mem_exc_valid) && !id_exc_valid;
+                      && !(mem_ertn_flush || mem_exc_valid || ex_ertn_flush || pre_mem_ertn_flush || ex_exc_valid || pre_mem_exc_valid) && !id_exc_valid;
     // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
@@ -707,17 +718,20 @@ module id_stage (
 
 
     assign rj_wait = ~src_no_rj && (rj != 5'b00000) &&
-                     ((rj == ex_to_id_dest) || (rj == mem_to_id_dest) || (rj == wb_to_id_dest));
+                     ((rj == ex_to_id_dest) || (rj == pre_mem_to_id_dest) || (rj == mem_to_id_dest) || (rj == wb_to_id_dest));
     assign rk_wait = ~src_no_rk && (rk != 5'b00000) &&
-                     ((rk == ex_to_id_dest) || (rk == mem_to_id_dest) || (rk == wb_to_id_dest));
+                     ((rk == ex_to_id_dest) || (rk == pre_mem_to_id_dest) || (rk == mem_to_id_dest) || (rk == wb_to_id_dest));
     assign rd_wait = src_has_rd && (rd != 5'b00000) &&
-                     ((rd == ex_to_id_dest) || (rd == mem_to_id_dest) || (rd == wb_to_id_dest));
+                     ((rd == ex_to_id_dest) || (rd == pre_mem_to_id_dest) || (rd == mem_to_id_dest) || (rd == wb_to_id_dest));
 
     // 如果当前指令的源寄存器与ex阶段的目的寄存器匹配，且EX阶段是加载指令，则需要停顿
     assign id_load_op = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
     assign load_use_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
                              (rk_wait && (rk == ex_to_id_dest)) ||
                              (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op) ||
+                            (((rj_wait && (rj == pre_mem_to_id_dest)) ||
+                              (rk_wait && (rk == pre_mem_to_id_dest)) ||
+                              (rd_wait && (rd == pre_mem_to_id_dest))) && pre_mem_to_id_load_op) ||
                             (((rj_wait && (rj == mem_to_id_dest)) ||
                               (rk_wait && (rk == mem_to_id_dest)) ||
                               (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
@@ -735,6 +749,10 @@ module id_stage (
                                         ex_csr_num == `CSR_ESTAT || ex_csr_num == `CSR_TCFG ||
                                         ex_csr_num == `CSR_TICLR)) ||
                          (ex_ertn_flush) ||  // ex阶段有ertn，即将写CRMD.IE
+                         (pre_mem_csr_we && (pre_mem_csr_num == `CSR_CRMD || pre_mem_csr_num == `CSR_ECFG ||
+                                             pre_mem_csr_num == `CSR_ESTAT || pre_mem_csr_num == `CSR_TCFG ||
+                                             pre_mem_csr_num == `CSR_TICLR)) ||
+                         (pre_mem_ertn_flush) ||  // pre_mem阶段有ertn，即将写CRMD.IE
                          (mem_csr_we && (mem_csr_num == `CSR_CRMD || mem_csr_num == `CSR_ECFG ||
                                          mem_csr_num == `CSR_ESTAT || mem_csr_num == `CSR_TCFG ||
                                          mem_csr_num == `CSR_TICLR)) ||
@@ -747,9 +765,11 @@ module id_stage (
     // 读csr指令与后面写同一个 CSR 冲突
     assign inst_csr_stall = (inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch) &&
                          ((ex_csr_we && ex_csr_num == csr_id_num) ||
+                          (pre_mem_csr_we && pre_mem_csr_num == csr_id_num) ||
                           (mem_csr_we && mem_csr_num == csr_id_num) ||
                           (wb_csr_we && wb_csr_num == csr_id_num) ||
                           (ex_csr_we && inst_tlbsrch && ex_csr_num == `CSR_TLBEHI) ||
+                          (pre_mem_csr_we && inst_tlbsrch && pre_mem_csr_num == `CSR_TLBEHI) ||
                           (mem_csr_we && inst_tlbsrch && mem_csr_num == `CSR_TLBEHI));
     assign csr_stall = inst_csr_stall || int_csr_stall;
 

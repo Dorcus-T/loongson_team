@@ -6,9 +6,9 @@ module mem_stage (
     // allowin
     input  wire                         wb_allowin,            // WB阶段允许接收
     output wire                         mem_allowin,           // MEM阶段允许接收
-    // 来自ex阶段
-    input  wire                         ex_to_mem_valid,       // EX到MEM有效
-    input  wire [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus,         // 来自EX的总线
+    // 来自pre_mem阶段
+    input  wire                         pre_mem_to_mem_valid,  // PRE_MEM到MEM有效
+    input  wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus, // 来自PRE_MEM的总线
     // 输出给wb阶段
     output wire                         mem_to_wb_valid,       // MEM到WB有效
     output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
@@ -22,8 +22,8 @@ module mem_stage (
     // 异常冲刷
     input  wire                         wb_exc_valid,          // WB阶段异常冲刷流水线
     input  wire                         wb_ertn_flush,         // WB阶段有ertn指令则冲刷流水线
-    output wire                         mem_exc_valid,         // 防止有异常时ex阶段发出访存请求
-    output wire                         mem_ertn_flush,        // 防止ertn位于mem时,ex发出访存请求
+    output wire                         mem_exc_valid,         // 防止有异常时pre_mem阶段发出访存请求
+    output wire                         mem_ertn_flush,        // 防止ertn位于mem时,pre_mem发出访存请求
     // csr与ertn冒险
     output wire                         mem_csr_we,            // mem阶段确定要写csr
     output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
@@ -33,7 +33,7 @@ module mem_stage (
 
     reg  mem_valid;                                   // MEM阶段有效标志
     wire mem_ready_go;                                // MEM阶段就绪
-    reg  [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus_r;     // 锁存的执行级数据
+    reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus_r; // 锁存的PRE_MEM级数据
 
     // ========== 异常信号 ==========
     wire [15:0] mem_exc;
@@ -123,7 +123,7 @@ module mem_stage (
         dest,                // 68:64   目标寄存器号
         alu_result,          // 63:32   ALU结果
         mem_pc               // 31:0    PC
-    } = ex_to_mem_bus_r;
+    } = pre_mem_to_mem_bus_r;
 
     `ifdef DIFFTEST_EN
     wire [31:0] dift_paddr;         // load/store物理地址 for difftest
@@ -188,13 +188,13 @@ module mem_stage (
             mem_valid <= 1'b0;
         end
         else if (mem_allowin) begin
-            mem_valid <= ex_to_mem_valid;
+            mem_valid <= pre_mem_to_mem_valid;
         end
     end
     // 访存级数据传递
     always @(posedge clk) begin
-        if (ex_to_mem_valid && mem_allowin) begin
-            ex_to_mem_bus_r <= ex_to_mem_bus;
+        if (pre_mem_to_mem_valid && mem_allowin) begin
+            pre_mem_to_mem_bus_r <= pre_mem_to_mem_bus;
         end
     end
 

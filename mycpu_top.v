@@ -68,20 +68,23 @@ module core_top (
     // ========== 流水线控制信号（各级之间的握手信号） ==========
     wire id_allowin;                     // ID阶段允许接收（来自ID）
     wire ex_allowin;                     // EX阶段允许接收（来自EX）
+    wire pre_mem_allowin;                // PRE_MEM阶段允许接收（来自PRE_MEM）
     wire mem_allowin;                    // MEM阶段允许接收（来自MEM）
     wire wb_allowin;                     // WB阶段允许接收（来自WB）
 
     // 各级流水线有效标志
     wire if_to_id_valid;                 // IF -> ID 有效
     wire id_to_ex_valid;                 // ID -> EX 有效
-    wire ex_to_mem_valid;                // EX -> MEM 有效
+    wire ex_to_pre_mem_valid;            // EX -> PRE_MEM 有效
+    wire pre_mem_to_mem_valid;           // PRE_MEM -> MEM 有效
     wire mem_to_wb_valid;                // MEM -> WB 有效
 
     // ========== 流水线总线（各级之间的数据传递） ==========
-    wire [`IF_TO_ID_BUS_WD-1:0]  if_to_id_bus;   // IF -> ID 总线
-    wire [`ID_TO_EX_BUS_WD-1:0]  id_to_ex_bus;   // ID -> EX 总线
-    wire [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus;  // EX -> MEM 总线
-    wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus;  // MEM -> WB 总线
+    wire [`IF_TO_ID_BUS_WD-1:0]     if_to_id_bus;       // IF -> ID 总线
+    wire [`ID_TO_EX_BUS_WD-1:0]     id_to_ex_bus;       // ID -> EX 总线
+    wire [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus; // EX -> PRE_MEM 总线
+    wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus; // PRE_MEM -> MEM 总线
+    wire [`MEM_TO_WB_BUS_WD-1:0]    mem_to_wb_bus;      // MEM -> WB 总线
     wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus;   // WB -> 寄存器文件
     wire [`WB_TO_CSR_BUS_WD-1:0] wb_to_csr_bus;  // WB -> CSR总线
     wire [`BR_BUS_WD-1:0]        br_bus;         // 分支总线
@@ -98,12 +101,21 @@ module core_top (
     wire        mem_to_id_data_ok;       // MEM前递给id的数据是否准备好
 
     // ========== 异常信号与ertn ==========
-    wire ex_mem_exc_valid;   // EX阶段异常有效
+    wire ex_exc_valid;   // EX阶段异常有效
     wire wb_exc_valid;       // WB阶段异常有效
     wire wb_ertn_flush;      // WB阶段有ertn指令
     wire mem_exc_valid;      // MEM阶段异常有效
     wire mem_ertn_flush;     // MEM阶段有ertn指令
     wire ex_ertn_flush;
+
+    // ========== pre_mem 前递 / 异常信号 ==========
+    wire [ 4:0] pre_mem_to_id_dest;
+    wire [31:0] pre_mem_to_id_result;
+    wire        pre_mem_to_id_load_op;
+    wire        pre_mem_csr_we;
+    wire [13:0] pre_mem_csr_num;
+    wire        pre_mem_ertn_flush;
+    wire        pre_mem_exc_valid;
 
     // ========== 重取指信号 ==========
     wire exc_not_rf;         // wb发if，csr除中断外被rf覆盖异常信号
@@ -134,8 +146,8 @@ module core_top (
     wire [`TLBCSR_BUS_WD-1:0] tlbcsr_bus; // tlb相关csr输出
 
     // ========== 与MMU交互信号 ==========
-    wire [31:0] if_to_mmu_vaddr;    // if发mmu虚地址
-    wire [31:0] ex_to_mmu_vaddr;    // ex发mmu虚地址
+    wire [31:0] if_to_mmu_vaddr;        // if发mmu虚地址
+    wire [31:0] pre_mem_to_mmu_vaddr;   // pre_mem发mmu虚地址
     wire [35:0] vtlb_enop;          // 发mmu tlbsrch，invtlb使能即操作数
     wire [ 1:0] ld_and_str;         // 发mmu load和store信号
     wire [ 2:0] tlbrwf_valid;       // tlbrd tlbwr tlbfill使能
@@ -143,11 +155,11 @@ module core_top (
     wire [ 2:0] if_tlb_exc;         // 发if tlb相关异常
     wire [ 1:0] if_mat;             // if 访存方式
     wire        if_cached;          // if 访问可缓存
-    wire [31:0] paddr_to_ex;        // 发ex实地址
-    wire [ 5:0] srch_value;         // 发ex tlbsrch查询结果
-    wire [ 4:0] ex_tlb_exc;         // 发ex tlb相关异常
-    wire [ 1:0] ex_mat;             // ex 访存方式
-    wire        ex_cached;          // ex 访问可缓存
+    wire [31:0] paddr_to_pre_mem;   // 发pre_mem实地址
+    wire [ 5:0] srch_value;         // 发pre_mem tlbsrch查询结果
+    wire [ 4:0] pre_mem_tlb_exc;    // 发pre_mem tlb相关异常
+    wire [ 1:0] pre_mem_mat;        // pre_mem 访存方式
+    wire        pre_mem_cached;     // pre_mem 访问可缓存
     wire [`TLBRD_BUS_WD-1:0] tlbrd_value; // 发csr tlbrd使能和数据
 
     // ========== 计数器数值 ==========
@@ -427,10 +439,17 @@ module core_top (
         .ex_csr_we         (ex_csr_we),
         .ex_csr_num        (ex_csr_num),
         .ex_ertn_flush     (ex_ertn_flush),
+        .pre_mem_csr_we     (pre_mem_csr_we),
+        .pre_mem_csr_num    (pre_mem_csr_num),
+        .pre_mem_ertn_flush (pre_mem_ertn_flush),
+        .pre_mem_exc_valid  (pre_mem_exc_valid),
+        .pre_mem_to_id_dest    (pre_mem_to_id_dest),
+        .pre_mem_to_id_result  (pre_mem_to_id_result),
+        .pre_mem_to_id_load_op (pre_mem_to_id_load_op),
         .mem_csr_we        (mem_csr_we),
         .mem_csr_num       (mem_csr_num),
         .mem_ertn_flush    (mem_ertn_flush),
-        .ex_mem_exc_valid   (ex_mem_exc_valid),
+        .ex_exc_valid   (ex_exc_valid),
         .wb_csr_we         (wb_csr_we),
         .wb_csr_num        (wb_csr_num),
         .wb_exc_valid      (wb_exc_valid),
@@ -452,14 +471,42 @@ module core_top (
     exe_stage u_exe_stage (
         .clk                (clk),
         .reset              (reset),
-        .mem_allowin        (mem_allowin),
+        .pre_mem_allowin    (pre_mem_allowin),
         .ex_allowin         (ex_allowin),
         .id_to_ex_valid     (id_to_ex_valid),
         .id_to_ex_bus       (id_to_ex_bus),
-        .ex_to_mem_valid    (ex_to_mem_valid),
-        .ex_to_mem_bus      (ex_to_mem_bus),
-        .ex_to_mmu_vaddr    (ex_to_mmu_vaddr),
-        .dcache_cpu_req   (dcache_cpu_req),
+        .ex_to_pre_mem_valid (ex_to_pre_mem_valid),
+        .ex_to_pre_mem_bus   (ex_to_pre_mem_bus),
+        .ex_to_id_dest      (ex_to_id_dest),
+        .ex_to_id_result    (ex_to_id_result),
+        .ex_to_id_load_op   (ex_to_id_load_op),
+        .ex_exc_valid       (ex_exc_valid),  // 保持兼容：ID 仍用旧名
+        .wb_exc_valid       (wb_exc_valid),
+        .wb_ertn_flush      (wb_ertn_flush),
+        .mem_exc_valid      (mem_exc_valid),
+        .mem_ertn_flush     (mem_ertn_flush),
+        .pre_mem_exc_valid  (pre_mem_exc_valid),
+        .ex_csr_we          (ex_csr_we),
+        .ex_csr_num         (ex_csr_num),
+        .ex_ertn_flush          (ex_ertn_flush),
+        .timer_value            (timer_value),
+        .pre_mem_ertn_flush     (pre_mem_ertn_flush)
+    );
+
+    // ================================================================
+    // 第四阶段：访存前置阶段 (PRE_MEM - Pre-Memory Access)
+    // ================================================================
+    pre_mem_stage u_pre_mem_stage (
+        .clk                (clk),
+        .reset              (reset),
+        .mem_allowin        (mem_allowin),
+        .pre_mem_allowin    (pre_mem_allowin),
+        .ex_to_pre_mem_valid (ex_to_pre_mem_valid),
+        .ex_to_pre_mem_bus   (ex_to_pre_mem_bus),
+        .pre_mem_to_mem_valid (pre_mem_to_mem_valid),
+        .pre_mem_to_mem_bus   (pre_mem_to_mem_bus),
+        .pre_mem_to_mmu_vaddr (pre_mem_to_mmu_vaddr),
+        .dcache_cpu_req     (dcache_cpu_req),
         .dcache_cpu_op      (dcache_cpu_op),
         .dcache_cpu_index   (dcache_cpu_index),
         .dcache_cpu_tag     (dcache_cpu_tag),
@@ -470,41 +517,43 @@ module core_top (
         .dcache_cpu_addr_ok (dcache_cpu_addr_ok),
         .vtlb_enop          (vtlb_enop),
         .ld_and_str         (ld_and_str),
-        .padd               (paddr_to_ex),
+        .padd               (paddr_to_pre_mem),
         .srch_value         (srch_value),
-        .mem_tlb_exc        (ex_tlb_exc),
-        .ex_cached          (ex_cached),
-        .ex_to_id_dest      (ex_to_id_dest),
-        .ex_to_id_result    (ex_to_id_result),
-        .ex_to_id_load_op   (ex_to_id_load_op),
-        .ex_mem_exc_valid   (ex_mem_exc_valid),
-        .wb_exc_valid       (wb_exc_valid),
-        .wb_ertn_flush      (wb_ertn_flush),
-        .mem_exc_valid      (mem_exc_valid),
-        .mem_ertn_flush     (mem_ertn_flush),
-        .ex_csr_we          (ex_csr_we),
-        .ex_csr_num         (ex_csr_num),
-        .ex_ertn_flush      (ex_ertn_flush),
-        .timer_value        (timer_value),
+        .mem_tlb_exc        (pre_mem_tlb_exc),
+        .pre_cached         (pre_mem_cached),
         // CACOP
         .cacop_code         (cacop_code),
         .cacop_en_final     (cacop_en_final),
         .cacop_va           (cacop_va),
         .cacop_tag          (cacop_tag),
         .icache_cacop_rdy   (icache_cacop_rdy),
-        .dcache_cacop_rdy   (dcache_cacop_rdy)
+        .dcache_cacop_rdy   (dcache_cacop_rdy),
+        // 异常冲刷
+        .wb_exc_valid       (wb_exc_valid),
+        .wb_ertn_flush      (wb_ertn_flush),
+        .mem_exc_valid      (mem_exc_valid),
+        .mem_ertn_flush     (mem_ertn_flush),
+        // CSR与ERTN冒险
+        .pre_mem_csr_we     (pre_mem_csr_we),
+        .pre_mem_csr_num    (pre_mem_csr_num),
+        .pre_mem_ertn_flush (pre_mem_ertn_flush),
+        .pre_mem_exc_valid  (pre_mem_exc_valid),
+        // 前递控制
+        .pre_mem_to_id_dest    (pre_mem_to_id_dest),
+        .pre_mem_to_id_result  (pre_mem_to_id_result),
+        .pre_mem_to_id_load_op (pre_mem_to_id_load_op)
     );
 
     // ================================================================
-    // 第四阶段：访存阶段 (MEM - Memory Access)
+    // 第五阶段：访存数据阶段 (MEM - Memory Access)
     // ================================================================
     mem_stage u_mem_stage (
         .clk                  (clk),
         .reset                (reset),
         .wb_allowin           (wb_allowin),
         .mem_allowin          (mem_allowin),
-        .ex_to_mem_valid      (ex_to_mem_valid),
-        .ex_to_mem_bus        (ex_to_mem_bus),
+        .pre_mem_to_mem_valid  (pre_mem_to_mem_valid),
+        .pre_mem_to_mem_bus    (pre_mem_to_mem_bus),
         .mem_to_wb_valid      (mem_to_wb_valid),
         .mem_to_wb_bus        (mem_to_wb_bus),
         .dcache_cpu_rdata     (dcache_cpu_rdata),
@@ -522,7 +571,7 @@ module core_top (
     );
 
     // ================================================================
-    // 第五阶段：写回阶段 (WB - Write Back)
+    // 第六阶段：写回阶段 (WB - Write Back)
     // ================================================================
     wb_stage u_wb_stage (
         .clk               (clk),
@@ -632,15 +681,15 @@ module core_top (
         .if_mat        (if_mat),
         .if_cached     (if_cached),
 
-        // ex interact
-        .vaddr_from_ex (ex_to_mmu_vaddr),
+        // pre_mem interact
+        .vaddr_from_ex (pre_mem_to_mmu_vaddr),
         .vtlb_enop     (vtlb_enop),
         .ld_and_str    (ld_and_str),
-        .paddr_to_ex   (paddr_to_ex),
+        .paddr_to_ex   (paddr_to_pre_mem),
         .srch_value    (srch_value),
-        .ex_tlb_exc    (ex_tlb_exc),
-        .ex_mat        (ex_mat),
-        .ex_cached     (ex_cached),
+        .ex_tlb_exc    (pre_mem_tlb_exc),
+        .ex_mat        (pre_mem_mat),
+        .ex_cached     (pre_mem_cached),
 
         // wb interact
         .tlbrwf_en     (tlbrwf_valid),

@@ -5,55 +5,33 @@ module exe_stage (
     input  wire                     clk,                // 时钟信号
     input  wire                     reset,              // 复位信号（高有效）
     // allowin
-    input  wire                     mem_allowin,        // MEM阶段允许接收
+    input  wire                     pre_mem_allowin,    // PRE_MEM阶段允许接收
     output wire                     ex_allowin,         // EX阶段允许接收
     // 来自ID阶段
     input  wire                     id_to_ex_valid,     // ID到EX有效
     input  wire [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus,    // 来自ID的控制信号和操作数
-    // 输出给MEM阶段
-    output wire                     ex_to_mem_valid,    // EX到MEM有效
-    output wire [`EX_TO_MEM_BUS_WD-1:0] ex_to_mem_bus,  // EX到MEM总线
-    // 访问MMU信号
-    output wire [31:0]              ex_to_mmu_vaddr,    // 虚地址输出
-    output wire [35:0]              vtlb_enop,          // {tlbsrch_valid, invtlb_valid, invtlb_op, invtlb_asid, invtlb_vaddr}
-    output wire [ 1:0]              ld_and_str,         // 输出操作是load还是store
-    input  wire [31:0]              padd,               // MMU物理地址返回
-    input  wire [ 5:0]              srch_value,         // {s1_found, index}
-    input  wire [ 4:0]              mem_tlb_exc,        // MMU返回tlb异常
-    input  wire                     ex_cached,          // MMU返回是否可缓存
-    // 与 DCache 的接口
-    output wire                     dcache_cpu_req,     // DCache 请求有效
-    output wire                     dcache_cpu_op,      // DCache 操作类型（1=写）
-    output wire [`INDEX_WIDTH-1:0]   dcache_cpu_index,   // DCache 组索引
-    output wire [ `TAG_WIDTH-1:0]    dcache_cpu_tag,     // DCache 标签
-    output wire [`OFFSET_WIDTH-1:0]  dcache_cpu_offset,  // DCache 块内偏移
-    output wire [ 3:0]              dcache_cpu_wstrb,   // DCache 写字节掩码
-    output wire [31:0]              dcache_cpu_wdata,   // DCache 写数据
-    input  wire                     dcache_cpu_addr_ok, // DCache 地址就绪
-    output wire                     dcache_cpu_cached,  // DCache 访问可缓存
+    // 输出给PRE_MEM阶段
+    output wire                     ex_to_pre_mem_valid, // EX到PRE_MEM有效
+    output wire [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus, // EX到PRE_MEM总线
     // 前递控制
     output wire [ 4:0]              ex_to_id_dest,      // EX阶段写回寄存器号
     output wire [31:0]              ex_to_id_result,    // EX阶段计算结果
     output wire                     ex_to_id_load_op,   // EX阶段是否是加载指令
-    output wire                     ex_mem_exc_valid,   // EX阶段存在异常
+    output wire                     ex_exc_valid,       // EX阶段存在异常（不含TLB）
     // 异常冲刷
     input  wire                     wb_exc_valid,       // WB阶段存在异常，冲刷流水线
     input  wire                     wb_ertn_flush,      // WB阶段有ertn指令则冲刷流水线
-    input  wire                     mem_exc_valid,      // MEM阶段存在异常，防止访存
-    input  wire                     mem_ertn_flush,     // 防止ertn位于mem时,ex发出访存请求
+    input  wire                     mem_exc_valid,      // MEM阶段存在异常
+    input  wire                     mem_ertn_flush,     // MEM阶段有ertn指令
+    input  wire                     pre_mem_exc_valid,  // PRE_MEM阶段存在异常（用于除/乘法放行）
     // CSR与ERTN冒险
     output wire                     ex_csr_we,          // ex阶段确定要写csr
     output wire [13:0]              ex_csr_num,         // ex阶段写csr的号码
     output wire                     ex_ertn_flush,      // ex阶段为ertn指令
     // 读取计数器
     input  wire [63:0]              timer_value,        // 计数器数值
-    // cacop相关
-    output wire [4:0]              cacop_code,          // cache操作类型
-    output wire                    cacop_en_final,      // 有效使能（过异常门控）
-    output wire [31:0]             cacop_va,            // cache操作虚地址
-    output wire [`TAG_WIDTH-1:0]   cacop_tag,           // cache操作tag
-    input  wire                    icache_cacop_rdy,   // ICache CACOP 就绪
-    input  wire                    dcache_cacop_rdy    // DCache CACOP 就绪
+    // PRE_MEM 级 ertn（用于 div/mul 放行）
+    input  wire                     pre_mem_ertn_flush  // PRE_MEM阶段有ertn指令
     );
 
     reg  ex_valid;                               // EX阶段有效标志
@@ -61,21 +39,12 @@ module exe_stage (
     reg  [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus_r;  // 锁存的译码级数据
 
     // ========== 异常信号 ==========
-    wire fpe;
-    wire adem;
-    wire ale;
     wire [12:0] ex_exc;
-    wire        ex_exc_valid;
-    wire [15:0] ex_mem_exc;
-    wire [ 4:0] valid_mem_tlb_exc;
     wire        ex_rf_valid;     // EX阶段重取指标志
-    wire [31:0] result_or_badv;  // 若取指阶段为tlb相关异常，替换为pc
 
     // ========== 控制信号解析 ==========
-    wire [31:0] final_csr_wmask;
-    wire [31:0] final_csr_wvalue;
-    wire tlbsrch_en;                    // EXE访问tlb进行查找
-    wire invtlb_en;                     // EXE访问tlb进行选中无效
+    wire tlbsrch_en;                    // 透传
+    wire invtlb_en;                     // 透传
     wire tlbrd_en;                      // WB读tlb并写csr
     wire tlbwr_en;                      // tlbwrWB写tlb
     wire tlbfill_en;                    // tlbfillWB写tlb
@@ -114,9 +83,9 @@ module exe_stage (
     // 计数器数值筛选
     wire        res_from_timer;         // 结果来自计数器
     wire [31:0] timer_finalval;         // 筛选后的计数器读取数据
-    // DCache 接口
-    wire is_mem_inst;                   // 是访存指令
-    reg  req_already;                   // 已经发送过访存请求
+    // cacop 透传信号
+    wire [4:0]  cacop_code;             // cache操作类型
+    wire        cacop_en;               // cache操作使能
 
     `ifdef DIFFTEST_EN
     // difftest 信号
@@ -184,10 +153,16 @@ module exe_stage (
     assign diff_st_data = rkd_value;
     `endif
 
-    // ========== 输出到MEM阶段的总线 ==========
-    assign ex_to_mem_bus = {
+    // ========== 输出到PRE_MEM阶段的总线 ==========
+    // 比 EX→MEM 多 6 bit（cacop_code + cacop_en）；PRE_MEM 负责 TLB 异常合并 + CSR 字段最终化
+    assign ex_to_pre_mem_bus = {
+        cacop_code,            // 489:485 cache操作类型（PRE_MEM 消费）
+        cacop_en,              // 484     cache操作使能（PRE_MEM 消费）
+        rj_value,              // 521:490 源操作数1（PRE_MEM 用于 vtlb_enop ASID）
+        rkd_value,             // 490:459 源操作数2（PRE_MEM 用于 dcache_wdata / vtlb_enop VPPN）
+        ex_load_op,            // 458     加载指令标志（PRE_MEM 用于 ALE 检测 / ld_and_str）
         `ifdef DIFFTEST_EN
-        csr_rvalue,            // 452:421 csr读数据 for difftest
+        csr_rvalue,            // 451:420 csr读数据 for difftest
         dift_csr_rstat_en,     // 420     csr estat读使能 for difftest
         dift_inst_st_en,       // 419:412 store使能 for difftest
         dift_inst_ld_en,       // 411:404 load使能 for difftest
@@ -203,41 +178,39 @@ module exe_stage (
         tlbwr_en,              // 241     tlbwf使能
         tlbfill_en,            // 240
         ex_rf_valid,           // 239     重取指标志
-        is_mem_inst,           // 238     是访存指令
-        mem_we,                // 237     存储器写使能
+        mem_we,                // 238     存储器写使能（is_mem_inst 由 PRE_MEM 计算，不再占位）
         timer_finalval,        // 236:205 筛选后的计数器数据
         res_from_timer,        // 204     结果来自计数器
         res_from_csr,          // 203     结果来自csr寄存器堆
         ex_csr_num,            // 202:189 csr号码
         csr_rvalue,            // 188:157 csr读数据
         csr_we,                // 156     csr写使能
-        final_csr_wmask,       // 155:124 csr写掩码
-        final_csr_wvalue,      // 123:92  csr写数据
+        csr_wmask,             // 155:124 csr写掩码（原值，PRE_MEM 负责 tlbsrch 改写）
+        csr_wvalue,            // 123:92  csr写数据（原值，PRE_MEM 负责 tlbsrch 改写）
         ertn_flush,            // 91      异常返回冲刷信号
-        ex_mem_exc,               // 90:75   异常类型
+        {3'b0, ex_exc[12:0]},  // 90:75   异常类型（EX 自身异常，PRE_MEM 负责 TLB 合并）
         res_from_mem,          // 74      结果来源
         mem_sign_ext,          // 73      符号扩展标志
         mem_size,              // 72:70   访存大小
         gr_we,                 // 69      寄存器写使能
         dest,                  // 68:64   目标寄存器号
-        result_or_badv,        // 63:32   ALU计算结果
+        alu_result,            // 63:32   ALU计算结果（PRE_MEM 负责 result_or_badv 替换）
         ex_pc                  // 31:0    PC
     };
 
     // ========== 流水线控制 ==========
     assign is_div_inst   = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
     assign is_mul_inst   = |alu_op[14:12];                    // 判断是否是乘法指令（ALU操作码12-14位非零）
-    // 下游异常/flush 时放行 EX：否则 EX 等 cache 但 cache 请求被阻断 → 死锁
+    // 下游异常/flush 时放行 EX：否则 EX 等 div/mul 但 div/mul 已终止 → 死锁
     wire ex_flush_pending;
-    assign ex_flush_pending = |ex_mem_exc || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
+    assign ex_flush_pending = ex_exc_valid || pre_mem_exc_valid || pre_mem_ertn_flush || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
 
+    // 仅 div/mul 需等待；其余指令一拍过（访存/CACOP 握手已移至 PRE_MEM）
     assign ex_ready_go   = is_mul_inst ? (mul_ready || mul_ready_r) || (!ex_valid || ex_flush_pending) :
-                           is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || |ex_exc[12:3] || mem_ertn_flush || mem_exc_valid || wb_ertn_flush || wb_exc_valid) :
-                                        ex_valid && (mem_we || res_from_mem) && !(|ex_mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || ex_flush_pending :
-                                        ex_valid && cacop_en && (cacop_code[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || ex_flush_pending) :
-                                        ex_valid && cacop_en && (cacop_code[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || ex_flush_pending) : 1'b1;
-    assign ex_allowin    = !ex_valid || ex_ready_go && mem_allowin;
-    assign ex_to_mem_valid = ex_valid && ex_ready_go;
+                           is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || ex_flush_pending) :
+                           1'b1;
+    assign ex_allowin    = !ex_valid || ex_ready_go && pre_mem_allowin;
+    assign ex_to_pre_mem_valid = ex_valid && ex_ready_go;
 
     // 执行级有效标志更新
     always @(posedge clk) begin
@@ -255,35 +228,6 @@ module exe_stage (
         end
     end
 
-    // ========== DCache 请求控制 ==========
-    always @(posedge clk) begin
-        if (reset || (ex_ready_go && mem_allowin)) begin
-            req_already <= 1'b0;
-        end
-        else if ((dcache_cpu_req && dcache_cpu_addr_ok) && !(ex_ready_go && mem_allowin)) begin
-            req_already <= 1'b1;
-        end
-    end
-    reg i_cacop_req_already;
-    always @(posedge clk) begin
-        if (reset || (ex_ready_go && mem_allowin)) begin
-            i_cacop_req_already <= 1'b0;
-        end
-        else if (cacop_en && (cacop_code[2:0] == 3'd0) && icache_cacop_rdy && !(ex_ready_go && mem_allowin)) begin
-            i_cacop_req_already <= 1'b1;
-        end
-    end
-    reg d_cacop_req_already;
-    always @(posedge clk) begin
-        if (reset || (ex_ready_go && mem_allowin)) begin
-            d_cacop_req_already <= 1'b0;
-        end
-        else if (cacop_en && (cacop_code[2:0] == 3'd1) && dcache_cacop_rdy && !(ex_ready_go && mem_allowin)) begin
-            d_cacop_req_already <= 1'b1;
-        end
-    end
-    //指令往后走就清零，指令发请求且不往后走就置1。ex中的指令不存在preif中的因为冲刷和brtaken而立马变化，ex中的指令只会从id中来，如果阻塞指令就一定不变
-    assign is_mem_inst = (mem_we || res_from_mem);
 
     // ========== csr写文件写回控制 ==========
     assign ex_csr_we = csr_we && ex_valid && !ex_exc_valid; //用于csr_stall判断
@@ -315,7 +259,7 @@ module exe_stage (
 
     // 除法就绪信号需要寄存
     always @(posedge clk) begin
-        if (reset || (ex_to_mem_valid && mem_allowin)) begin
+        if (reset || (ex_to_pre_mem_valid && pre_mem_allowin)) begin
             div_ready_r <= 1'b0;
         end
         else if (div_ready) begin
@@ -325,7 +269,7 @@ module exe_stage (
 
     // 乘法就绪信号需要寄存（复用除法器模式）
     always @(posedge clk) begin
-        if (reset || (ex_to_mem_valid && mem_allowin)) begin
+        if (reset || (ex_to_pre_mem_valid && pre_mem_allowin)) begin
             mul_ready_r <= 1'b0;
         end
         else if (mul_ready) begin
@@ -333,63 +277,14 @@ module exe_stage (
         end
     end
 
-    // ========== 访问MMU信号逻辑 ==========
-    assign ex_to_mmu_vaddr = alu_result;
-    assign vtlb_enop = {
-        tlbsrch_en,
-        ex_valid && !mem_exc_valid && !(|ex_exc[12:3]) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid && !ex_rf_valid ? invtlb_en : 1'b0,
-        dest,
-        rj_value[9:0],
-        rkd_value[31:13]
-    };
-    assign final_csr_wmask  = tlbsrch_en && srch_value[5] ? 32'h8000001f : csr_wmask;
-    assign final_csr_wvalue = tlbsrch_en && srch_value[5] ? {27'b0,srch_value[4:0]} : csr_wvalue;
-    assign ld_and_str       = {ex_load_op || (cacop_en &&cacop_code[4:3] ==2'b10), mem_we} & {2{ex_valid}};
-    // ========== cacop相关信号 ==========
-    assign cacop_va    = alu_result;
-    assign cacop_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
-    wire cacop_hit_mode;
-    assign cacop_hit_mode = cacop_en && (cacop_code[4:3] == 2'b10);
-    assign cacop_en_final = cacop_en && ex_valid
-                          && !ex_exc_valid && !mem_exc_valid
-                          && !(|ex_mem_exc || ex_rf_valid)
-                          && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid
-                          && !(cacop_hit_mode && |mem_tlb_exc)
-                          && !i_cacop_req_already && !d_cacop_req_already;
-
-    // ========== DCache 输出信号 ==========
-    assign dcache_cpu_req   = ex_valid && (!mem_exc_valid && !(|ex_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);
-    // 只有访存指令，且是有效指令,并且mem和ex和wb阶段无异常、不是ertn,之前没发送过请求的指令才能发送访存请求
-    assign dcache_cpu_op    = mem_we && ex_valid && (!mem_exc_valid && !(|ex_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
-    assign dcache_cpu_index = alu_result[`OFFSET_WIDTH +: `INDEX_WIDTH];
-    assign dcache_cpu_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
-    assign dcache_cpu_offset= alu_result[0 +: `OFFSET_WIDTH];
-    assign dcache_cpu_wstrb  = mem_size[0] ? (4'b0001 << alu_result[1:0]) :          // 字节访问
-                               mem_size[1] ? (alu_result[1] ? 4'b1100 : 4'b0011) :   // 半字访问
-                               4'b1111;                                              // 字访问
-    assign dcache_cpu_wdata  = mem_size[0] ? {4{rkd_value[7:0]}} :                   // 字节：4份
-                               mem_size[1] ? {2{rkd_value[15:0]}} :                  // 半字：2份
-                               rkd_value;                                            // 字：原值
-    assign dcache_cpu_cached = ex_cached;                                            // 来自 MMU 的缓存判断
-
     // ========== 前递输出 ==========
     assign ex_to_id_dest    = dest & {5{ex_valid}} & {5{gr_we}};
     assign ex_to_id_result  = res_from_csr ? csr_rvalue :
                               alu_result;                  // 计算结果
     assign ex_to_id_load_op = ex_load_op & ex_valid;       // 加载指令标志
 
-    // ========== 检测异常与ertn ==========
-    assign fpe  = 1'b0;                                           // 基础浮点指令例外//占位
-    assign adem = 1'b0;                                           // 访存指令地址错例外//占位
-    assign ale  = (ex_valid && (ex_load_op || mem_we)) &&         // 有效的访存指令,load_op本用来表示为ld指令用于处理ld-use数据冒险，这里复用该信号
-                 ((mem_size[1] && (alu_result[0] != 1'b0)) ||     // 半字访问，地址bit0≠0
-                  (mem_size[2] && (alu_result[1:0] != 2'b00)));   // 字访问，地址bit1:0≠00
-    assign ex_exc[2:0]       = {fpe, adem, ale};
-    assign valid_mem_tlb_exc = mem_tlb_exc & {5{!ex_exc_valid && ex_valid && ld_and_str != 2'b0}};
-    assign ex_mem_exc           = {ex_exc[12:11], ex_exc[10] || valid_mem_tlb_exc[4], ex_exc[9], ex_exc[8] || valid_mem_tlb_exc[3], ex_exc[7:0], valid_mem_tlb_exc[2:0]};
-    // 将要送往mem阶段的全部例外
-    assign ex_exc_valid      = (|ex_exc || ex_rf_valid) && ex_valid;
-    assign ex_mem_exc_valid = (|ex_mem_exc || ex_rf_valid) && ex_valid;
-    assign ex_ertn_flush     = ertn_flush && ex_valid;                // ex阶段的ertn要在指令有效的时候才能发挥作用
-    assign result_or_badv = (!ex_exc[11] && |ex_exc[10:8]) ? ex_pc : alu_result;
+    // ========== 检测异常与ertn（EX 只透传 ID 异常，ALE 由 PRE_MEM 检测） ==========
+    assign ex_exc[2:0]       = 3'b0;                               // ALE 移至 PRE_MEM
+    assign ex_exc_valid  = (|ex_exc || ex_rf_valid) && ex_valid;
+    assign ex_ertn_flush     = ertn_flush && ex_valid;            // ex阶段的ertn要在指令有效的时候才能发挥作用
 endmodule

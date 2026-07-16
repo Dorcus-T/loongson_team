@@ -1,12 +1,12 @@
 ## 项目概览
 
-LoongArch (LA) 5级顺序流水线 CPU，FPGA 原型验证用。
+LoongArch (LA) 6级顺序流水线 CPU，FPGA 原型验证用。
 
 | 属性 | 值 |
 |------|-----|
-| 流水级 | IF → ID → EX → MEM → WB |
-| 前推网络 | EX/MEM/WB → ID 全旁路 |
-| 冒险处理 | Load-use 停顿、CSR/ERTN 互锁 |
+| 流水级 | IF → ID → EX → PRE_MEM → MEM → WB |
+| 前推网络 | EX/MEM/WB → ID 全旁路（PRE_MEM 参与 stall 不参与前递） |
+| 冒险处理 | Load-use 停顿（EX/PRE_MEM/MEM）、CSR/ERTN 互锁 |
 | 总线接口 | AXI3 Master，cache_axi_bridge 桥接 |
 | Cache | 2路组相联 ICache + DCache，各 8KB (256行×32B) |
 | TLB | 32项全相联 MTLB + STLB，虚拟地址翻译 |
@@ -21,7 +21,8 @@ LoongArch (LA) 5级顺序流水线 CPU，FPGA 原型验证用。
 mycpu_top.v          — 顶层 core_top，例化全部子模块
 if_stage.v           — IF: 取指，I-Cache 接口，分支/异常重定向
 id_stage.v           — ID: 译码（46KB，最大组合逻辑模块），前递选通
-ex_stage.v           — EX: 执行，ALU + D-Cache 地址 + TLB 查询
+ex_stage.v           — EX: 执行，纯 ALU（mul/div 握手），前递结果
+pre_mem_stage.v      — PRE_MEM: MMU 虚实翻译 + D-Cache 请求 + CACOP
 mem_stage.v          — MEM: 访存，D-Cache 数据读回
 wb_stage.v           — WB: 写回寄存器堆 + CSR
 alu.v                — 组合逻辑 ALU（19种运算）+ 串行除法器握手
@@ -74,10 +75,11 @@ tmp/                 — 临时文件（仿真测试等）
 - **复位极性**：外部 `aresetn` 低有效，内部 `reset` 高有效
 - **TLB 可配置**：条目数由 parameter 控制，当前 32 项
 - **SRAM 协议两通道独立**：inst_sram（取指）和 data_sram（访存）各自握手
-- **CSR 写后读冒险**：跟踪 CSR 写所在的流水级来解决 RAW
+- **CSR 写后读冒险**：跟踪 CSR 写所在的流水级（EX→PRE_MEM→MEM→WB）来解决 RAW
 - **STA 假路径**：除法器多拍迭代路径在 STA 中需设 false_path/multicycle，否则 WNS 虚高
 - **乘法器不能前递**：乘结果一拍出不来（64×64 纯组合），前递给下条指令会导致时序违规。当前设计对此未做特殊处理
 - **dcache miss 停顿**：dcache miss 时 mem_stage 一直等 data_ok，期间不能流水前进
+- **PRE_MEM 级**：MMU 翻译（va→pa）延迟在此级隐藏；若时序仍有问题可加寄存器切分 MMU→cache tag 路径
 
 # Verilog 代码格式规范
 

@@ -15,8 +15,10 @@
 // ============================================================================
 `define BR_BUS_WD           33                            // 分支总线宽度
 `define IF_TO_ID_BUS_WD     68                            // IF到ID总线
-`define ID_TO_EX_BUS_WD     413                           // ID到EX总线（+6 cacop, +114 difftest）
-`define EX_TO_MEM_BUS_WD    453                           // EX到MEM总线（+210 difftest）
+`define ID_TO_EX_BUS_WD        413                           // ID到EX总线（+6 cacop, +114 difftest）
+`define EX_TO_PRE_MEM_BUS_WD   523                           // EX到PRE_MEM总线（453 + 6 cacop + 32 rj + 32 rk + 1 load_op - 1 padding）
+`define PRE_MEM_TO_MEM_BUS_WD  453                           // PRE_MEM到MEM总线（= EX_TO_MEM_BUS_WD）
+`define EX_TO_MEM_BUS_WD       453                           // EX到MEM总线（保留兼容）
 `define MEM_TO_WB_BUS_WD    444                           // MEM到WB总线（+242 difftest）
 `define WB_TO_RF_BUS_WD     38                            // WB到寄存器文件
 `define WB_TO_CSR_BUS_WD    160                           // WB到CSR总线

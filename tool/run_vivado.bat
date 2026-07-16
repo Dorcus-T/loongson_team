@@ -1,50 +1,45 @@
 @echo off
-REM Vivado CPU-only Timing Analysis
+setlocal EnableExtensions
 
 set "VIVADO=E:\AMDDesignTools\2025.2\Vivado\bin\vivado.bat"
 
 if not exist "%VIVADO%" (
-    echo [ERROR] Vivado not found: %VIVADO%
+    echo [ERROR] Vivado not found
+    echo Path: %VIVADO%
     pause
     exit /b 1
 )
 
-set "TOOLDIR="
-if exist "Z:\home\dorcus_t\chiplab\IP\myCPU\tool\" (
-    set "TOOLDIR=Z:\home\dorcus_t\chiplab\IP\myCPU\tool"
-) else if exist "\wsl.localhost\Ubuntu-22.04\home\dorcus_t\chiplab\IP\myCPU\tool\" (
-    set "TOOLDIR=\wsl.localhost\Ubuntu-22.04\home\dorcus_t\chiplab\IP\myCPU\tool"
-)
+set "TOOLDIR=Z:\home\dorcus_t\chiplab\IP\myCPU\tool"
 
-if "%TOOLDIR%"=="" (
+if not exist "%TOOLDIR%\" (
     echo [ERROR] Cannot find tool directory
+    echo Path: %TOOLDIR%
     pause
     exit /b 1
 )
 
-pushd "%TOOLDIR%" 2>/dev/null
+pushd "%TOOLDIR%"
 if errorlevel 1 (
-    echo [ERROR] Cannot access: %TOOLDIR%
+    echo [ERROR] Cannot pushd to: %TOOLDIR%
     pause
     exit /b 1
 )
 
-set "LOG_DIR=%TOOLDIR%\runs"
-if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+set "LOGDIR=%TOOLDIR%\runs"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
 echo ============================================================
 echo Vivado CPU-only Timing Analysis
 echo ============================================================
 echo.
 
-call "%VIVADO%" -mode batch -source vivado_timing.tcl -notrace ^
-  -log "%LOG_DIR%/vivado_cpu_only.log" ^
-  -journal "%LOG_DIR%/vivado_cpu_only.jou"
+call "%VIVADO%" -mode batch -source vivado_timing.tcl -notrace -log "%LOGDIR%/vivado_cpu_only.log" -journal "%LOGDIR%/vivado_cpu_only.jou"
 
 echo.
 echo ============================================================
 echo Latest CPU-only runs:
-dir /b /ad runs\vivado_* 2>/dev/null
+dir /b /ad runs\vivado_* 2>nul
 echo ============================================================
 
 popd

@@ -313,6 +313,10 @@ module cache (
                     // 预取 miss 且预错/CACOP，尚未上总线 → 放弃，能受理即直通新请求的 LOOKUP
                     main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
                 end
+                // clean miss + bridge 空闲 → 直通 REFILL，省一拍
+                else if (rd_req_lookup && rd_rdy) begin
+                    main_next = MAIN_REFILL;
+                end
                 else if (!cache_hit) begin
                     main_next = MAIN_REPLACE;
                 end
@@ -476,8 +480,9 @@ module cache (
                     miss_replace_way <= victim_way;        // 空路优先，否则 PLRU
                 end
             end
-            // refill_cnt: REPLACE→REFILL 清零，REFILL 中自增
-            if (main_replace && need_bus_rd && rd_rdy) begin
+            // refill_cnt: LOOKUP 直通 / REPLACE → REFILL 清零，REFILL 中自增
+            if ((main_lookup && rd_req_lookup && rd_rdy)
+             || (main_replace && need_bus_rd && rd_rdy)) begin
                 miss_refill_cnt <= 2'd0;
             end
             else if (main_refill && return_valid) begin
@@ -813,11 +818,17 @@ module cache (
         end
     end
 
-    // ========== AXI 读请求 - REPLACE 时发出，进 REFILL 自动清零 ==========
-    // 预取预错/CACOP 时压掉 rd_req：REPLACE 里中止即放弃，同拍到达也不会产生孤儿 burst
-    assign rd_req = main_replace && need_bus_rd
-                  && (!miss_needs_write || wr_req_accepted)
-                  && !prefetch_abort_req;
+    // ========== AXI 读请求 - LOOKUP clean miss 直通 / REPLACE 待命 ==========
+    // clean miss 时 LOOKUP 当拍即发 rd_req，bridge 空闲可直通 REFILL 省一拍
+    wire rd_req_lookup;
+    assign rd_req_lookup = main_lookup && !cache_hit
+                         && need_bus_rd && !miss_needs_write
+                         && !prefetch_abort_req;
+
+    assign rd_req = rd_req_lookup
+                  || (main_replace && need_bus_rd
+                      && (!miss_needs_write || wr_req_accepted)
+                      && !prefetch_abort_req);
 
     wire wstrb_hw;
     assign wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);

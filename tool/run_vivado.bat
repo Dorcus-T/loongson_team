@@ -1,6 +1,5 @@
 @echo off
 setlocal EnableExtensions
-
 set "VIVADO=E:\AMDDesignTools\2025.2\Vivado\bin\vivado.bat"
 
 if not exist "%VIVADO%" (
@@ -26,20 +25,34 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "LOGDIR=%TOOLDIR%\runs"
-if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+set "RUNDIR=%TOOLDIR%\runs"
+if not exist "%RUNDIR%" mkdir "%RUNDIR%"
+
+set "TMPLOG=%RUNDIR%\vivado_cpu_temp.log"
+set "TMPJOU=%RUNDIR%\vivado_cpu_temp.jou"
 
 echo ============================================================
 echo Vivado CPU-only Timing Analysis
 echo ============================================================
 echo.
 
-call "%VIVADO%" -mode batch -source vivado_timing.tcl -notrace -log "%LOGDIR%/vivado_cpu_only.log" -journal "%LOGDIR%/vivado_cpu_only.jou"
+call "%VIVADO%" -mode batch -source vivado_timing.tcl -notrace -log "%TMPLOG%" -journal "%TMPJOU%"
 
+for /f "delims=" %%d in ('dir /b /ad /o-n "%RUNDIR%\vivado_*" 2^>nul') do (
+    set "LATEST=%RUNDIR%\%%d"
+    goto :found
+)
+goto :done
+
+:found
+if exist "%TMPLOG%" move /y "%TMPLOG%" "%LATEST%\" >nul 2>nul
+if exist "%TMPJOU%" move /y "%TMPJOU%" "%LATEST%\" >nul 2>nul
+
+:done
 echo.
 echo ============================================================
-echo Latest CPU-only runs:
-dir /b /ad runs\vivado_* 2>nul
+echo Latest runs:
+dir /b /ad "%RUNDIR%\vivado_*" 2>nul
 echo ============================================================
 
 popd

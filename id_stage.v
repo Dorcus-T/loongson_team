@@ -252,12 +252,16 @@ module id_stage (
     wire [31:0] csr_wvalue;
     wire [31:0] csr_wmask;
 
-    // ========== 操作数（支持前递） ==========
+    // ========== 操作数（支持前递，用于ALU/CSR/Store数据通路） ==========
     wire [31:0] rj_value;                // 源操作数1（经过前递）
     wire [31:0] rkd_value;               // 源操作数2（经过前递）
     wire [31:0] imm;                     // 立即数
     wire [31:0] br_offs;                 // 分支偏移量
     wire [31:0] jirl_offs;               // JIRL指令偏移量
+
+    // ========== 分支专用操作数（直连RF，不经前递，物理隔离分支数据通路） ==========
+    wire [31:0] br_rj_value;             // 分支 rj 操作数（仅来自 RF）
+    wire [31:0] br_rkd_value;            // 分支 rkd 操作数（仅来自 RF）
 
     // ========== 比较结果（用于条件分支） ==========
     wire rj_eq_rd;                       // rj == rkd
@@ -570,13 +574,17 @@ module id_stage (
                         (rd == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result) :
                        rf_rdata2;
 
-    // ========== 条件分支比较逻辑 ===========
-    assign rj_eq_rd    = (rj_value == rkd_value);
+    // ========== 分支操作数（直连RF，不经前递MUX，切断长组合路径） ==========
+    assign br_rj_value  = rf_rdata1;
+    assign br_rkd_value = rf_rdata2;
+
+    // ========== 条件分支比较逻辑（使用分支专用操作数） ===========
+    assign rj_eq_rd    = (br_rj_value == br_rkd_value);
     // 有符号减法（用于比较大小）
-    assign {adder_cout, adder_result} = {1'b0, rj_value} + {1'b0, ~rkd_value} + 1'b1;
+    assign {adder_cout, adder_result} = {1'b0, br_rj_value} + {1'b0, ~br_rkd_value} + 1'b1;
     // 有符号小于比较
-    assign rj_lt_rd    = (rj_value[31] && ~rkd_value[31]) ||
-                         ((rj_value[31] ~^ rkd_value[31]) && adder_result[31]);
+    assign rj_lt_rd    = (br_rj_value[31] && ~br_rkd_value[31]) ||
+                         ((br_rj_value[31] ~^ br_rkd_value[31]) && adder_result[31]);
     assign rj_ge_rd    = !rj_lt_rd;
     // 无符号小于比较（利用加法器进位）
     assign rj_lt_rd_u  = !adder_cout;
@@ -612,10 +620,10 @@ module id_stage (
     // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
     // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
 
-    // 分支目标地址计算
+    // 分支目标地址计算（JIRL 使用分支专用操作数，不经前递）
     assign br_target = (inst_beq || inst_bne || inst_bl || inst_b ||
                         inst_blt || inst_bge || inst_bltu || inst_bgeu) ?
-                       (id_pc + br_offs) : (rj_value + jirl_offs);
+                       (id_pc + br_offs) : (br_rj_value + jirl_offs);
 
     // 分支总线输出（跳转标志 + 目标地址）
     assign br_bus = {br_ld_stall, br_taken, br_target};
@@ -736,12 +744,11 @@ module id_stage (
                               (rk_wait && (rk == mem_to_id_dest)) ||
                               (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
 
-    // 分支指令的阻塞检测（ex阶段的指令与id阶段的跳转指令发生冒险则需要阻塞，优化逻辑提高主频）
-    assign branch_stall = ((rj_wait && (rj == ex_to_id_dest)) ||
-                           (rk_wait && (rk == ex_to_id_dest)) ||
-                           (rd_wait && (rd == ex_to_id_dest))) &&
-                          (inst_beq || inst_bne || inst_jirl || inst_bl ||
-                           inst_b || inst_blt || inst_bltu || inst_bge || inst_bgeu);
+    // 分支指令的阻塞检测（只要操作数在流水线任一阶段未写回RF，就阻塞ID等待写回后从RF读取）
+    // 分支操作数 br_rj_value/br_rkd_value 直连 RF，物理上不经过前递 MUX，切断跨级长组合路径
+    assign branch_stall = (inst_beq || inst_bne || inst_jirl || inst_bl ||
+                           inst_b || inst_blt || inst_bltu || inst_bge || inst_bgeu) &&
+                          (rj_wait || rk_wait || rd_wait);
     // csr与ertn冒险
     // 中断判断发生csr冒险(只有确定中断的时候才发生，不确定中断指令继续走就行)
     assign int_csr_stall = has_int &&

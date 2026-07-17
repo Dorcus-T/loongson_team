@@ -25,8 +25,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "LOGDIR=%TOOLDIR%\runs"
-if not exist "%LOGDIR%" mkdir "%LOGDIR%"
+set "RUNDIR=%TOOLDIR%\runs"
+if not exist "%RUNDIR%" mkdir "%RUNDIR%"
+
+REM temp log location, Tcl will move it to correct dir later
+set "TMPLOG=%RUNDIR%\vivado_full_temp.log"
+set "TMPJOU=%RUNDIR%\vivado_full_temp.jou"
 
 echo ============================================================
 echo Vivado Full Project Timing Analysis
@@ -34,12 +38,24 @@ echo Project: loongson.xpr
 echo ============================================================
 echo.
 
-call "%VIVADO%" -mode batch -source vivado_full.tcl -notrace -log "%LOGDIR%/vivado_full.log" -journal "%LOGDIR%/vivado_full.jou"
+call "%VIVADO%" -mode batch -source vivado_full.tcl -notrace -log "%TMPLOG%" -journal "%TMPJOU%"
 
+REM move log/jou into the latest run directory
+for /f "delims=" %%d in ('dir /b /ad /o-n "%RUNDIR%\full_*" 2^>nul') do (
+    set "LATEST=%RUNDIR%\%%d"
+    goto :found
+)
+goto :done
+
+:found
+if exist "%TMPLOG%" move /y "%TMPLOG%" "%LATEST%\" >nul 2>nul
+if exist "%TMPJOU%" move /y "%TMPJOU%" "%LATEST%\" >nul 2>nul
+
+:done
 echo.
 echo ============================================================
-echo Latest full-project runs:
-dir /b /ad runs\full_* 2>nul
+echo Latest runs:
+dir /b /ad "%RUNDIR%\full_*" 2>nul
 echo ============================================================
 
 popd

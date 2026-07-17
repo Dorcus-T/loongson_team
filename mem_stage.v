@@ -34,6 +34,8 @@ module mem_stage (
     reg  mem_valid;                                   // MEM阶段有效标志
     wire mem_ready_go;                                // MEM阶段就绪
     reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus_r; // 锁存的PRE_MEM级数据
+    reg  [31:0] load_data_r;                          // 锁存 cache 返回的读数据（打断长组合路径）
+    reg         load_data_latched;                    // 数据已锁存，本拍正在处理
 
     // ========== 异常信号 ==========
     wire [15:0] mem_exc;
@@ -173,14 +175,16 @@ module mem_stage (
     };
 
     // ========== 流水线控制 ==========
-    // 统一等待 cache 返回 data_ok（store 由 cache 保证恒为 1）
-    assign mem_ready_go    = is_mem_inst && !mem_exc_valid ? dcache_cpu_data_ok : 1'b1;
+    // load:  数据锁存到 load_data_r 后下一拍就绪（打断 cache→MEM→ID 长组合路径）
+    // store: 写请求已在 PRE_MEM 发出，MEM 恒就绪（避免错过 cache write_done 脉冲）
+    // 其他:  恒就绪
+    assign mem_ready_go    = (is_mem_inst && !mem_we && !mem_exc_valid) ? load_data_latched : 1'b1;
     assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
     assign mem_to_wb_valid = mem_valid && mem_ready_go;
 
     // ========== DCache 数据接受 ==========
-    // load指令有效、无异常、WB就绪时拉高，告知 cache 可弹出 FIFO 数据
-    assign dcache_cpu_accept = (mem_to_wb_valid && wb_allowin) && (is_mem_inst && !mem_we);
+    // load 等待数据时即拉高 accept，数据到达拍锁入 load_data_r
+    assign dcache_cpu_accept = mem_valid && is_mem_inst && !mem_we && !load_data_latched;
 
     // 访存级有效标志更新
     always @(posedge clk) begin
@@ -198,17 +202,43 @@ module mem_stage (
         end
     end
 
+    // ========== load 数据锁存控制（打断 cache→MEM→ID 长组合路径） ==========
+    wire latch_data;
+    assign latch_data = mem_valid && is_mem_inst && !mem_we && !load_data_latched && dcache_cpu_data_ok;
+
+    always @(posedge clk) begin
+        if (latch_data) begin
+            load_data_r <= dcache_cpu_rdata;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (reset || wb_exc_valid || wb_ertn_flush) begin
+            load_data_latched <= 1'b0;
+        end
+        else if (latch_data) begin
+            load_data_latched <= 1'b1;
+        end
+        else if (mem_ready_go && wb_allowin) begin
+            load_data_latched <= 1'b0;
+        end
+    end
+
     // ========== csr写文件写回控制 ==========
     assign mem_csr_we = csr_we && mem_valid && !mem_exc_valid;
 
     // ========== 存储器读数据处理（字节/半字/字，支持符号扩展） ==========
+    // 数据源：已锁存则用寄存器（打断长组合路径），否则直通 cache 输出
+    wire [31:0] mem_rdata;
+    assign mem_rdata = load_data_latched ? load_data_r : dcache_cpu_rdata;
+
     assign offset = alu_result[1:0];
 
     // 移位对齐（将目标数据移到最低位）
-    assign shift_data = dcache_cpu_rdata >> (offset * 8);
+    assign shift_data = mem_rdata >> (offset * 8);
 
     // 根据访存大小提取并扩展
-    assign data_result = mem_size[2] ? dcache_cpu_rdata :                                          // 字
+    assign data_result = mem_size[2] ? mem_rdata :                                             // 字
                          mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} :  // 半字
                          mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :    // 字节
                          32'b0;
@@ -222,7 +252,7 @@ module mem_stage (
     // ========== 前递输出 ==========
     assign mem_to_id_dest    = dest & {5{mem_valid}} & {5{gr_we}};
     assign mem_to_id_result  = final_result;
-    assign mem_to_id_data_ok = res_from_mem ? dcache_cpu_data_ok : 1'b1;
+    assign mem_to_id_data_ok = res_from_mem ? load_data_latched : 1'b1;
 
     // ========== 检测异常与ertn ==========
     assign mem_exc_valid  = (|mem_exc || mem_rf_valid) && mem_valid;

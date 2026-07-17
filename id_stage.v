@@ -295,7 +295,6 @@ module id_stage (
     wire csr_stall;                      // csr与ertn有关冒险
     wire int_csr_stall;                  // 中断与csr有关冒险
     wire inst_csr_stall;                 // csr指令有关冒险
-    wire br_ld_stall;                    // 分支与ld冒险，但ld没取得数据
 
     // ========== 指令字段生成 ==========
     assign op_31_26 = id_inst[31:26];
@@ -602,8 +601,6 @@ module id_stage (
         end
     end
 
-    // id，ex，mem有异常或者ertn可以不管brtaken，因为不论是否跳转都会冲刷，wb若有异常或者ertn，其发出的冲刷信号优先级也高于id的brtaken
-    assign br_ld_stall = branch_stall && load_use_stall && id_valid; // id为跳转指令，ex为load指令，此时会发出错误的brtarget，不能发出取值请求
 
     assign br_taken = (   inst_beq  &&  rj_eq_rd
                        || inst_bne  && !rj_eq_rd
@@ -626,7 +623,7 @@ module id_stage (
                        (id_pc + br_offs) : (br_rj_value + jirl_offs);
 
     // 分支总线输出（跳转标志 + 目标地址）
-    assign br_bus = {br_ld_stall, br_taken, br_target};
+    assign br_bus = {br_taken, br_target};
 
     // ========== 解析来自if阶段的总线 ==========
     assign {id_exc[8:5], id_inst, id_pc} = if_to_id_bus_r;

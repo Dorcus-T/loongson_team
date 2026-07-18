@@ -57,7 +57,10 @@ module core_top (
     output wire [ 3:0]  debug0_wb_rf_wen,          // 寄存器写使能（调试用）
     output wire [ 4:0]  debug0_wb_rf_wnum,         // 写回的寄存器号
     output wire [31:0]  debug0_wb_rf_wdata,        // 写回的数据
-    output wire [31:0]  debug0_wb_inst             // WB阶段指令
+    output wire [31:0]  debug0_wb_inst,            // WB阶段指令
+    // 性能计数器
+    output wire [31:0]  debug0_pred_cnt,           // 分支预测次数
+    output wire [31:0]  debug0_mispred_cnt         // 分支预测错误次数
 );
 
     // ========== 复位信号处理（将低有效转换为高有效） ==========
@@ -87,7 +90,38 @@ module core_top (
     wire [`MEM_TO_WB_BUS_WD-1:0]    mem_to_wb_bus;      // MEM -> WB 总线
     wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus;   // WB -> 寄存器文件
     wire [`WB_TO_CSR_BUS_WD-1:0] wb_to_csr_bus;  // WB -> CSR总线
-    wire [`BR_BUS_WD-1:0]        br_bus;         // 分支总线
+
+    // ================================================================
+    // 分支预测器连线
+    // ================================================================
+    wire [`MISPRED_BUS_WD-1:0] mispred_bus;     // 误预测纠正总线（仅 EX → IF，33 bit）
+
+    wire        bp_btb_hit;
+    wire [29:0] bp_btb_target;
+    wire [ 1:0] bp_btb_counter;
+    wire        ex_pred_event;       // EX 阶段预测事件
+    wire        ex_mispred_event;    // EX 阶段预测错误事件
+    wire [ 4:0] bp_btb_index;
+    wire        bp_ras_hit;
+    wire [29:0] bp_ras_target;
+    wire [ 3:0] bp_ras_index;
+
+    wire        bp_update_en;
+    wire [29:0] bp_update_pc;
+    wire        bp_update_is_branch;
+    wire [ 1:0] bp_update_br_type;
+    wire        bp_update_taken;
+    wire [29:0] bp_update_target;
+    wire [ 4:0] bp_update_btb_index;
+    wire        bp_update_push_ras;
+    wire [29:0] bp_update_ras_data;
+    wire        bp_update_pop_ras;
+    wire        bp_update_delete_entry;
+
+    wire        ex_mispredict;
+    wire [31:0] ex_corr_target;
+
+    assign mispred_bus = {ex_mispredict, ex_corr_target};
 
     // ========== 数据前递信号（解决RAW数据冒险） ==========
     wire [ 4:0] ex_to_id_dest;            // EX阶段写回的寄存器号
@@ -380,13 +414,39 @@ module core_top (
     `endif
 
     // ================================================================
+    // 分支预测器 (BTB + BHT + RAS)
+    // ================================================================
+    branch_predict u_branch_predict (
+        .clk                  (clk),
+        .reset                (reset),
+        .lookup_pc_i          (if_to_mmu_vaddr[31:2]),
+        .btb_hit_o            (bp_btb_hit),
+        .btb_target_o         (bp_btb_target),
+        .btb_counter_o        (bp_btb_counter),
+        .btb_index_o          (bp_btb_index),
+        .ras_hit_o            (bp_ras_hit),
+        .ras_target_o         (bp_ras_target),
+        .ras_index_o          (bp_ras_index),
+        .update_en            (bp_update_en),
+        .update_pc            (bp_update_pc),
+        .update_is_branch     (bp_update_is_branch),
+        .update_br_type       (bp_update_br_type),
+        .update_taken         (bp_update_taken),
+        .update_target        (bp_update_target),
+        .update_btb_index     (bp_update_btb_index),
+        .update_push_ras      (bp_update_push_ras),
+        .update_ras_data      (bp_update_ras_data),
+        .update_pop_ras       (bp_update_pop_ras),
+        .update_delete_entry  (bp_update_delete_entry)
+    );
+
+    // ================================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
     // ================================================================
     if_stage u_if_stage (
         .clk                (clk),
         .reset              (reset),
         .id_allowin         (id_allowin),
-        .br_bus             (br_bus),
         .if_to_id_valid     (if_to_id_valid),
         .if_to_id_bus       (if_to_id_bus),
         .icache_cpu_req   (icache_cpu_req),
@@ -410,7 +470,15 @@ module core_top (
         .exc_entry          (exc_entry),
         .exc_back_pc        (exc_back_pc),
         .rf_valid           (rf_valid),
-        .rf_pc              (wb_pc_back)
+        .rf_pc              (wb_pc_back),
+        .bp_btb_hit         (bp_btb_hit),
+        .bp_btb_target      (bp_btb_target),
+        .bp_btb_counter     (bp_btb_counter),
+        .bp_btb_index       (bp_btb_index),
+        .bp_ras_hit         (bp_ras_hit),
+        .bp_ras_target      (bp_ras_target),
+        .bp_ras_index       (bp_ras_index),
+        .mispred_bus        (mispred_bus)
     );
 
     // ================================================================
@@ -425,7 +493,6 @@ module core_top (
         .if_to_id_bus      (if_to_id_bus),
         .id_to_ex_valid    (id_to_ex_valid),
         .id_to_ex_bus      (id_to_ex_bus),
-        .br_bus            (br_bus),
         .wb_to_rf_bus      (wb_to_rf_bus),
         .ex_to_id_dest     (ex_to_id_dest),
         .mem_to_id_dest    (mem_to_id_dest),
@@ -490,7 +557,22 @@ module core_top (
         .ex_csr_num         (ex_csr_num),
         .ex_ertn_flush          (ex_ertn_flush),
         .timer_value            (timer_value),
-        .pre_mem_ertn_flush     (pre_mem_ertn_flush)
+        .pre_mem_ertn_flush     (pre_mem_ertn_flush),
+        .ex_mispredict          (ex_mispredict),
+        .ex_corr_target         (ex_corr_target),
+        .pred_event             (ex_pred_event),
+        .mispred_event          (ex_mispred_event),
+        .bp_update_en           (bp_update_en),
+        .bp_update_pc           (bp_update_pc),
+        .bp_update_is_branch    (bp_update_is_branch),
+        .bp_update_br_type      (bp_update_br_type),
+        .bp_update_taken        (bp_update_taken),
+        .bp_update_target       (bp_update_target),
+        .bp_update_btb_index    (bp_update_btb_index),
+        .bp_update_push_ras     (bp_update_push_ras),
+        .bp_update_ras_data     (bp_update_ras_data),
+        .bp_update_pop_ras      (bp_update_pop_ras),
+        .bp_update_delete_entry (bp_update_delete_entry)
     );
 
     // ================================================================
@@ -706,13 +788,35 @@ module core_top (
     );
 
     // ================================================================
-    // 计数器
+    // 64位周期计数器
     // ================================================================
     timer_64bit u_timer_64bit (
         .clk         (clk),
         .reset       (reset),
         .timer_value (timer_value)
     );
+
+    // ================================================================
+    // 分支预测性能计数器
+    // ================================================================
+    reg [31:0] pred_cnt;
+    reg [31:0] mispred_cnt;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            pred_cnt   <= 32'd0;
+            mispred_cnt <= 32'd0;
+        end
+        else begin
+            if (ex_pred_event)
+                pred_cnt <= pred_cnt + 32'd1;
+            if (ex_mispred_event)
+                mispred_cnt <= mispred_cnt + 32'd1;
+        end
+    end
+
+    assign debug0_pred_cnt   = pred_cnt;
+    assign debug0_mispred_cnt = mispred_cnt;
 
     // ================================================================
     // ICache

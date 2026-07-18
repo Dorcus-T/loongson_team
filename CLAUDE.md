@@ -19,7 +19,8 @@ LoongArch (LA) 6级顺序流水线 CPU，FPGA 原型验证用。
 
 ```
 mycpu_top.v          — 顶层 core_top，例化全部子模块
-if_stage.v           — IF: 取指，I-Cache 接口，分支/异常重定向
+branch_predict.v     — BTB(32项)+BHT(2bit)+RAS(16CAM+8栈) 分支预测器
+if_stage.v           — IF: 取指，I-Cache 接口，分支/异常重定向，pre_if 流水级+预测集成
 id_stage.v           — ID: 译码（46KB，最大组合逻辑模块），前递选通
 ex_stage.v           — EX: 执行，纯 ALU（mul/div 握手），前递结果
 pre_mem_stage.v      — PRE_MEM: MMU 虚实翻译 + D-Cache 请求 + CACOP
@@ -80,6 +81,16 @@ tmp/                 — 临时文件（仿真测试等）
 - **乘法器不能前递**：乘结果一拍出不来（64×64 纯组合），前递给下条指令会导致时序违规。当前设计对此未做特殊处理
 - **dcache miss 停顿**：dcache miss 时 mem_stage 一直等 data_ok，期间不能流水前进
 - **PRE_MEM 级**：MMU 翻译（va→pa）延迟在此级隐藏；若时序仍有问题可加寄存器切分 MMU→cache tag 路径
+- **分支预测 0 气泡路径**：BTB/RAS 组合输出不经寄存器直连 pre_if_pc_r 的 D 端 MUX。
+  若 STA 显示此路径不收敛，在 BTB target 输出后加寄存改 1 气泡方案。
+- **分支预测器冷启动**：复位后 BTB/RAS CAM 全无效，首次遇到分支走原有 br_bus 路径，
+  ID 级触发建项，第二次才预测。
+- **RAS 栈溢出**：8 项栈，push 超过深度时静默丢弃最早项（不报错），
+  pop 时栈空则忽略（不报错）。
+- **mispred_bus 优先级**：ex_mispredict > id_mispredict。
+  同一周期 ID 和 EX 同时发 mispredict 时（几乎不会发生），取 EX 的纠正地址。
+- **ID→EX 总线扩展**：预测透传字段（pred_* + br_type + br_taken + br_target）放在总线尾部，
+  保持 difftest 字段 bit 位置不变。
 
 # Verilog 代码格式规范
 

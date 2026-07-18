@@ -12,8 +12,6 @@ module id_stage (
     // 输出给ex阶段
     output wire                         id_to_ex_valid,      // ID到EX的有效标志
     output wire [`ID_TO_EX_BUS_WD-1:0]  id_to_ex_bus,        // ID到EX的控制总线
-    // 输出给if阶段的分支总线
-    output wire [`BR_BUS_WD-1:0]        br_bus,              // 分支总线：{跳转标志, 跳转目标}
     // wb阶段输入的寄存器文件总线
     input  wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,        // WB阶段写回数据
     // 前递控制
@@ -215,9 +213,6 @@ module id_stage (
     wire src_reg_is_rd;                  // 源寄存器是否使用rd（用于条件分支）
     wire [4:0] dest;                     // 目的寄存器号
     wire ertn_flush;                     // 异常返回冲刷信号
-    wire br_taken;                       // 分支是否发生
-    reg  new_br;                         // 跳转指令只能发送一次跳转信号
-    wire [31:0] br_target;               // 分支目标地址
     wire [31:0] id_pc;                   // 当前指令的PC值
     wire [31:0] id_inst;                 // 当前指令的机器码
     wire [2:0] mem_size;                 // 访存大小：0=字节，1=半字，2=字
@@ -257,20 +252,6 @@ module id_stage (
     wire [31:0] rkd_value;               // 源操作数2（经过前递）
     wire [31:0] imm;                     // 立即数
     wire [31:0] br_offs;                 // 分支偏移量
-    wire [31:0] jirl_offs;               // JIRL指令偏移量
-
-    // ========== 分支专用操作数（直连RF，不经前递，物理隔离分支数据通路） ==========
-    wire [31:0] br_rj_value;             // 分支 rj 操作数（仅来自 RF）
-    wire [31:0] br_rkd_value;            // 分支 rkd 操作数（仅来自 RF）
-
-    // ========== 比较结果（用于条件分支） ==========
-    wire rj_eq_rd;                       // rj == rkd
-    wire rj_lt_rd;                       // rj < rkd（有符号）
-    wire rj_lt_rd_u;                     // rj < rkd（无符号）
-    wire rj_ge_rd;                       // rj >= rkd（有符号）
-    wire rj_ge_rd_u;                     // rj >= rkd（无符号）
-    wire adder_cout;                     // 加法器进位输出
-    wire [31:0] adder_result;            // 加法器结果
 
     `ifdef DIFFTEST_EN
     // ========== difftest 信号 ==========
@@ -291,7 +272,6 @@ module id_stage (
     // ========== 流水线停顿检测 ==========
     wire id_load_op;                     // ID阶段是否为加载指令
     wire load_use_stall;                 // load-use冒险需要停顿
-    wire branch_stall;                   // 分支指令数据冒险需要停顿
     wire csr_stall;                      // csr与ertn有关冒险
     wire int_csr_stall;                  // 中断与csr有关冒险
     wire inst_csr_stall;                 // csr指令有关冒险
@@ -471,9 +451,6 @@ module id_stage (
     assign br_offs = need_si26 ? { {4{i26[25]}}, i26[25:0], 2'b0 } :
                      { {14{i16[15]}}, i16[15:0], 2'b0 };
 
-    // JIRL指令的偏移量（同样左移2位）
-    assign jirl_offs = { {14{i16[15]}}, i16[15:0], 2'b0 };
-
     // ========== 控制信号生成 ==========
     assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_blt |
                            inst_bltu | inst_bge | inst_bgeu | inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;  // rkd数据源于rd寄存器
@@ -573,60 +550,49 @@ module id_stage (
                         (rd == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result) :
                        rf_rdata2;
 
-    // ========== 分支操作数（直连RF，不经前递MUX，切断长组合路径） ==========
-    assign br_rj_value  = rf_rdata1;
-    assign br_rkd_value = rf_rdata2;
+    // ============================================================
+    // 预测信息解析 + 分支辅助信号生成（仅透传给 EX，不做决策）
+    // ============================================================
+    // 解析来自if阶段的总线（含预测信息）
+    wire        id_pred_valid;
+    wire        id_pred_taken;
+    wire [29:0] id_pred_target;
+    wire        id_pred_is_ras;
+    wire [ 4:0] id_pred_btb_index;
+    wire [ 3:0] id_pred_ras_index;
+    assign {
+        id_exc[8:5],
+        id_inst,
+        id_pc,
+        id_pred_valid,
+        id_pred_taken,
+        id_pred_target,
+        id_pred_is_ras,
+        id_pred_btb_index,
+        id_pred_ras_index
+    } = if_to_id_bus_r;
 
-    // ========== 条件分支比较逻辑（使用分支专用操作数） ===========
-    assign rj_eq_rd    = (br_rj_value == br_rkd_value);
-    // 有符号减法（用于比较大小）
-    assign {adder_cout, adder_result} = {1'b0, br_rj_value} + {1'b0, ~br_rkd_value} + 1'b1;
-    // 有符号小于比较
-    assign rj_lt_rd    = (br_rj_value[31] && ~br_rkd_value[31]) ||
-                         ((br_rj_value[31] ~^ br_rkd_value[31]) && adder_result[31]);
-    assign rj_ge_rd    = !rj_lt_rd;
-    // 无符号小于比较（利用加法器进位）
-    assign rj_lt_rd_u  = !adder_cout;
-    assign rj_ge_rd_u  = !rj_lt_rd_u;
-    // ========== 分支控制逻辑 ==========
-    always @(posedge clk) begin
-        if (reset) begin
-            new_br <= 1'b0;
-        end
-        else if (if_to_id_valid && id_allowin) begin
-            new_br <= 1'b1;
-        end
-        else if (br_taken) begin
-            new_br <= 1'b0;
-        end
-    end
+    // 当前指令是否是分支
+    wire id_is_branch;
+    assign id_is_branch = inst_beq | inst_bne | inst_bl | inst_b |
+                          inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_jirl;
 
+    // 分支类型编码：00=无条件(B/JIRL call) 01=条件 10=call(BL) 11=ret(JIRL with rd=0,rj=1,offs=0)
+    wire [1:0] id_br_type;
+    assign id_br_type = inst_bl                                                 ? 2'b10 :  // call
+                        (inst_jirl && rd == 5'd0 && rj == 5'd1 && i16 == 16'd0) ? 2'b11 :  // ret
+                        (inst_beq | inst_bne | inst_blt
+                        | inst_bge | inst_bltu | inst_bgeu)                     ? 2'b01 :  // 条件分支
+                                                                                  2'b00 ;  // 无条件跳转(B/JIRL call)
 
-    assign br_taken = (   inst_beq  &&  rj_eq_rd
-                       || inst_bne  && !rj_eq_rd
-                       || inst_blt  &&  rj_lt_rd
-                       || inst_bge  &&  rj_ge_rd
-                       || inst_bltu &&  rj_lt_rd_u
-                       || inst_bgeu &&  rj_ge_rd_u
-                       || inst_jirl
-                       || inst_bl
-                       || inst_b
-                    ) && id_valid && !load_use_stall && !branch_stall && new_br
-                      && !(mem_ertn_flush || mem_exc_valid || ex_ertn_flush || pre_mem_ertn_flush || ex_exc_valid || pre_mem_exc_valid) && !id_exc_valid;
-    // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
-    // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
-    // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
-
-    // 分支目标地址计算（JIRL 使用分支专用操作数，不经前递）
-    assign br_target = (inst_beq || inst_bne || inst_bl || inst_b ||
-                        inst_blt || inst_bge || inst_bltu || inst_bgeu) ?
-                       (id_pc + br_offs) : (br_rj_value + jirl_offs);
-
-    // 分支总线输出（跳转标志 + 目标地址）
-    assign br_bus = {br_taken, br_target};
-
-    // ========== 解析来自if阶段的总线 ==========
-    assign {id_exc[8:5], id_inst, id_pc} = if_to_id_bus_r;
+    // 条件分支比较码（供 EX 用 ALU 操作数重算方向）
+    wire [2:0] cond_cmp;
+    assign cond_cmp = inst_beq  ? 3'b000 :
+                      inst_bne  ? 3'b001 :
+                      inst_blt  ? 3'b010 :
+                      inst_bge  ? 3'b011 :
+                      inst_bltu ? 3'b100 :
+                      inst_bgeu ? 3'b101 : 3'b110;
 
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装
@@ -672,11 +638,22 @@ module id_stage (
         src2_is_imm,    // 21     操作数2来源
         src1_is_pc,     // 20     操作数1来源
         id_load_op,     // 19     是否为加载指令（用于load-use检测）
-        alu_op          // 18:0   ALU操作码
-    };
+        alu_op,          // 18:0   ALU操作码
+        // 预测透传（42 bit）+ br_type（2 bit）+ cond_cmp（3 bit）+ br_offs（32 bit）
+        id_pred_valid,        // 1   预测有效
+        id_pred_taken,        // 1   预测方向
+        id_pred_target,       // 30  预测目标 PC[31:2]
+        id_pred_is_ras,       // 1   RAS 预测
+        id_pred_btb_index,    // 5   BTB 命中索引
+        id_pred_ras_index,    // 4   RAS 命中索引
+        id_br_type,           // 2   分支类型
+        cond_cmp,             // 3   条件分支比较码
+        br_offs,              // 32  分支偏移量（已符号扩展+左移2位，覆盖B/BL的26位和条件/JIRL的16位）
+        id_is_branch          // 1   是否为分支指令
+    };  // 总计 413 + 80 = 493
 
     // ========== 流水线控制 ==========
-    assign id_ready_go    = (!load_use_stall && !branch_stall && !csr_stall || id_exc_valid);
+    assign id_ready_go    = (!load_use_stall && !csr_stall || id_exc_valid);
     // wb发来冲刷脉冲就阻塞，正常情况下，有阻塞但是id如果是异常指令就不应该阻，异常指令最好快点到wb发冲刷信号
     assign id_allowin     = !id_valid || (id_ready_go && ex_allowin);
     assign id_to_ex_valid = id_valid && id_ready_go;
@@ -741,11 +718,6 @@ module id_stage (
                               (rk_wait && (rk == mem_to_id_dest)) ||
                               (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
 
-    // 分支指令的阻塞检测（只要操作数在流水线任一阶段未写回RF，就阻塞ID等待写回后从RF读取）
-    // 分支操作数 br_rj_value/br_rkd_value 直连 RF，物理上不经过前递 MUX，切断跨级长组合路径
-    assign branch_stall = (inst_beq || inst_bne || inst_jirl || inst_bl ||
-                           inst_b || inst_blt || inst_bltu || inst_bge || inst_bgeu) &&
-                          (rj_wait || rk_wait || rd_wait);
     // csr与ertn冒险
     // 中断判断发生csr冒险(只有确定中断的时候才发生，不确定中断指令继续走就行)
     assign int_csr_stall = has_int &&

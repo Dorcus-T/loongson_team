@@ -472,34 +472,28 @@ module mycpu_top (
     );
 
     // ================================================================
-    // ICache
+    // ICache（只读：无 store、无 WB、无 VC、有预取）
     // ================================================================
-    cache #(
-        .IS_ICACHE    (1),
-        .VC_EN        (1'b0)
-    ) u_icache (
+    icache u_icache (
         .clk          (clk),
         .resetn       (~reset),
         // CPU 接口
         .cpu_req      (icache_cpu_req),
-        .cpu_op       (icache_cpu_op),
         .cpu_index    (icache_cpu_index),
         .cpu_tag      (icache_cpu_tag),
         .cpu_offset   (icache_cpu_offset),
-        .cpu_wstrb    (icache_cpu_wstrb),
-        .cpu_wdata    (icache_cpu_wdata),
         .cpu_cached   (icache_cpu_cached && !icache_cacop_en),
         .cpu_addr_ok  (icache_cpu_addr_ok),
         .cpu_data_ok  (icache_cpu_data_ok),
         .cpu_rdata    (icache_cpu_rdata),
-        .cpu_accept       (icache_cpu_accept),
+        .cpu_accept   (icache_cpu_accept),
         // CACOP
-        .cacop_en         (icache_cacop_en),
-        .cacop_code       (cacop_code),
-        .cacop_va         (cacop_va),
-        .cacop_tag        (cacop_tag),
-        .cacop_rdy        (icache_cacop_rdy),
-        // AXI 接口
+        .cacop_en     (icache_cacop_en),
+        .cacop_code   (cacop_code),
+        .cacop_va     (cacop_va),
+        .cacop_tag    (cacop_tag),
+        .cacop_rdy    (icache_cacop_rdy),
+        // AXI 读接口
         .rd_req       (icache_rd_req),
         .rd_type      (icache_rd_type),
         .rd_addr      (icache_rd_addr),
@@ -507,20 +501,13 @@ module mycpu_top (
         .return_valid (icache_return_valid),
         .return_last  (icache_return_last),
         .return_data  (icache_return_data),
-        .wr_req       (),
-        .wr_type      (),
-        .wr_addr      (),
-        .wr_wstrb     (),
-        .wr_data      (),
-        .wr_rdy       (1'b1),
-        .wr_done      (1'b0),
         .bus_accept   (icache_bus_accept)
     );
 
     // ================================================================
-    // DCache
+    // DCache（读写：有 store、WB、VC、CACOP，无预取）
     // ================================================================
-    cache u_dcache (
+    dcache u_dcache (
         .clk          (clk),
         .resetn       (~reset),
         // CPU 接口

@@ -51,12 +51,13 @@ module cache (
     localparam PLRU_W      = `WAY_NUM - 1;       // 每组树状 PLRU 状态位数
     localparam TAGV_BYTES  = (`TAG_WIDTH + 1 + 7) / 8;   // tagv 占用字节数，ceil((TAG_WIDTH+1)/8)
 
-    localparam MAIN_IDLE    = 3'd0;
-    localparam MAIN_LOOKUP  = 3'd1;
-    localparam MAIN_SWAP    = 3'd2;   // WB/refill 写窗口冲突修复：重读一拍后回 LOOKUP
-    localparam MAIN_REPLACE = 3'd3;
-    localparam MAIN_REFILL  = 3'd4;
-    localparam MAIN_VCFILL  = 3'd5;
+    // 独热码：消除状态解码组合逻辑，main_idle/lookup/... 退化为 bit 索引
+    localparam MAIN_IDLE    = 5'b00001;
+    localparam MAIN_LOOKUP  = 5'b00010;
+    localparam MAIN_SWAP    = 5'b00100;   // WB/refill 写窗口冲突修复：重读一拍后回 LOOKUP
+    localparam MAIN_REPLACE = 5'b01000;
+    localparam MAIN_REFILL  = 5'b10000;
+    // MAIN_VCFILL 已删除：干净 VC 交换在 LOOKUP 当拍完成
 
     localparam WB_IDLE  = 1'd0;
     localparam WB_WRITE = 1'd1;
@@ -117,8 +118,8 @@ module cache (
     assign cacop_index = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
     assign cacop_way = cacop_va[WAY_IDX_W-1:0];
     // ========== 状态寄存器 ==========
-    reg  [2:0] main_state;
-    reg  [2:0] main_next;
+    reg  [4:0] main_state;
+    reg  [4:0] main_next;
     reg        wb_state;
     reg        wb_next;
 
@@ -182,7 +183,6 @@ module cache (
     wire main_swap    = (main_state == MAIN_SWAP);
     wire main_replace = (main_state == MAIN_REPLACE);
     wire main_refill  = (main_state == MAIN_REFILL);
-    wire main_vcfill  = (main_state == MAIN_VCFILL);
     wire wb_idle      = (wb_state == WB_IDLE);
     wire wb_write     = (wb_state == WB_WRITE);
 
@@ -263,20 +263,41 @@ module cache (
             end
     end
 
-    // 沿树状 PLRU 位从根走到叶，得到牺牲路
-    reg  [WAY_IDX_W:0]   plru_node;
-    reg  [WAY_IDX_W-1:0] plru_victim;
-    integer plv;
+    // ========== 树状伪 LRU - 替换路选择（预计算） ==========
+    // 接受拍预先算好 victim_way 并锁存，LOOKUP 拍从 FF 出发
+    // 目的：把 256:1 mux + 树状遍历从 LOOKUP 关键路径搬到接受拍
+    // 背靠背同 set 访问：PLRU 更新比预读晚一拍 → 牺牲路可能非最优，不破坏正确性
+    wire pre_plru_en;
+    wire [`INDEX_WIDTH-1:0] pre_plru_index;
+    assign pre_plru_en    = accept_new_req || launch_prefetch;
+    assign pre_plru_index = launch_prefetch ? launch_addr[`OFFSET_WIDTH +: `INDEX_WIDTH]
+                                            : ram_raddr_req;
+
+    // 预计算：沿树状 PLRU 位从根走到叶
+    reg  [WAY_IDX_W:0]   plru_node_pre;
+    integer plv_pre;
     always @(*) begin
-        plru_node = 1;                                  // 根节点 = 1
-        for (plv = 0; plv < WAY_IDX_W; plv = plv + 1)
-            plru_node = (plru_node << 1) + plru[req_index][plru_node-1];
-        plru_victim = plru_node - `WAY_NUM;
+        plru_node_pre = 1;                                  // 根节点 = 1
+        for (plv_pre = 0; plv_pre < WAY_IDX_W; plv_pre = plv_pre + 1)
+            plru_node_pre = (plru_node_pre << 1) + plru[pre_plru_index][plru_node_pre-1];
+    end
+    wire [WAY_IDX_W-1:0] plru_victim_pre;
+    assign plru_victim_pre = plru_node_pre - `WAY_NUM;
+
+    // 锁存预计算结果
+    reg  [WAY_IDX_W-1:0] plru_victim_r;
+    always @(posedge clk) begin
+        if (~resetn) begin
+            plru_victim_r <= {WAY_IDX_W{1'b0}};
+        end
+        else if (pre_plru_en) begin
+            plru_victim_r <= plru_victim_pre;
+        end
     end
 
-    // 牺牲路：空路优先，否则 PLRU
+    // 牺牲路：空路优先，否则预计算的 PLRU 结果
     wire [WAY_IDX_W-1:0] victim_way;
-    assign victim_way = has_invalid ? invalid_way : plru_victim;
+    assign victim_way = has_invalid ? invalid_way : plru_victim_r;
 
     // ========== VC 查找 - 与 L1 LOOKUP 同拍组合比较（全地址匹配） ==========
     wire [VC_DEPTH-1:0] vc_match;
@@ -300,16 +321,20 @@ module cache (
             if (vc_match[vhi]) vc_hit_idx = vhi[VC_IDX_W-1:0];
     end
 
-    // 行/字选择：一热 OR 归约（同 hit_word 风格），数据路径不经过 vc_hit_idx 优先编码
+    // 行/字选择：仅在 VC 活跃时计算，其余拍输出全 0 减少翻转
+    wire vc_active;
+    assign vc_active = (main_lookup && vc_hit) || vc_fill_lookup || vc_fill_replace;
     reg  [127:0] vc_line;
     reg  [31:0]  vc_word;
     integer vli;
     always @(*) begin
         vc_line = 128'b0;
         vc_word = 32'b0;
-        for (vli = 0; vli < VC_DEPTH; vli = vli + 1) begin
-            vc_line = vc_line | ({128{vc_match[vli]}} & vc_data[vli]);
-            vc_word = vc_word | ({32{vc_match[vli]}} & vc_data[vli][{req_offset[3:2], 5'b0} +: 32]);
+        if (vc_active) begin
+            for (vli = 0; vli < VC_DEPTH; vli = vli + 1) begin
+                vc_line = vc_line | ({128{vc_match[vli]}} & vc_data[vli]);
+                vc_word = vc_word | ({32{vc_match[vli]}} & vc_data[vli][{req_offset[3:2], 5'b0} +: 32]);
+            end
         end
     end
 
@@ -335,11 +360,10 @@ module cache (
                          : req_cached;
 
     // 窗口一：accept 拍与 WB 写同拍，该 way 的 bank 读被抢占丢弃（跨 set 也算）
-    // 窗口二：本 LOOKUP 拍 WB 正写 victim 行本行，读早于写，数据/脏位双陈旧
+    // 窗口二：已由 WB 前推到 victim 行数据路径覆盖（replace_line_data 合并 wb_wdata）
     wire wb_collide;
     assign wb_collide = victim_needed && tagv_rdata[use_way][0]
-                      && (  (collide_valid_r && collide_wayhit_r[use_way])
-                         || (wb_write && (wb_index == req_index) && wb_way_hit[use_way]) );
+                      && (collide_valid_r && collide_wayhit_r[use_way]);
 
     // 交换写占用 LOOKUP 当拍的 bank 写口：WB 同拍写同一 way（跨 set）则借 SWAP 让位
     wire vc_fill_conflict;
@@ -415,17 +439,22 @@ module cache (
                     main_next = MAIN_SWAP;
                 end
                 else if (vc_fill_lookup) begin
-                    main_next = MAIN_VCFILL;    // 干净/空 victim → 进入独立交换状态
+                    // 干净/空 victim → 交换写在 LOOKUP 当拍完成，直接回 IDLE
+                    main_next = MAIN_IDLE;
                 end
                 else if (vc_serve) begin
                     if (prefetch_active) begin
                         main_next = MAIN_IDLE;      // 预取 VC 命中：行已缓存，无动作
                     end
                     else begin
-                        main_next = MAIN_REPLACE;   // 脏 victim → 写通道踢出脏行
+                        main_next = MAIN_REPLACE;   // 脏 victim → 走 REPLACE 写通道踢出
                     end
                 end
-                // clean miss + bridge 空闲 → 直通 REFILL，省一拍
+                // 双发成功：rd + wr bridge 都接受 → 直通 REFILL
+                else if (rd_req_lookup && wr_req_lookup && rd_rdy && wr_rdy) begin
+                    main_next = MAIN_REFILL;
+                end
+                // 只读直通：干净 miss rd 被接受，或者脏 miss rd 先被接受
                 else if (rd_req_lookup && rd_rdy) begin
                     main_next = MAIN_REFILL;
                 end
@@ -442,12 +471,9 @@ module cache (
             MAIN_SWAP: begin
                 main_next = MAIN_LOOKUP;   // 重读拍结束，回 LOOKUP 重判
             end
-            MAIN_VCFILL: begin
-                main_next = MAIN_IDLE;     // 交换写完成，回 IDLE
-            end
             MAIN_REPLACE: begin
                 if (prefetch_abort_req) begin
-                    // 预错/CACOP 且读请求尚未发出 → 放弃，能受理即直通新请求的 LOOKUP
+                    // 预错/CACOP 且请求尚未完全发出 → 放弃，能受理即直通新请求的 LOOKUP
                     main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
                 end
                 else if (vc_swap_wb_r) begin
@@ -456,12 +482,12 @@ module cache (
                     main_next = (wr_req && wr_rdy) ? MAIN_IDLE : MAIN_REPLACE;
                 end
                 else if (need_bus_rd && !miss_needs_write) begin
-                    // 只读：干净 miss，发 rd_req 等 rd_rdy
+                    // 干净 miss：rd 已在 LOOKUP 发出，等 rd_rdy
                     main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
                 end
                 else if (need_bus_rd && miss_needs_write) begin
-                    // 又读又写：脏 miss，先 wr 握手再 rd
-                    if (wr_req_accepted) begin
+                    // 脏 miss：wr / rd 已在 LOOKUP 发出（或 wr 未发在等），逐个等握手
+                    if (wr_req_accepted || !(cached_wr || uncached_wr)) begin
                         main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
                     end
                     else begin
@@ -710,17 +736,32 @@ module cache (
         end
     end
 
-    // ========== VC 交换写 - 独立 VCFILL 状态 + 脏路径事件驱动 ==========
-    // 干净/空 victim：LOOKUP → VCFILL 一拍完成交换写（BRAM 写使能从触发器出发，切短组合路径）
+    // ========== WB 前推至 victim 行 — 窗口二消除 ==========
+    // LOOKUP 拍 WB 写同组同路时记录；REPLACE 拍替换行拼接时合并 wb_wdata 修正
+    // 替换行数据不再缺 store 内容 → 无需 SWAP 重读
+    reg wb_collide_lookup_r;
+    always @(posedge clk) begin
+        if (~resetn) begin
+            wb_collide_lookup_r <= 1'b0;
+        end
+        else if (main_lookup && !cache_hit && victim_needed
+                 && wb_write && (wb_index == req_index) && wb_way_hit[use_way]) begin
+            wb_collide_lookup_r <= 1'b1;
+        end
+        else if (!main_replace) begin
+            wb_collide_lookup_r <= 1'b0;
+        end
+    end
+
+    // ========== VC 交换写 - LOOKUP 当拍完成 / REPLACE 脏路径事件驱动 ==========
+    // 干净/空 victim：LOOKUP 当拍执行交换写，直接回 IDLE
     // 脏 victim：REPLACE 写握手拍完成（REPLACE 期间无读，写口空闲）
-    wire vc_fill_lookup;    // LOOKUP → VCFILL 的转移条件（仅状态机使用）
-    wire vc_fill_vcfill;    // VCFILL 拍实际执行交换写
-    wire vc_fill_replace;
+    wire vc_fill_lookup;    // LOOKUP 当拍交换写（干净/空 victim）
+    wire vc_fill_replace;   // REPLACE 写握手拍交换写（脏 victim）
     wire vc_fill;
     assign vc_fill_lookup  = vc_serve && !victim_dirty && !prefetch_active && !goto_swap;
-    assign vc_fill_vcfill  = main_vcfill;
     assign vc_fill_replace = main_replace && vc_swap_wb_r && wr_req && wr_rdy;
-    assign vc_fill         = vc_fill_vcfill || vc_fill_replace;
+    assign vc_fill         = vc_fill_lookup || vc_fill_replace;
 
     wire [WAY_IDX_W-1:0] vc_fill_way;
     assign vc_fill_way = vc_fill_replace ? miss_replace_way : victim_way;
@@ -764,7 +805,9 @@ module cache (
             // store miss + VC hit + 脏 victim：走 REPLACE 写回 + 握手拍换入，entry 在此清空
             // VC 交换写：干净有效 victim 回填原 entry；空 victim / 脏路径清 entry
             if (vc_fill) begin
-                if (vc_fill_vcfill && tagv_rdata[victim_way][0]) begin
+                // 干净交换（vc_fill_lookup）：victim 回填 VC entry
+                // 脏交换（vc_fill_replace）：清空 VC entry
+                if (!vc_fill_replace && tagv_rdata[victim_way][0]) begin
                     vc_addr[vc_hit_idx]  <= {tagv_rdata[victim_way][`TAG_WIDTH:1], req_index};
                     vc_data[vc_hit_idx]  <= {bank_rdata[victim_way][3], bank_rdata[victim_way][2],
                                              bank_rdata[victim_way][1], bank_rdata[victim_way][0]};
@@ -784,24 +827,35 @@ module cache (
         end
     end
 
-    // ========== 替换行 128bit 数据 - 组合逻辑 ==========
+    // ========== 替换行 128bit 数据（含 WB 前推） ==========
+    // 窗口二修复：若 LOOKUP 拍 WB 写同组同路，bank_rdata 缺 store 数据
+    // 合并 wb_wdata / wb_wstrb_mask 修正 victim 行，免去 SWAP 重读一拍
+    wire [31:0] victim_bank_wb [0:BANK_NUM-1];
+    genvar gwb;
+    generate
+        for (gwb = 0; gwb < BANK_NUM; gwb = gwb + 1) begin : victim_bank_wb_gen
+            wire need_merge = wb_collide_lookup_r
+                           && wb_way_hit[miss_replace_way]
+                           && (wb_bank == gwb);
+            assign victim_bank_wb[gwb] = need_merge
+                ? ((wb_wdata & wb_wstrb_mask) | (bank_rdata[miss_replace_way][gwb] & ~wb_wstrb_mask))
+                : bank_rdata[miss_replace_way][gwb];
+        end
+    endgenerate
+
     wire [127:0] replace_line_data;
     assign replace_line_data = {
-        bank_rdata[miss_replace_way][3],
-        bank_rdata[miss_replace_way][2],
-        bank_rdata[miss_replace_way][1],
-        bank_rdata[miss_replace_way][0]
+        victim_bank_wb[3],
+        victim_bank_wb[2],
+        victim_bank_wb[1],
+        victim_bank_wb[0]
     };
 
     // ========== Data Select - LOOKUP 时选字 ==========
     // 命中路原始 word：对所有路做一热 OR 归约
-    reg  [31:0] hit_word;
-    integer hwsi;
-    always @(*) begin
-        hit_word = 32'b0;
-        for (hwsi = 0; hwsi < `WAY_NUM; hwsi = hwsi + 1)
-            hit_word = hit_word | ({32{way_hit[hwsi]}} & bank_rdata[hwsi][req_offset[3:2]]);
-    end
+    // 二进制路号选择替代一热 OR 归约，减少组合逻辑级数
+    wire [31:0] hit_word;
+    assign hit_word = bank_rdata[hit_way_idx][req_offset[3:2]];
 
     wire [31:0] hit_write_data;
     assign hit_write_data = (wb_wdata & wb_wstrb_mask)
@@ -1065,19 +1119,28 @@ module cache (
         end
     end
 
-    // ========== AXI 读请求 - LOOKUP clean miss 直通 / REPLACE 待命 ==========
-    // clean miss 时 LOOKUP 当拍即发 rd_req，bridge 空闲可直通 REFILL 省一拍
+    // ========== AXI 读请求 - LOOKUP 直发 / REPLACE 待命 ==========
+    // 脏/干净 miss 均在 LOOKUP 当拍发出 rd_req（去 !miss_needs_write 门控）
+    // VC 命中不需总线读（!vc_hit 保留）；bridge 空闲可直通 REFILL
     wire rd_req_lookup;
     assign rd_req_lookup = main_lookup && !cache_hit
-                         && need_bus_rd && !miss_needs_write
+                         && need_bus_rd
                          && !prefetch_abort_req
-                         && !vc_hit && !wb_collide;
+                         && !vc_hit;
 
     assign rd_req = rd_req_lookup
                   || (main_replace && need_bus_rd
                       && (!miss_needs_write || wr_req_accepted)
                       && !prefetch_abort_req
                       && !vc_swap_wb_r);
+
+    // LOOKUP 拍写请求：脏 miss 当拍发 wr_req，与 rd_req 并行双发
+    wire wr_req_lookup;
+    assign wr_req_lookup = main_lookup && !cache_hit
+                         && miss_needs_write
+                         && !prefetch_abort_req
+                         && !wb_collide
+                         && !vc_fill_conflict;
 
     wire wstrb_hw;
     assign wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);
@@ -1122,15 +1185,35 @@ module cache (
                     && tagv_rdata[miss_replace_way][0];
     assign uncached_wr = main_replace && is_uncached_store;
 
-    assign wr_req = (cached_wr || uncached_wr) && !wr_req_accepted;
+    // LOOKUP 拍写回数据（含 WB 实时前推，避免窗口二陈旧）
+    wire [31:0] lookup_wr_bank [0:BANK_NUM-1];
+    genvar glw;
+    generate
+        for (glw = 0; glw < BANK_NUM; glw = glw + 1) begin : lookup_wr_bank_gen
+            wire live_fwd = wb_write && wb_way_hit[victim_way]
+                         && (wb_index == req_index) && (wb_bank == glw);
+            assign lookup_wr_bank[glw] = live_fwd
+                ? ((wb_wdata & wb_wstrb_mask) | (bank_rdata[victim_way][glw] & ~wb_wstrb_mask))
+                : bank_rdata[victim_way][glw];
+        end
+    endgenerate
+
+    assign wr_req = wr_req_lookup
+                  || ((cached_wr || uncached_wr) && !wr_req_accepted);
     assign wr_type  = (req_cached || cacop_wb) ? 3'b100 : uncached_rd_type;
     // cacop_wb_index (code 01) 用 VA index；cacop_wb_hit (code 10) 用 PA index
     assign wr_addr  = (req_cached || cacop_wb)
-                    ? {tagv_rdata[miss_replace_way][`TAG_WIDTH:1],
-                       cacop_wb_index ? cacop_index_r : req_index, 4'b0000}
+                    ? (wr_req_lookup
+                       ? {tagv_rdata[victim_way][`TAG_WIDTH:1], req_index, 4'b0000}
+                       : {tagv_rdata[miss_replace_way][`TAG_WIDTH:1],
+                          cacop_wb_index ? cacop_index_r : req_index, 4'b0000})
                     : {req_tag, req_index, req_offset};
     assign wr_wstrb = (req_cached || cacop_wb) ? 4'b1111 : req_wstrb_4b;
-    assign wr_data  = (req_cached || cacop_wb) ? replace_line_data : {96'd0, req_wdata};
+    assign wr_data  = (req_cached || cacop_wb)
+                    ? (wr_req_lookup
+                       ? {lookup_wr_bank[3], lookup_wr_bank[2], lookup_wr_bank[1], lookup_wr_bank[0]}
+                       : replace_line_data)
+                    : {96'd0, req_wdata};
 
 `ifndef SYNTHESIS
     // ========== 仿真断言 - 仅仿真观测，不参与逻辑 ==========

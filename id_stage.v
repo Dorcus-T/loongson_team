@@ -27,6 +27,7 @@ module id_stage (
     input  wire [31:0]                  wb_to_id_result,       // WB阶段计算结果
     input  wire                         mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
     input  wire                         ex_exc_valid,        // ex有冲刷就不发起brtaken
+    input  wire                         ex_mispredict,       // EX 误预测冲刷 ID
     input  wire                         pre_mem_exc_valid,   // PRE_MEM阶段存在异常
     input  wire                         mem_exc_valid,       // MEM有冲刷就不发起brtaken
 
@@ -660,7 +661,7 @@ module id_stage (
 
     // 译码级有效标志更新
     always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
+        if (reset || wb_exc_valid || wb_ertn_flush || ex_mispredict) begin
             id_valid <= 1'b0;
         end
         else if (id_allowin) begin
@@ -740,10 +741,10 @@ module id_stage (
 
     // 读csr指令与后面写同一个 CSR 冲突
     assign inst_csr_stall = (inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch) &&
-                         ((ex_csr_we && ex_csr_num == csr_id_num) ||
-                          (pre_mem_csr_we && pre_mem_csr_num == csr_id_num) ||
-                          (mem_csr_we && mem_csr_num == csr_id_num) ||
-                          (wb_csr_we && wb_csr_num == csr_id_num) ||
+                         ((ex_csr_we && (ex_csr_num == csr_id_num) || (ex_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
+                          (pre_mem_csr_we && (pre_mem_csr_num == csr_id_num) || (pre_mem_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
+                          (mem_csr_we && (mem_csr_num == csr_id_num) || (mem_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
+                          (wb_csr_we && (wb_csr_num == csr_id_num) || (wb_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
                           (ex_csr_we && inst_tlbsrch && ex_csr_num == `CSR_TLBEHI) ||
                           (pre_mem_csr_we && inst_tlbsrch && pre_mem_csr_num == `CSR_TLBEHI) ||
                           (mem_csr_we && inst_tlbsrch && mem_csr_num == `CSR_TLBEHI));

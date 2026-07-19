@@ -194,6 +194,8 @@ module core_top (
     wire [ 4:0] pre_mem_tlb_exc;    // 发pre_mem tlb相关异常
     wire [ 1:0] pre_mem_mat;        // pre_mem 访存方式
     wire        pre_mem_cached;     // pre_mem 访问可缓存
+    wire        mem_tlb_req;        // pre_mem 访存需要查 TLB（发 pre_mem_stage）
+    wire        utlb_hit;           // μTLB 命中（发 pre_mem_stage，跳过 tlb_wait）
     wire [`TLBRD_BUS_WD-1:0] tlbrd_value; // 发csr tlbrd使能和数据
 
     // ========== 计数器数值 ==========
@@ -517,6 +519,7 @@ module core_top (
         .mem_csr_num       (mem_csr_num),
         .mem_ertn_flush    (mem_ertn_flush),
         .ex_exc_valid   (ex_exc_valid),
+        .ex_mispredict     (ex_mispredict),
         .wb_csr_we         (wb_csr_we),
         .wb_csr_num        (wb_csr_num),
         .wb_exc_valid      (wb_exc_valid),
@@ -603,6 +606,8 @@ module core_top (
         .srch_value         (srch_value),
         .mem_tlb_exc        (pre_mem_tlb_exc),
         .pre_cached         (pre_mem_cached),
+        .mem_tlb_req        (mem_tlb_req),
+        .utlb_hit           (utlb_hit),
         // CACOP
         .cacop_code         (cacop_code),
         .cacop_en_final     (cacop_en_final),
@@ -784,7 +789,9 @@ module core_top (
         .datm_in       (datm_out),
         .dmw           (dmw_out),
         .tlbcsr        (tlbcsr_bus),
-        .tlbrd_value   (tlbrd_value)
+        .tlbrd_value   (tlbrd_value),
+        .mem_tlb_req   (mem_tlb_req),
+        .utlb_hit      (utlb_hit)
     );
 
     // ================================================================

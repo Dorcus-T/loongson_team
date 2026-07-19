@@ -53,17 +53,12 @@ module if_stage (
     wire        pre_if_valid;                // 预取指阶段有效标志
     wire        pre_if_ready_go;             // 预取值阶段就绪标志
     wire        pre_if_to_if_valid;          // 预取指到取值有效
-    reg         pre_if_ready_go_r;           // 预取值阶段上周期的指令是否发送过请求，用于脏指令判断
-    reg         pre_if_exc_r;                // 预取值阶段上周期的指令是否有异常，用于脏指令判断
     // ========== 控制信号解析 ==========
     reg  [31:0] pre_if_pc_r;            // pre_if 级 PC 寄存器（驱动取指地址）
     wire [31:0] seq_pc;                 // 顺序下一条PC（当前PC+4）
     wire [31:0] nextpc;                 // 下一周期PC（顺序或分支）
     reg  [31:0] nextpc_r;               // nextpc的寄存，用于判断preif是否阻塞
     reg         fork_r;                 // 分叉寄存
-    // brtaken和冲刷信号的任务：让if中的错误指令不动，让preif输入特定的取值请求且preif可以前进
-    // 冲刷通过inst_dirty机制丢弃桥FIFO中的旧数据，确保新指令进入if时拿到的是新读出的数据
-    // brtaken_r和两个冲刷寄存信号会让nextpc一直指向跳转地址，且不会让if中的错误指令往前走，也会让preif可以前进
 
     // ========== 异常信号 ==========
     wire        pre_if_adef;
@@ -74,10 +69,8 @@ module if_stage (
     // ========== 指令信息 ==========
     wire [31:0] if_inst;                // 当前取到的指令（直连桥的数据）
     reg  [31:0] if_pc;                  // 当前指令的PC
-    reg         new_in;                 // 表明if中是否是新进入的指令
     reg         req_already;            // 表明preif的指令已经发出过访存请求
-    wire        req_already_final;      // 考虑冲刷和分支后，表明preif的指令已经发出过访存请求
-    reg  [ 1:0] inst_dirty;             // 不为0就代表下一次 cache 的 data_ok 数据无效
+    reg  [ 2:0] inst_dirty;             // 不为0就代表下一次 cache 的 data_ok 数据无效
 
     // ========== 预测信息寄存器（随指令流传给 ID） ==========
     reg         pred_valid_r;
@@ -114,7 +107,7 @@ module if_stage (
     // ========== 流水线控制 ==========
     assign pre_if_to_if_valid = pre_if_ready_go && pre_if_valid;              // 预取指有效逻辑
     assign pre_if_valid       = ~reset;                                       // 预取指阶段：只要不复位就一直有效
-    assign pre_if_ready_go    = (icache_cpu_req && icache_cpu_addr_ok) || req_already_final || (pre_if_exc_valid && !flush_active);
+    assign pre_if_ready_go    = (icache_cpu_req && icache_cpu_addr_ok) || req_already || pre_if_exc_valid || flush_active;
     // 如果下一次上跳能够握手发请求或者已经发送过请求，那么下一次上跳就可以前进
     assign seq_pc  = (fork_r ? nextpc_r : pre_if_pc_r) + 32'h4;                 // 顺序PC = pre_if PC + 4（指令长度4字节）
     assign nextpc  = exc_no_rf     ? exc_entry      :                             // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
@@ -204,22 +197,6 @@ module if_stage (
             req_already <= 1'b1;
         end
     end
-    assign req_already_final = req_already && !(ex_mispredict || wb_ertn_flush || exc_no_rf || rf_valid);
-    // 表明preif指令是否发送过访存请求的逻辑生成
-    // 如果preif的指令进入if则preif一定维护新的指令，新指令没发送过访存请求
-    // 如果preif的访存请求为1但是不能往后走就说明发送过请求
-    // 如果有冲刷或者brtaken信号会瞬间改变nextpc让他变成新指令也就不算发出过请求
-    // 寄存的跳转或者冲刷信号不应该在此发挥作用，如果有寄存信号，其代表收到信号但是还没发出请求
-
-    // 表明if该阶段指令是否是新进入的逻辑实现
-    always @(posedge clk) begin
-        if (reset || !(if_allowin && pre_if_to_if_valid && !flush_active)) begin
-            new_in <= 1'b0;
-        end
-        else if (if_allowin && pre_if_to_if_valid && !flush_active) begin
-            new_in <= 1'b1;
-        end
-    end
 
     // 如果收到跳转或者冲刷信号但是握手不成功，下一次访存依然需要访存这些特定指令的数据，所以需要寄存
     // 如果有寄存信号，代表收到了跳转或者冲刷信号但是还没发出访存请求，需要持续更改访存地址
@@ -238,35 +215,26 @@ module if_stage (
         end
     end
 
-    always @(posedge clk) pre_if_ready_go_r <= pre_if_ready_go; // 表明上周期preif维护的指令是否发送过访存请求
-    always @(posedge clk) pre_if_exc_r <= pre_if_exc_valid;     // 表明上周期preif是不是异常指令
-    // 冲刷和跳转会立马改变nextpc，假设第一到第二周期的上跳产生冲刷或者跳转信号，第三周期会得到脏数据信号
-    // 第一周期如果preif可以发请求但是不能进入if，那么一定是if中有一条有效指令但是不能往后走
-    // 所以pre_if_ready_go_r && !new_in的时候if第二周期中的一定是第一周期中的那一条指令
-    // 如果if中没有有效数据那么就要废2条，如果刚返回或者早就有数据存在if_inst_r中那么就只废一次
-    // 注意：现在指令数据存于桥的FIFO中，if_inst_r已移除。
-    // IF 数据是否已被消耗用 if_to_id_valid && id_allowin 判断，
-    // 同时覆盖 data_ok=0（未到）和 data_ok=1 但 IF 阻塞（到了未接）
+    // ========== 脏指令控制 ==========
+    wire [2:0] inst_dirty_control;
+    assign inst_dirty_control = ((!if_exc && if_valid && !icache_cpu_data_ok) && req_already) ? 3'b010 :
+                                ((!if_exc && if_valid && !icache_cpu_data_ok) || req_already) ? 3'b001 :
+                                                                                                3'b000 ;
     always @(posedge clk) begin
         if (reset) begin
-            inst_dirty <= 2'b0;
+            inst_dirty <= 3'b0;
         end
-        else if (wb_ertn_flush || exc_no_rf || ex_mispredict || rf_valid) begin
-            if ((!if_exc && if_valid && !(if_to_id_valid && id_allowin))
-                && (!pre_if_exc_r && pre_if_ready_go_r) && !new_in)
-                inst_dirty <= 2'b10;
-            else if ((!if_exc && if_valid && !(if_to_id_valid && id_allowin))
-                  || (!pre_if_exc_r && pre_if_ready_go_r) && !new_in)
-                inst_dirty <= (inst_dirty == 2'b00) ? 2'b01 : 2'b10;
-            // 不进入任何分支时保留旧值 — 上一次冲刷的脏响应可能还在飞
+        else if (flush_active) begin
+            inst_dirty <= inst_dirty + inst_dirty_control; 
         end
-        else if (icache_cpu_data_ok && (inst_dirty != 2'b00))
+        else if (icache_cpu_data_ok && (inst_dirty != 3'b0)) begin
             inst_dirty <= inst_dirty - 1'b1;
+        end
     end
 
     // ========== ICache 输出信号 ==========
     assign if_to_mmu_vaddr = fork_r ? nextpc_r : pre_if_pc_r;                              // 发mmu虚地址
-    assign icache_cpu_req   = pre_if_valid && !req_already_final && !(pre_if_exc_valid);
+    assign icache_cpu_req   = pre_if_valid && !req_already && !(pre_if_exc_valid) && !flush_active;
     // preif有效才能发请求；已经发过的话不能重复发请求；跳转指令遇上lduse冒险未取得正确数据时也不能访存
     assign icache_cpu_op    = 1'b0;                                                       // ICache 只读
     assign icache_cpu_index  = (fork_r ? nextpc_r[`OFFSET_WIDTH +: `INDEX_WIDTH] : pre_if_pc_r[`OFFSET_WIDTH +: `INDEX_WIDTH]); // 虚地址中的index部分

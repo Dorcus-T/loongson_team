@@ -276,9 +276,9 @@ module exe_stage (
     assign bp_update_en   = bp_update_en_raw && !ex_branch_fired;
 
     // 预测事件：无条件分支 + 预测有效（已通过 bp_update_en 的 one-shot 保证只计一次）
-    assign pred_event   = bp_update_en && ex_pred_valid && (ex_br_type != 2'b01);
+    assign pred_event   = bp_update_en && ex_pred_valid;// && (ex_br_type != 2'b01);
     // 预测错误事件：仅统计无条件分支中有预测的误预测，排除冷启动和条件分支
-    assign mispred_event = ex_mispredict && ex_pred_valid && (ex_br_type != 2'b01);
+    assign mispred_event = ex_mispredict && ex_pred_valid;// && (ex_br_type != 2'b01);
 
     // 以下 bp_update 数据信号无需单独门控——bp_update_en=0 时 branch_predict 忽略全部
     assign bp_update_pc      = ex_pc[31:2];
@@ -328,6 +328,8 @@ module exe_stage (
         `else
         210'd0,                // 占位：保持非difftest字段bit位置不变
         `endif
+        tlbsrch_en,            // 244     tlbsrch使能（PRE_MEM 用于 vtlb_enop + tlb_wait）
+        invtlb_en,             // 243     invtlb使能（PRE_MEM 用于 vtlb_enop）
         tlbrd_en,              // 242     tlbrd使能
         tlbwr_en,              // 241     tlbwf使能
         tlbfill_en,            // 240

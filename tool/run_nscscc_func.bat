@@ -29,7 +29,7 @@ echo ===============================================================
 echo.
 
 echo [1/4] Building test program...
-wsl -d Ubuntu-22.04 -e bash -c "export CHIPLAB_HOME=%WSL_CHIPLAB% && export PATH=%WSL_CHIPLAB%/toolchains/loongson-gnu-toolchain-8.3-x86_64-loongarch32r-linux-gnusf-v2.0/bin:$PATH && cd %WSL_CHIPLAB%/software/examples/%TEST% && make clean 2>/dev/null; make"
+wsl -d Ubuntu-22.04 -e bash -c "export CHIPLAB_HOME=%WSL_CHIPLAB% && export PATH=%WSL_CHIPLAB%/toolchains/loongson-gnu-toolchain-8.3-x86_64-loongarch32r-linux-gnusf-v2.0/bin:$PATH && cd %WSL_CHIPLAB%/software/examples/%TEST% && make"
 if errorlevel 1 (
     echo ERROR: Build failed!
     pause

@@ -32,6 +32,18 @@ module tlb #(
     output wire        s1_d,
     output wire        s1_v,
 
+    // s1 未 mux 输出（供 μTLB 回填使用）
+    output wire [19:0] s1_ppn0,
+    output wire [19:0] s1_ppn1,
+    output wire [ 1:0] s1_plv0,
+    output wire [ 1:0] s1_plv1,
+    output wire [ 1:0] s1_mat0,
+    output wire [ 1:0] s1_mat1,
+    output wire        s1_d0,
+    output wire        s1_d1,
+    output wire        s1_v0,
+    output wire        s1_v1,
+
     // INVTLB opcode
     input  wire        invtlb_valid,
     input  wire [ 4:0] invtlb_op,
@@ -271,7 +283,29 @@ module tlb #(
         assign s0_v = |s0_v_term;
     endgenerate
 
-    assign s1_found = |match1;
+    // s1 组合输出（下一拍寄存后对外）
+    wire        s1_found_comb;
+    wire [ 4:0] s1_index_comb;
+    wire [19:0] s1_ppn_comb;
+    wire [ 5:0] s1_ps_comb;
+    wire [ 1:0] s1_plv_comb;
+    wire [ 1:0] s1_mat_comb;
+    wire        s1_d_comb;
+    wire        s1_v_comb;
+
+    // s1 未 mux 组合输出（供 μTLB 回填）
+    wire [19:0] s1_ppn0_comb;
+    wire [19:0] s1_ppn1_comb;
+    wire [ 1:0] s1_plv0_comb;
+    wire [ 1:0] s1_plv1_comb;
+    wire [ 1:0] s1_mat0_comb;
+    wire [ 1:0] s1_mat1_comb;
+    wire        s1_d0_comb;
+    wire        s1_d1_comb;
+    wire        s1_v0_comb;
+    wire        s1_v1_comb;
+
+    assign s1_found_comb = |match1;
     generate
         // s1_index
         for (b = 0; b < $clog2(TLBNUM); b = b + 1) begin : gen_s1_index
@@ -279,7 +313,7 @@ module tlb #(
             for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_index_term
                 assign term[i] = match1[i] & ((i >> b) & 1'b1);
             end
-            assign s1_index[b] = |term;
+            assign s1_index_comb[b] = |term;
         end
 
         // s1_ppn
@@ -289,7 +323,7 @@ module tlb #(
                 assign term[i] = match1[i] & (tlb_ps[i] ? (s1_vppn[8] ? tlb_ppn1[i][b] : tlb_ppn0[i][b])
                                              : (s1_va_bit12 ? tlb_ppn1[i][b] : tlb_ppn0[i][b]));
             end
-            assign s1_ppn[b] = |term;
+            assign s1_ppn_comb[b] = |term;
         end
 
         // s1_ps
@@ -298,7 +332,7 @@ module tlb #(
             for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_ps_term
                 assign term[i] = match1[i] & (tlb_ps[i] ? ((6'd21 >> b) & 1'b1) : ((6'd12 >> b) & 1'b1));
             end
-            assign s1_ps[b] = |term;
+            assign s1_ps_comb[b] = |term;
         end
 
         // s1_plv
@@ -308,7 +342,7 @@ module tlb #(
                 assign term[i] = match1[i] & (tlb_ps[i] ? (s1_vppn[8] ? tlb_plv1[i][b] : tlb_plv0[i][b])
                                              : (s1_va_bit12 ? tlb_plv1[i][b] : tlb_plv0[i][b]));
             end
-            assign s1_plv[b] = |term;
+            assign s1_plv_comb[b] = |term;
         end
 
         // s1_mat
@@ -318,7 +352,7 @@ module tlb #(
                 assign term[i] = match1[i] & (tlb_ps[i] ? (s1_vppn[8] ? tlb_mat1[i][b] : tlb_mat0[i][b])
                                              : (s1_va_bit12 ? tlb_mat1[i][b] : tlb_mat0[i][b]));
             end
-            assign s1_mat[b] = |term;
+            assign s1_mat_comb[b] = |term;
         end
 
         // s1_d
@@ -327,7 +361,7 @@ module tlb #(
             assign s1_d_term[i] = match1[i] & (tlb_ps[i] ? (s1_vppn[8] ? tlb_d1[i] : tlb_d0[i])
                                               : (s1_va_bit12 ? tlb_d1[i] : tlb_d0[i]));
         end
-        assign s1_d = |s1_d_term;
+        assign s1_d_comb = |s1_d_term;
 
         // s1_v
         wire [TLBNUM-1:0] s1_v_term;
@@ -335,7 +369,175 @@ module tlb #(
             assign s1_v_term[i] = match1[i] & (tlb_ps[i] ? (s1_vppn[8] ? tlb_v1[i] : tlb_v0[i])
                                               : (s1_va_bit12 ? tlb_v1[i] : tlb_v0[i]));
         end
-        assign s1_v = |s1_v_term;
+        assign s1_v_comb = |s1_v_term;
+
+        // ====== s1 未 mux 输出（供 μTLB 回填，不做 va_bit12 选择） ======
+        // s1_ppn0
+        for (b = 0; b < 20; b = b + 1) begin : gen_s1_ppn0
+            wire [TLBNUM-1:0] term;
+            for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_ppn0_term
+                assign term[i] = match1[i] & tlb_ppn0[i][b];
+            end
+            assign s1_ppn0_comb[b] = |term;
+        end
+
+        // s1_ppn1
+        for (b = 0; b < 20; b = b + 1) begin : gen_s1_ppn1
+            wire [TLBNUM-1:0] term;
+            for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_ppn1_term
+                assign term[i] = match1[i] & tlb_ppn1[i][b];
+            end
+            assign s1_ppn1_comb[b] = |term;
+        end
+
+        // s1_plv0
+        for (b = 0; b < 2; b = b + 1) begin : gen_s1_plv0
+            wire [TLBNUM-1:0] term;
+            for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_plv0_term
+                assign term[i] = match1[i] & tlb_plv0[i][b];
+            end
+            assign s1_plv0_comb[b] = |term;
+        end
+
+        // s1_plv1
+        for (b = 0; b < 2; b = b + 1) begin : gen_s1_plv1
+            wire [TLBNUM-1:0] term;
+            for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_plv1_term
+                assign term[i] = match1[i] & tlb_plv1[i][b];
+            end
+            assign s1_plv1_comb[b] = |term;
+        end
+
+        // s1_mat0
+        for (b = 0; b < 2; b = b + 1) begin : gen_s1_mat0
+            wire [TLBNUM-1:0] term;
+            for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_mat0_term
+                assign term[i] = match1[i] & tlb_mat0[i][b];
+            end
+            assign s1_mat0_comb[b] = |term;
+        end
+
+        // s1_mat1
+        for (b = 0; b < 2; b = b + 1) begin : gen_s1_mat1
+            wire [TLBNUM-1:0] term;
+            for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_mat1_term
+                assign term[i] = match1[i] & tlb_mat1[i][b];
+            end
+            assign s1_mat1_comb[b] = |term;
+        end
+
+        // s1_d0
+        wire [TLBNUM-1:0] s1_d0_term;
+        for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_d0
+            assign s1_d0_term[i] = match1[i] & tlb_d0[i];
+        end
+        assign s1_d0_comb = |s1_d0_term;
+
+        // s1_d1
+        wire [TLBNUM-1:0] s1_d1_term;
+        for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_d1
+            assign s1_d1_term[i] = match1[i] & tlb_d1[i];
+        end
+        assign s1_d1_comb = |s1_d1_term;
+
+        // s1_v0
+        wire [TLBNUM-1:0] s1_v0_term;
+        for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_v0
+            assign s1_v0_term[i] = match1[i] & tlb_v0[i];
+        end
+        assign s1_v0_comb = |s1_v0_term;
+
+        // s1_v1
+        wire [TLBNUM-1:0] s1_v1_term;
+        for (i = 0; i < TLBNUM; i = i + 1) begin : gen_s1_v1
+            assign s1_v1_term[i] = match1[i] & tlb_v1[i];
+        end
+        assign s1_v1_comb = |s1_v1_term;
     endgenerate
+
+    // ========== s1 输出寄存器（切断 TLB 查找 → MMU 异常编码的组合长链） ==========
+    reg         s1_found_r;
+    reg  [ 4:0] s1_index_r;
+    reg  [19:0] s1_ppn_r;
+    reg  [ 5:0] s1_ps_r;
+    reg  [ 1:0] s1_plv_r;
+    reg  [ 1:0] s1_mat_r;
+    reg         s1_d_r;
+    reg         s1_v_r;
+
+    // s1 未 mux 输出寄存器（供 μTLB 回填）
+    reg  [19:0] s1_ppn0_r;
+    reg  [19:0] s1_ppn1_r;
+    reg  [ 1:0] s1_plv0_r;
+    reg  [ 1:0] s1_plv1_r;
+    reg  [ 1:0] s1_mat0_r;
+    reg  [ 1:0] s1_mat1_r;
+    reg         s1_d0_r;
+    reg         s1_d1_r;
+    reg         s1_v0_r;
+    reg         s1_v1_r;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            s1_found_r <= 1'b0;
+            s1_index_r <= 5'd0;
+            s1_ppn_r   <= 20'd0;
+            s1_ps_r    <= 6'd0;
+            s1_plv_r   <= 2'd0;
+            s1_mat_r   <= 2'd0;
+            s1_d_r     <= 1'b0;
+            s1_v_r     <= 1'b0;
+            s1_ppn0_r  <= 20'd0;
+            s1_ppn1_r  <= 20'd0;
+            s1_plv0_r  <= 2'd0;
+            s1_plv1_r  <= 2'd0;
+            s1_mat0_r  <= 2'd0;
+            s1_mat1_r  <= 2'd0;
+            s1_d0_r    <= 1'b0;
+            s1_d1_r    <= 1'b0;
+            s1_v0_r    <= 1'b0;
+            s1_v1_r    <= 1'b0;
+        end
+        else begin
+            s1_found_r <= s1_found_comb;
+            s1_index_r <= s1_index_comb;
+            s1_ppn_r   <= s1_ppn_comb;
+            s1_ps_r    <= s1_ps_comb;
+            s1_plv_r   <= s1_plv_comb;
+            s1_mat_r   <= s1_mat_comb;
+            s1_d_r     <= s1_d_comb;
+            s1_v_r     <= s1_v_comb;
+            s1_ppn0_r  <= s1_ppn0_comb;
+            s1_ppn1_r  <= s1_ppn1_comb;
+            s1_plv0_r  <= s1_plv0_comb;
+            s1_plv1_r  <= s1_plv1_comb;
+            s1_mat0_r  <= s1_mat0_comb;
+            s1_mat1_r  <= s1_mat1_comb;
+            s1_d0_r    <= s1_d0_comb;
+            s1_d1_r    <= s1_d1_comb;
+            s1_v0_r    <= s1_v0_comb;
+            s1_v1_r    <= s1_v1_comb;
+        end
+    end
+
+    assign s1_found = s1_found_r;
+    assign s1_index = s1_index_r;
+    assign s1_ppn   = s1_ppn_r;
+    assign s1_ps    = s1_ps_r;
+    assign s1_plv   = s1_plv_r;
+    assign s1_mat   = s1_mat_r;
+    assign s1_d     = s1_d_r;
+    assign s1_v     = s1_v_r;
+
+    assign s1_ppn0  = s1_ppn0_r;
+    assign s1_ppn1  = s1_ppn1_r;
+    assign s1_plv0  = s1_plv0_r;
+    assign s1_plv1  = s1_plv1_r;
+    assign s1_mat0  = s1_mat0_r;
+    assign s1_mat1  = s1_mat1_r;
+    assign s1_d0    = s1_d0_r;
+    assign s1_d1    = s1_d1_r;
+    assign s1_v0    = s1_v0_r;
+    assign s1_v1    = s1_v1_r;
 
 endmodule

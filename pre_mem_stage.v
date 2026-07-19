@@ -21,6 +21,8 @@ module pre_mem_stage (
     input  wire [ 5:0]              srch_value,         // {s1_found, index}
     input  wire [ 4:0]              mem_tlb_exc,        // MMU返回tlb异常
     input  wire                     pre_cached,         // MMU返回是否可缓存
+    input  wire                     mem_tlb_req,        // MMU 告知需要查 TLB
+    input  wire                     utlb_hit,           // μTLB 命中（跳过 tlb_wait）
     // 与 DCache 的接口
     output wire                     dcache_cpu_req,     // DCache 请求有效
     output wire                     dcache_cpu_op,      // DCache 操作类型（1=写）
@@ -100,6 +102,7 @@ module pre_mem_stage (
     // DCache 接口
     wire        is_mem_inst;            // 是访存指令
     reg         req_already;            // 已经发送过访存请求
+    reg         tlb_return;             // TLB 查大表返回数据（已等 1 拍后置 1）
     // cacop 信号
     wire [4:0]  cacop_code_int;         // 来自EX bus的cache操作类型
     wire        cacop_en;               // 来自EX bus的cache操作使能
@@ -146,6 +149,8 @@ module pre_mem_stage (
         `else
         _unused_diff_pad,  // 占位：保持非difftest字段bit位置不变
         `endif
+        tlbsrch_en,        // 244     tlbsrch使能（vtlb_enop + tlb_wait）
+        invtlb_en,         // 243     invtlb使能（vtlb_enop）
         tlbrd_en,          // 242     tlbrd使能
         tlbwr_en,          // 241     tlbwf使能
         tlbfill_en,        // 240
@@ -219,11 +224,14 @@ module pre_mem_stage (
 
     // ========== 流水线控制 ==========
     assign is_mem_inst = (mem_we || res_from_mem);
+    // TLB 握手控制：TLB 输出寄存器多 1 拍延迟
+    wire need_tlb_lookup = ((mem_we || res_from_mem) && !cacop_en && mem_tlb_req) || tlbsrch_en;
+    wire tlb_ready       = !need_tlb_lookup || tlb_return || utlb_hit;
     // 下游异常/flush 时放行 PRE_MEM：否则 PRE_MEM 等 cache 但 cache 请求被阻断 → 死锁
     wire pre_mem_flush_pending;
     assign pre_mem_flush_pending = |pre_mem_exc || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
 
-    assign pre_mem_ready_go = pre_mem_valid && (mem_we || res_from_mem) && !(|pre_mem_exc || ex_rf_valid) ? (dcache_cpu_req && dcache_cpu_addr_ok) || req_already || pre_mem_flush_pending :
+    assign pre_mem_ready_go = pre_mem_valid && (mem_we || res_from_mem || tlbsrch_en) && !pre_mem_exc_valid ? tlb_ready && ((dcache_cpu_req && dcache_cpu_addr_ok) || req_already || tlbsrch_en || pre_mem_flush_pending) :
                               pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || pre_mem_flush_pending) :
                               pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || pre_mem_flush_pending) : 1'b1;
     assign pre_mem_allowin    = !pre_mem_valid || pre_mem_ready_go && mem_allowin;
@@ -271,6 +279,16 @@ module pre_mem_stage (
         end
     end
 
+    // ========== TLB 握手控制（TLB 输出寄存器多 1 拍延迟） ==========
+    always @(posedge clk) begin
+        if (reset || pre_mem_flush_pending)
+            tlb_return <= 1'b0;
+        else if (pre_mem_allowin)
+            tlb_return <= 1'b0;
+        else if (pre_mem_valid && need_tlb_lookup && !tlb_return)
+            tlb_return <= 1'b1;
+    end
+
     // ========== csr写文件写回控制 ==========
     assign pre_mem_csr_we = csr_we && pre_mem_valid && !pre_mem_exc_valid;
 
@@ -300,7 +318,7 @@ module pre_mem_stage (
                           && !i_cacop_req_already && !d_cacop_req_already;
 
     // ========== DCache 输出信号 ==========
-    assign dcache_cpu_req   = pre_mem_valid && (!mem_exc_valid && !(|pre_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem);
+    assign dcache_cpu_req   = pre_mem_valid && (!mem_exc_valid && !(|pre_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem) && tlb_ready;
     assign dcache_cpu_op    = mem_we && pre_mem_valid && (!mem_exc_valid && !(|pre_mem_exc || ex_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
     assign dcache_cpu_index = alu_result[`OFFSET_WIDTH +: `INDEX_WIDTH];
     assign dcache_cpu_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];

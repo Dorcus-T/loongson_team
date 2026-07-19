@@ -1,9 +1,8 @@
-# Cache 模块设计文档 — 激进版（时序 / 周期级）
+# Cache 模块设计文档（时序 / 周期级）
 
-> 2026-07-19，基于当前激进优化后的 cache 设计。
+> 2026-07-19，激进优化最终版。7ns 关键路径，设计敲定。
 > 本文档记录**周期级时序**（各场景状态流转、每请求消耗拍数）。
-> 组合逻辑路径分析见 `CLAUDE_TIMING.md`（激进版）。
-> 缓和版见 `CLAUDE_CACHE_CONSERVATIVE.md`（周期时序）、`CLAUDE_TIMING_CONSERVATIVE.md`（组合路径）。
+> 组合逻辑路径分析见 `CLAUDE_TIMING.md`。
 > I-cache 和 D-cache 行为差异已明确标注。
 
 ---

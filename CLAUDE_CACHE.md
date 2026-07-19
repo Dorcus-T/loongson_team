@@ -80,9 +80,10 @@
 | 状态 | 编码 | 干什么 |
 |------|------|--------|
 | IDLE | 0 | 等待 CPU 请求或预取 |
-| LOOKUP | 1 | 读 tagv + bank → 比较 tag → 判断 hit/miss → 选数据 |
-| REPLACE | 3 | 处理 miss：选牺牲行、发 wr_req（脏行写回）、发 rd_req |
-| REFILL | 4 | 逐拍接收 burst 返回数据，最后一拍写入 tagv/bank/dirty |
+| LOOKUP | 1 | 读 tagv + bank → 比较 tag → 判断 hit/miss/VC hit → 选数据；VC hit 干净 victim 的交换写在本拍完成 |
+| SWAP | 2 | WB 写窗口冲突修复：重读 req_index 一拍后回 LOOKUP 重判 |
+| REPLACE | 3 | 处理 miss：选牺牲行、发 wr_req（脏行写回）、发 rd_req；VC 脏交换在写握手拍完成换入 |
+| REFILL | 4 | 逐拍接收 burst 返回数据，最后一拍写入 tagv/bank/dirty（+干净 victim 插入 VC） |
 
 **关键优化——LOOKUP clean miss 直通 REFILL**：
 如果 LOOKUP 发现 clean miss（无脏行需写回）且 bridge 空闲（`rd_rdy=1`），`rd_req` 在 LOOKUP 当拍发出，`main_next` 直接跳到 REFILL，跳过 REPLACE 省一拍。
@@ -387,14 +388,21 @@ CACOP code01/10 在清 V 之前，如果目标行 dirty，触发写回（cacop_w
 | 计数器 | 含义 | 计数时机 |
 |--------|------|----------|
 | `perf_total_req` | 总请求数（含 uncache/CACOP） | accept_new_req |
-| `perf_access_cnt` | 可缓存查找数（排除预取） | main_lookup + req_cached + !prefetch_active |
-| `perf_miss_cnt` | miss 次数（同上范围） | 同上 + !cache_hit |
+| `perf_access_cnt` | 可缓存查找数（排除预取/SWAP 重入） | main_lookup + req_cached + !cacop_en_r + !prefetch_active + !data_sent_r |
+| `perf_miss_cnt` | L1 miss 次数（含 VC hit） | 同上 + !cache_hit |
+| `perf_real_miss_cnt` | 真 miss：L1 miss 且 VC miss（上总线） | 同上 + !cache_hit + !vc_hit |
+| `perf_vc_hit_cnt` | L1 miss 但 VC hit（被 VC 救回） | 同上 + !cache_hit + vc_hit |
+| `perf_vc_insert_cnt` | REFILL 末拍干净 victim 插入 VC | vc_insert |
+| `perf_vc_fill_cnt` | VC 交换写次数（含脏交换） | vc_fill |
 | `perf_prefetch_launch` | 预取发起总次数 | launch_prefetch |
 | `perf_prefetch_abort` | 预取中止（未上总线就被打断） | LOOKUP/REPLACE 阶段的 abort |
 | `perf_prefetch_fill` | 预取落盘（REFILL 数据写入 cache） | REFILL last beat |
 
 **关键指标**：
-- miss 率 = `perf_miss_cnt / perf_access_cnt`
+- L1 miss 率 = `perf_miss_cnt / perf_access_cnt`
+- **VC 后有效 miss 率 = `perf_real_miss_cnt / perf_access_cnt`**（与旧版 miss 率直接对比即 VC 收益）
+- VC 抢救率 = `perf_vc_hit_cnt / perf_miss_cnt`（L1 miss 中被 VC 救回的比例）
+- VC 利用率 = `perf_vc_hit_cnt / perf_vc_insert_cnt`（插入的行有多少被用上）
 - 预取成功率 = `perf_prefetch_fill / perf_prefetch_launch`
 - 预取中止率 = `perf_prefetch_abort / perf_prefetch_launch`
 
@@ -429,7 +437,57 @@ MISS 阶段已删除，REPLACE 在 clean miss + bridge 空闲时可被跳过。
 
 - 复位：外部 `aresetn` 低有效，cache 内部 `resetn` 高有效（`resetn = ~aresetn`）
 - IS_ICACHE 参数在例化时传入，I-cache 设 1，D-cache 设 0
-- TagV/Dirty 写只在 REFILL，读只在 IDLE/LOOKUP，保证单端口 RAM 不冲突
+- TagV/Dirty 写只在 REFILL/VCFILL，读只在 accept/SWAP 重读拍，保证单端口 RAM 不冲突
 - Prefetch 仅 I-cache 有，D-cache 的 IS_ICACHE=0 时预取逻辑静默
 - 预取 PLRU 隔离：prefetch hit 不更新 PLRU，防止预取污染替换决策
 - bridge 共享：I/D 共享一个 `cache_axi_bridge`，DCache 读优先级更高
+
+---
+
+## 13. Victim Cache（VC）
+
+> 详细设计（全场景逐拍时序、碰撞窗口推导、时序路径分析、L2 继承指南）见 **`CLAUDE_VC.md`**，本节为速览。
+
+`VC_DEPTH`（默认 4）项全相联，**clean-only**：VC 里只存干净行，失效即丢、零写回通路。
+每 entry = {valid, {tag,index} 全地址, 128b 行数据}，寄存器实现，组合读。
+**仅 D-cache 启用**：`u_icache` 例化 `VC_EN=0` 整体关断（取指顺序流为主，换行震荡少）。
+
+**不变量：L1 ∩ VC = ∅**（仿真断言已内置，`SYNTHESIS` 宏隔离）。
+
+### 13.1 LOOKUP 判定表（cacheable、非 CACOP、非预取）
+
+| 判定 | 当拍动作 | 下一拍 |
+|------|---------|--------|
+| L1 hit | 照旧，VC 旁观 | 照旧（可衔接） |
+| L1 miss + WB 碰撞（`wb_collide` / `vc_fill_conflict`） | load+VC hit 照发 data_ok（VC 数据与 victim 无关必正确）；store 照发 write_done；置 `data_sent_r` | SWAP 重读拍 → 回 LOOKUP 重判 |
+| L1 miss + VC hit + victim 干净/无效 | data_ok / write_done；**交换写当拍完成**（`vc_fill_lookup`：4 bank+tagv+d+PLRU ← VC 行含 store 合并，干净 victim 回填 entry / 空 victim 清 entry） | IDLE（可正常受理，读到的已是交换后状态） |
+| L1 miss + VC hit + victim 脏 | data_ok / write_done；置 `vc_swap_wb_r` | REPLACE：只写不读，`wr_req` 踢出脏行，**写握手拍完成交换写**（`vc_fill_replace`，entry 清空）→ IDLE |
+| L1 miss + VC miss | 照旧（`rd_req_lookup` 已 gate `!vc_hit && !wb_collide`） | REPLACE/REFILL |
+
+- **交换写无独立状态**：LOOKUP 当拍（v1 不衔接 ⇒ 本拍无 RAM 读，写口空闲）或写握手拍（REPLACE 期间无读）事件驱动完成，数据全组合（`vc_fill_word` 含 store 合并），无交换缓冲寄存器
+- **`vc_fill_conflict`**：WB 恰在 VC hit 拍写 victim way（跨 set 同 way，bank 口撞）→ 借 SWAP 让位一拍再交换
+- **脏 victim 换行免总线读**：只发 `wr_req`（`rd_req` 被 `vc_swap_wb_r` 压制），bridge 握手拍整行锁存 wr_data，bank 同拍写入不影响写出
+- **REFILL 末拍插入**：`vc_insert = refill_d_we && victim 有效 && 干净`，FIFO 指针替换。脏 victim 走 AXI 写回不进 VC
+- **v1 不衔接**：VC hit 拍不受理新请求（该拍写口被交换写占用），干净交换总代价仅 1 个占用拍，CPU 可见延迟 1 拍
+
+### 13.2 WB 碰撞修复（SWAP 态）
+
+WB 写会使 accept 拍一次性读出的 victim 数据/脏位陈旧，两个窗口：
+1. **accept 拍与 wb_write 同拍**：该 way 该 bank 的读被写抢占**丢弃**（跨 set 也算）→ accept 拍记录 `collide_valid_r/collide_wayhit_r`
+2. **本 LOOKUP 拍 wb_write 且 wb_index==req_index 且 wb way==目标 way**：读早于写，行数据缺 store、脏位可能假干净
+
+`wb_collide` 命中且目标行数据真会被用到（cached miss / CACOP code01/code10 命中，uncached 与 code00 除外）→ 进 SWAP。
+时序推演保证进 SWAP 时 WB 必已排空（WB 写拍最晚是本请求 LOOKUP 拍），SWAP 固定 1 拍重读后回 LOOKUP，
+`data_sent_r` 抑制重入拍的重复 data_ok/write_done/perf 计数。**该态同时修复了旧版"wb_write 拍受理 → 跨 set 脏写回污染"的隐患**（CACOP 写回路径也纳入保护）。
+
+### 13.3 CACOP / Uncached / 预取交界
+
+- `cacop_en_r` 全程禁 VC 命中（`vc_hit` 门控）；CACOP 的 LOOKUP 拍并行清 VC：code10 全地址精确失效、code00/01 按 index 失效、code11 无操作。clean-only ⇒ 失效即丢
+- Uncached：`vc_hit` gate `req_cached`，查找/交换/插入全程绕开
+- 预取（I-side）：预取 LOOKUP 的 VC hit 不给 data_ok、不交换，转 IDLE 视作预取命中；ifetch VC hit 完成也挂 `set_prefetch_pending`；预取 refill 的干净 victim 照常插入 VC
+- I-side 无 store ⇒ 无 WB/SWAP/合并，VC 逻辑天然退化为纯 load 交换
+
+### 13.4 性能计数器 / 已知良性 corner
+
+- `perf_vc_hit_cnt`（L1 miss + VC hit）/ `perf_vc_insert_cnt`（REFILL 插入）/ `perf_vc_fill_cnt`（VCFILL 交换）
+- 已知良性 corner（仅 I-side、预取失配压写受理拍）：新请求 LOOKUP 用到被 refill 写抢占的陈旧 tagv/bank 视图，极端序列下 VC 可能出现重复 entry（数据一致、干净），只浪费一个槽位不破坏正确性，断言里以 WARN 报告

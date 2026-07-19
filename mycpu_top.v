@@ -475,7 +475,8 @@ module mycpu_top (
     // ICache
     // ================================================================
     cache #(
-        .IS_ICACHE    (1)
+        .IS_ICACHE    (1),
+        .VC_EN        (1'b0)
     ) u_icache (
         .clk          (clk),
         .resetn       (~reset),

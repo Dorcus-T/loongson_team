@@ -9,9 +9,11 @@ module mem_stage (
     // 来自pre_mem阶段
     input  wire                         pre_mem_to_mem_valid,  // PRE_MEM到MEM有效
     input  wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus, // 来自PRE_MEM的总线
+    input  wire                         pre_mem_ready_go,     // PRE_MEM阶段就绪标志
     // 输出给wb阶段
     output wire                         mem_to_wb_valid,       // MEM到WB有效
     output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
+    output wire                         mem_ready_go,          // MEM阶段就绪标志
      // 来自 DCache
     input  wire [31:0]                  dcache_cpu_rdata,      // DCache 读数据
     input  wire                         dcache_cpu_data_ok,    // DCache 数据就绪
@@ -32,7 +34,6 @@ module mem_stage (
 );
 
     reg  mem_valid;                                   // MEM阶段有效标志
-    wire mem_ready_go;                                // MEM阶段就绪
     reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus_r; // 锁存的PRE_MEM级数据
     reg  [31:0] load_data_r;                          // 锁存 cache 返回的读数据（打断长组合路径）
     reg         load_data_latched;                    // 数据已锁存，本拍正在处理
@@ -178,9 +179,9 @@ module mem_stage (
     // load:  数据锁存到 load_data_r 后下一拍就绪（打断 cache→MEM→ID 长组合路径）
     // store: 写请求已在 PRE_MEM 发出，MEM 恒就绪（避免错过 cache write_done 脉冲）
     // 其他:  恒就绪
-    assign mem_ready_go    = (is_mem_inst && !mem_we && !mem_exc_valid) ? load_data_latched : 1'b1;
-    assign mem_allowin     = !mem_valid || mem_ready_go && wb_allowin;
-    assign mem_to_wb_valid = mem_valid && mem_ready_go;
+    assign mem_ready_go    = mem_valid && (is_mem_inst && !mem_we && !mem_exc_valid) ? load_data_latched : 1'b1;
+    assign mem_allowin     = pre_mem_ready_go && mem_ready_go && (wb_allowin || !mem_valid);
+    assign mem_to_wb_valid = mem_valid;
 
     // ========== DCache 数据接受 ==========
     // load 等待数据时即拉高 accept，数据到达拍锁入 load_data_r
@@ -194,10 +195,13 @@ module mem_stage (
         else if (mem_allowin) begin
             mem_valid <= pre_mem_to_mem_valid;
         end
+        else if (mem_ready_go && wb_allowin) begin
+            mem_valid <= 1'b0;
+        end
     end
     // 访存级数据传递
     always @(posedge clk) begin
-        if (pre_mem_to_mem_valid && mem_allowin) begin
+        if (mem_allowin) begin
             pre_mem_to_mem_bus_r <= pre_mem_to_mem_bus;
         end
     end
@@ -216,11 +220,11 @@ module mem_stage (
         if (reset || wb_exc_valid || wb_ertn_flush) begin
             load_data_latched <= 1'b0;
         end
+        else if (mem_allowin) begin
+            load_data_latched <= 1'b0;
+        end
         else if (latch_data) begin
             load_data_latched <= 1'b1;
-        end
-        else if (mem_ready_go && wb_allowin) begin
-            load_data_latched <= 1'b0;
         end
     end
 

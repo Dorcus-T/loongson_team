@@ -9,9 +9,11 @@ module id_stage (
     // 来自IF阶段
     input  wire                         if_to_id_valid,      // IF到ID的有效标志
     input  wire [`IF_TO_ID_BUS_WD-1:0]  if_to_id_bus,        // IF传递的总线：{指令, PC}
+    input  wire                         if_ready_go,         // IF阶段就绪标志
     // 输出给ex阶段
     output wire                         id_to_ex_valid,      // ID到EX的有效标志
     output wire [`ID_TO_EX_BUS_WD-1:0]  id_to_ex_bus,        // ID到EX的控制总线
+    output wire                         id_ready_go,         // ID阶段就绪标志
     // wb阶段输入的寄存器文件总线
     input  wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,        // WB阶段写回数据
     // 前递控制
@@ -62,7 +64,6 @@ module id_stage (
 );
 
     reg  id_valid;                                   // ID阶段有效标志
-    wire id_ready_go;                                // ID阶段是否准备好（无冒险）
     reg  [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus_r;      // 锁存的取值级数据
     reg  id_rf_valid;                                // 重取指标志
 
@@ -653,11 +654,10 @@ module id_stage (
         id_is_branch          // 1   是否为分支指令
     };  // 总计 413 + 80 = 493
 
-    // ========== 流水线控制 ==========
-    assign id_ready_go    = (!load_use_stall && !csr_stall || id_exc_valid);
+    assign id_ready_go    = !load_use_stall && !csr_stall || id_exc_valid || !id_valid || wb_exc_valid || wb_ertn_flush || ex_mispredict;
     // wb发来冲刷脉冲就阻塞，正常情况下，有阻塞但是id如果是异常指令就不应该阻，异常指令最好快点到wb发冲刷信号
-    assign id_allowin     = !id_valid || (id_ready_go && ex_allowin);
-    assign id_to_ex_valid = id_valid && id_ready_go;
+    assign id_allowin     = id_ready_go && (ex_allowin || !id_valid) && if_ready_go;
+    assign id_to_ex_valid = id_valid;
 
     // 译码级有效标志更新
     always @(posedge clk) begin
@@ -667,20 +667,25 @@ module id_stage (
         else if (id_allowin) begin
             id_valid <= if_to_id_valid;
         end
+        else if (id_ready_go && ex_allowin) begin
+            id_valid <= 1'b0;
+        end
     end
     // 译码级数据传递
     always @(posedge clk) begin
-        if (if_to_id_valid && id_allowin) begin
+        if (id_allowin) begin
             if_to_id_bus_r <= if_to_id_bus;
         end
     end
-    // 重取指信号生成
+        // 重取指信号生成
     always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) id_rf_valid <= 1'b0;
-        else if (id_to_ex_valid && ex_allowin) begin
+        if (reset || wb_exc_valid || wb_ertn_flush || ex_mispredict) begin
+            id_rf_valid <= 1'b0;
+        end
+        else if (id_valid && id_allowin) begin
             id_rf_valid <= ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
-                                       || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && id_valid;
+                                   || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
+                                   || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && id_valid;
         end
     end
     // ========== 冒险检测、前递处理、阻塞处理 ==========

@@ -7,8 +7,9 @@ module wb_stage (
     // allowin
     output wire                         wb_allowin,           // 写回级是否允许接收新指令
     // 来自mem阶段
-    input  wire                         mem_to_wb_valid,       // 执行级到写回级的有效标志
-    input  wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // 执行级传递的总线数据
+    input  wire                         mem_to_wb_valid,       // MEM到WB有效
+    input  wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM传递的总线数据
+    input  wire                         mem_ready_go,          // MEM阶段就绪标志
     // 输出给寄存器文件
     output wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,          // 写回级到寄存器文件的总线
     // 调试接口（用于波形追踪）
@@ -162,7 +163,7 @@ module wb_stage (
 
     // ========== 流水线控制 ==========
     assign wb_ready_go = 1'b1;
-    assign wb_allowin  = !wb_valid || wb_ready_go;
+    assign wb_allowin  = mem_ready_go && wb_ready_go;
 
     // 写回级有效标志更新
     always @(posedge clk) begin
@@ -172,10 +173,13 @@ module wb_stage (
         else if (wb_allowin) begin
             wb_valid <= mem_to_wb_valid;
         end
+        else if (wb_ready_go) begin
+            wb_valid <= 1'b0;
+        end
     end
     // 写回级数据传递
     always @(posedge clk) begin
-        if (mem_to_wb_valid && wb_allowin) begin
+        if (wb_allowin) begin
             mem_to_wb_bus_r <= mem_to_wb_bus;
         end
     end

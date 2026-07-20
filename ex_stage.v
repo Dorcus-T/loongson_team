@@ -10,9 +10,11 @@ module exe_stage (
     // 来自ID阶段
     input  wire                     id_to_ex_valid,     // ID到EX有效
     input  wire [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus,    // 来自ID的控制信号和操作数
+    input  wire                     id_ready_go,         // ID阶段就绪标志
     // 输出给PRE_MEM阶段
     output wire                     ex_to_pre_mem_valid, // EX到PRE_MEM有效
     output wire [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus, // EX到PRE_MEM总线
+    output wire                     ex_ready_go,         // EX阶段就绪标志
     // 前递控制
     output wire [ 4:0]              ex_to_id_dest,      // EX阶段写回寄存器号
     output wire [31:0]              ex_to_id_result,    // EX阶段计算结果
@@ -53,7 +55,6 @@ module exe_stage (
     );
 
     reg  ex_valid;                               // EX阶段有效标志
-    wire ex_ready_go;                            // EX阶段就绪标志（除法指令需等待）
     reg  [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus_r;  // 锁存的译码级数据
 
     // ========== 异常信号 ==========
@@ -244,7 +245,7 @@ module exe_stage (
 
     // -------- 原始预测器训练使能 --------
     wire bp_update_en_raw;
-    assign bp_update_en_raw = ex_is_branch && ex_valid && ex_ready_go && pre_mem_allowin;
+    assign bp_update_en_raw = ex_is_branch && ex_valid;
 
     // ============================================================
     // One-shot：防止分支指令在 EX 停顿时重复发出 mispredict/update
@@ -258,11 +259,11 @@ module exe_stage (
         if (reset || wb_exc_valid || wb_ertn_flush) begin
             ex_branch_fired <= 1'b0;
         end
-        else if (id_to_ex_valid && ex_allowin) begin
+        else if (ex_allowin) begin
             // 新指令进入 EX → 复位 one-shot
             ex_branch_fired <= 1'b0;
         end
-        else if (ex_mispredict_raw && ex_valid) begin
+        else if (ex_mispredict_raw) begin
             // 误预测分支本拍发出了信号 → 置位，阻止后续重复
             ex_branch_fired <= 1'b1;
         end
@@ -362,11 +363,11 @@ module exe_stage (
     assign ex_flush_pending = ex_exc_valid || pre_mem_exc_valid || pre_mem_ertn_flush || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
 
     // 仅 div/mul 需等待；其余指令一拍过（访存/CACOP 握手已移至 PRE_MEM）
-    assign ex_ready_go   = is_mul_inst ? (mul_ready || mul_ready_r) || (!ex_valid || ex_flush_pending) :
-                           is_div_inst ? (div_ready || div_ready_r) || (!ex_valid || ex_flush_pending) :
+    assign ex_ready_go   = is_mul_inst ? mul_ready || mul_ready_r || !ex_valid || ex_flush_pending :
+                           is_div_inst ? div_ready || div_ready_r || !ex_valid || ex_flush_pending :
                            1'b1;
-    assign ex_allowin    = !ex_valid || ex_ready_go && pre_mem_allowin;
-    assign ex_to_pre_mem_valid = ex_valid && ex_ready_go;
+    assign ex_allowin    = id_ready_go && ex_ready_go && (pre_mem_allowin || !ex_valid);
+    assign ex_to_pre_mem_valid = ex_valid;
 
     // 执行级有效标志更新
     always @(posedge clk) begin
@@ -374,15 +375,15 @@ module exe_stage (
             ex_valid <= 1'b0;
         end
         else if (ex_allowin) begin
-            // ex_mispredict_raw 门控：防止错误路径指令在误预测拍进入 EX
-            // 用 raw 而非 gated——内部保护不应受 one-shot 影响
             ex_valid <= id_to_ex_valid && !ex_mispredict_raw;
+        end
+        else if (ex_ready_go && pre_mem_allowin) begin
+            ex_valid <= 1'b0;
         end
     end
     // 执行级数据传递
     always @(posedge clk) begin
-        // ex_mispredict_raw 门控：防止错误路径指令的 id_to_ex_bus 覆盖分支数据
-        if (id_to_ex_valid && ex_allowin && !ex_mispredict_raw) begin
+        if (ex_allowin) begin
             id_to_ex_bus_r <= id_to_ex_bus;
         end
     end
@@ -418,7 +419,7 @@ module exe_stage (
 
     // 除法就绪信号需要寄存
     always @(posedge clk) begin
-        if (reset || (ex_to_pre_mem_valid && pre_mem_allowin)) begin
+        if (reset || ex_allowin || wb_ertn_flush || wb_exc_valid) begin
             div_ready_r <= 1'b0;
         end
         else if (div_ready) begin
@@ -428,7 +429,7 @@ module exe_stage (
 
     // 乘法就绪信号需要寄存（复用除法器模式）
     always @(posedge clk) begin
-        if (reset || (ex_to_pre_mem_valid && pre_mem_allowin)) begin
+        if (reset || ex_allowin || wb_ertn_flush || wb_exc_valid) begin
             mul_ready_r <= 1'b0;
         end
         else if (mul_ready) begin

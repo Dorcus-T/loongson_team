@@ -69,6 +69,7 @@ module core_top (
     always @(posedge clk) reset <= ~aresetn;
 
     // ========== 流水线控制信号（各级之间的握手信号） ==========
+    wire if_ready_go;                    // IF阶段就绪标志
     wire id_allowin;                     // ID阶段允许接收（来自ID）
     wire ex_allowin;                     // EX阶段允许接收（来自EX）
     wire pre_mem_allowin;                // PRE_MEM阶段允许接收（来自PRE_MEM）
@@ -78,6 +79,10 @@ module core_top (
     // 各级流水线有效标志
     wire if_to_id_valid;                 // IF -> ID 有效
     wire id_to_ex_valid;                 // ID -> EX 有效
+    wire id_ready_go;                    // ID阶段就绪标志
+    wire ex_ready_go;                    // EX阶段就绪标志
+    wire pre_mem_ready_go;               // PRE_MEM阶段就绪标志
+    wire mem_ready_go;                   // MEM阶段就绪标志
     wire ex_to_pre_mem_valid;            // EX -> PRE_MEM 有效
     wire pre_mem_to_mem_valid;           // PRE_MEM -> MEM 有效
     wire mem_to_wb_valid;                // MEM -> WB 有效
@@ -451,7 +456,8 @@ module core_top (
         .id_allowin         (id_allowin),
         .if_to_id_valid     (if_to_id_valid),
         .if_to_id_bus       (if_to_id_bus),
-        .icache_cpu_req   (icache_cpu_req),
+        .if_ready_go        (if_ready_go),
+        .icache_cpu_req     (icache_cpu_req),
         .icache_cpu_op      (icache_cpu_op),
         .icache_cpu_index   (icache_cpu_index),
         .icache_cpu_tag     (icache_cpu_tag),
@@ -493,8 +499,10 @@ module core_top (
         .id_allowin        (id_allowin),
         .if_to_id_valid    (if_to_id_valid),
         .if_to_id_bus      (if_to_id_bus),
+        .if_ready_go        (if_ready_go),
         .id_to_ex_valid    (id_to_ex_valid),
         .id_to_ex_bus      (id_to_ex_bus),
+        .id_ready_go        (id_ready_go),
         .wb_to_rf_bus      (wb_to_rf_bus),
         .ex_to_id_dest     (ex_to_id_dest),
         .mem_to_id_dest    (mem_to_id_dest),
@@ -545,8 +553,10 @@ module core_top (
         .ex_allowin         (ex_allowin),
         .id_to_ex_valid     (id_to_ex_valid),
         .id_to_ex_bus       (id_to_ex_bus),
+        .id_ready_go         (id_ready_go),
         .ex_to_pre_mem_valid (ex_to_pre_mem_valid),
         .ex_to_pre_mem_bus   (ex_to_pre_mem_bus),
+        .ex_ready_go         (ex_ready_go),
         .ex_to_id_dest      (ex_to_id_dest),
         .ex_to_id_result    (ex_to_id_result),
         .ex_to_id_load_op   (ex_to_id_load_op),
@@ -588,8 +598,10 @@ module core_top (
         .pre_mem_allowin    (pre_mem_allowin),
         .ex_to_pre_mem_valid (ex_to_pre_mem_valid),
         .ex_to_pre_mem_bus   (ex_to_pre_mem_bus),
+        .ex_ready_go         (ex_ready_go),
         .pre_mem_to_mem_valid (pre_mem_to_mem_valid),
         .pre_mem_to_mem_bus   (pre_mem_to_mem_bus),
+        .pre_mem_ready_go     (pre_mem_ready_go),
         .pre_mem_to_mmu_vaddr (pre_mem_to_mmu_vaddr),
         .dcache_cpu_req     (dcache_cpu_req),
         .dcache_cpu_op      (dcache_cpu_op),
@@ -641,8 +653,10 @@ module core_top (
         .mem_allowin          (mem_allowin),
         .pre_mem_to_mem_valid  (pre_mem_to_mem_valid),
         .pre_mem_to_mem_bus    (pre_mem_to_mem_bus),
+        .pre_mem_ready_go     (pre_mem_ready_go),
         .mem_to_wb_valid      (mem_to_wb_valid),
         .mem_to_wb_bus        (mem_to_wb_bus),
+        .mem_ready_go         (mem_ready_go),
         .dcache_cpu_rdata     (dcache_cpu_rdata),
         .dcache_cpu_data_ok   (dcache_cpu_data_ok),
         .mem_to_id_dest       (mem_to_id_dest),
@@ -666,6 +680,7 @@ module core_top (
         .wb_allowin        (wb_allowin),
         .mem_to_wb_valid   (mem_to_wb_valid),
         .mem_to_wb_bus     (mem_to_wb_bus),
+        .mem_ready_go      (mem_ready_go),
         .wb_to_rf_bus      (wb_to_rf_bus),
         .debug_wb_pc       (debug0_wb_pc),
         .debug_wb_rf_we    (debug0_wb_rf_wen),

@@ -25,6 +25,7 @@ module pre_mem_stage (
     input  wire                     pre_cached,         // MMU返回是否可缓存
     input  wire                     mem_tlb_req,        // MMU 告知需要查 TLB
     input  wire                     utlb_hit,           // μTLB 命中（跳过 tlb_wait）
+    output wire                     rubish,             // 此指令将被废弃，不访问mmu
     // 与 DCache 的接口
     output wire                     dcache_cpu_req,     // DCache 请求有效
     output wire                     dcache_cpu_op,      // DCache 操作类型（1=写）
@@ -225,7 +226,8 @@ module pre_mem_stage (
 
     // ========== 流水线控制 ==========
     assign is_mem_inst = (mem_we || res_from_mem);
-    // TLB 握手控制：TLB 输出寄存器多 1 拍延迟
+    // TLB 握手控制
+    assign rubish = pre_exc_valid || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || !pre_mem_valid;
     wire need_tlb_lookup = ((mem_we || res_from_mem) && !cacop_en && mem_tlb_req) || tlbsrch_en;
     wire tlb_ready       = !need_tlb_lookup || tlb_return || utlb_hit;
     // 下游异常/flush 时放行 PRE_MEM：否则 PRE_MEM 等 cache 但 cache 请求被阻断 → 死锁
@@ -300,7 +302,7 @@ module pre_mem_stage (
     assign pre_mem_to_mmu_vaddr = alu_result;
     assign vtlb_enop = {
         tlbsrch_en,
-        pre_mem_valid && !mem_exc_valid && !(|pre_exc[12:3]) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid && !pre_mem_rf_valid ? invtlb_en : 1'b0,
+        pre_mem_valid && !mem_exc_valid && !(|pre_exc) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid && !pre_mem_rf_valid ? invtlb_en : 1'b0,
         dest,
         rj_value[9:0],
         rkd_value[31:13]
@@ -344,7 +346,7 @@ module pre_mem_stage (
     assign pre_exc_valid          = (|pre_exc || pre_mem_rf_valid) && pre_mem_valid;
 
     // ========== 检测异常与ertn（合并EX异常 + TLB异常） ==========
-    assign valid_mem_tlb_exc     = mem_tlb_exc & {5{!pre_exc_valid && !(|pre_exc[12:3]) && pre_mem_valid && ld_and_str != 2'b0}};
+    assign valid_mem_tlb_exc     = mem_tlb_exc & {5{!(|pre_exc) && pre_mem_valid && ld_and_str != 2'b0}};
     assign pre_mem_exc           = {pre_exc[12:11], pre_exc[10] || valid_mem_tlb_exc[4], pre_exc[9], pre_exc[8] || valid_mem_tlb_exc[3], pre_exc[7:0], valid_mem_tlb_exc[2:0]};
     assign pre_mem_exc_valid  = (|pre_mem_exc || pre_mem_rf_valid) && pre_mem_valid;
     assign pre_mem_ertn_flush = ertn_flush && pre_mem_valid;

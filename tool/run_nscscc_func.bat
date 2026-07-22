@@ -59,7 +59,7 @@ echo    Compile OK.
 echo.
 
 echo [4/4] Running simulation...
-wsl -d Ubuntu-22.04 -e bash -c "export CHIPLAB_HOME=%WSL_CHIPLAB% && export PATH=%WSL_CHIPLAB%/toolchains/loongson-gnu-toolchain-8.3-x86_64-loongarch32r-linux-gnusf-v2.0/bin:$PATH && cd %WSL_CHIPLAB%/sims/verilator/run_prog && rm -rf ./obj/%TEST%_obj && mkdir -p ./obj/%TEST%_obj && cp -r %WSL_CHIPLAB%/software/examples/%TEST%/obj ./obj/%TEST%_obj/ && rm -rf ./tmp && mkdir -p ./tmp && cp ./obj/%TEST%_obj/obj/rom.vlog ./tmp/ && cat ./tmp/rom.vlog > ./tmp/ram.dat && ln -sf ../Makefile_run ./tmp/Makefile_run && cd ./tmp && timeout 600 ../output --dump-delay 0 %DUMP_WAVE% --time-limit 0 %PC_TRACE% %DIFF_FLAG% && if [ -f logs/simu_trace.fst ]; then cp logs/simu_trace.fst ../../../../../IP/myCPU/tool/; fi"
+wsl -d Ubuntu-22.04 -e bash -c "export CHIPLAB_HOME=%WSL_CHIPLAB% && export PATH=%WSL_CHIPLAB%/toolchains/loongson-gnu-toolchain-8.3-x86_64-loongarch32r-linux-gnusf-v2.0/bin:$PATH && cd %WSL_CHIPLAB%/sims/verilator/run_prog && rm -rf ./obj/%TEST%_obj && mkdir -p ./obj/%TEST%_obj && cp -r %WSL_CHIPLAB%/software/examples/%TEST%/obj ./obj/%TEST%_obj/ && rm -rf ./tmp && mkdir -p ./tmp && cp ./obj/%TEST%_obj/obj/rom.vlog ./tmp/ && cat ./tmp/rom.vlog > ./tmp/ram.dat && ln -sf ../Makefile_run ./tmp/Makefile_run && cd ./tmp && timeout 1800 ../output --dump-delay 0 %DUMP_WAVE% --time-limit 0 %PC_TRACE% %DIFF_FLAG% && if [ -f logs/simu_trace.fst ]; then cp logs/simu_trace.fst ../../../../../IP/myCPU/tool/; fi"
 echo.
 echo ===============================================================
 echo   Simulation finished.

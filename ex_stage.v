@@ -322,7 +322,7 @@ module exe_stage (
         dift_inst_st_en,       // 419:412 store使能 for difftest
         dift_inst_ld_en,       // 411:404 load使能 for difftest
         dift_cnt_inst,         // 403     计数器指令 for difftest
-        dift_timer_64,         // 402:339 定时器值 for difftest
+        timer_value,           // 402:339 定时器值 for difftest（EX 直接提供）
         dift_id_inst,          // 338:307 指令编码 for difftest
         diff_vaddr,            // 306:275 load/store虚地址 for difftest
         diff_st_data,          // 274:243 store数据 for difftest
@@ -375,7 +375,7 @@ module exe_stage (
             ex_valid <= 1'b0;
         end
         else if (ex_allowin) begin
-            ex_valid <= id_to_ex_valid && !ex_mispredict_raw;
+            ex_valid <= id_to_ex_valid && !ex_mispredict;
         end
         else if (ex_ready_go && pre_mem_allowin) begin
             ex_valid <= 1'b0;
@@ -414,7 +414,8 @@ module exe_stage (
         .mem_exc_valid  (mem_exc_valid),
         .mem_ertn_flush (mem_ertn_flush),
         .wb_ertn_flush  (wb_ertn_flush),
-        .wb_exc_valid   (wb_exc_valid)
+        .wb_exc_valid   (wb_exc_valid),
+        .ex_allowin     (ex_allowin)
     );
 
     // 除法就绪信号需要寄存
@@ -440,6 +441,7 @@ module exe_stage (
     // ========== 前递输出 ==========
     assign ex_to_id_dest    = dest & {5{ex_valid}} & {5{gr_we}};
     assign ex_to_id_result  = res_from_csr ? csr_rvalue :
+                              res_from_timer ? timer_finalval :
                               alu_result;                  // 计算结果
     assign ex_to_id_load_op = ex_load_op & ex_valid;       // 加载指令标志
 

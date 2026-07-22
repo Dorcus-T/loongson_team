@@ -35,6 +35,7 @@ module mmu (
     input  wire [63:0] dmw,
     input  wire [`TLBCSR_BUS_WD-1:0] tlbcsr,
     output wire [`TLBRD_BUS_WD-1:0]  tlbrd_value,
+    output wire [ 4:0]               tlbfill_rand_index,  // TLBFILL 随机替换 index（for difftest）
 
     // pre_mem 访存 TLB 查询控制
     output wire         mem_tlb_req,    // 访存需要查 TLB 页表（页表翻译模式 && DMW 未命中）
@@ -412,6 +413,7 @@ module mmu (
             rand_index <= rand_index + 1'b1;
         end
     end
+    assign tlbfill_rand_index = rand_index;
 
     // dmw命中判定
     assign if_match[0] = vaddr_from_if[31:29] == dmw0[`CSR_DMW_VSEG]

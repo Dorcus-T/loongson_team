@@ -83,9 +83,10 @@ module mem_stage (
     wire [31:0] dift_id_inst;
     wire [31:0] dift_vaddr;
     wire [31:0] dift_st_data;
+    wire [31:0] dift_paddr;         // load/store物理地址 for difftest
     `else
     // 占位 dummy wire（保持总线位宽不变）
-    wire [209:0] _unused_diff_pad;
+    wire [241:0] _unused_diff_pad;
     `endif
 
     // ========== 解析来自EX阶段的总线 ==========
@@ -98,7 +99,8 @@ module mem_stage (
         dift_cnt_inst,       // 403     计数器指令 for difftest
         dift_timer_64,       // 402:339 定时器值 for difftest
         dift_id_inst,        // 338:307 指令编码 for difftest
-        dift_vaddr,          // 306:275 load/store虚地址 for difftest
+        dift_vaddr,          // 338:307 load/store虚地址 for difftest
+        dift_paddr,          // 306:275 load/store物理地址 for difftest（来自 PRE_MEM）
         dift_st_data,        // 274:243 store数据 for difftest
         `else
         _unused_diff_pad,   // 占位：保持非difftest字段bit位置不变
@@ -129,8 +131,7 @@ module mem_stage (
     } = pre_mem_to_mem_bus_r;
 
     `ifdef DIFFTEST_EN
-    wire [31:0] dift_paddr;         // load/store物理地址 for difftest
-    assign dift_paddr = alu_result; // TODO: 替换为MMU转换后的物理地址
+    // dift_paddr 已由 PRE_MEM 通过总线传入（= padd）
 
     // st.b/st.h 按地址偏移定位到正确的 byte lane
     wire [ 1:0] st_addr_offset = alu_result[1:0];

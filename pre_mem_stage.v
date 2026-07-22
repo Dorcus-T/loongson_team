@@ -125,7 +125,9 @@ module pre_mem_stage (
     wire [63:0] dift_timer_64;
     wire [31:0] dift_id_inst;
     wire [31:0] dift_vaddr;
+    wire [31:0] dift_paddr;
     wire [31:0] dift_st_data;
+    assign dift_paddr = padd;
     `else
     // 占位 dummy wire（保持总线位宽不变）
     wire [209:0] _unused_diff_pad;
@@ -194,10 +196,11 @@ module pre_mem_stage (
         dift_cnt_inst,     // 403     计数器指令 for difftest
         dift_timer_64,     // 402:339 定时器值 for difftest
         dift_id_inst,      // 338:307 指令编码 for difftest
-        dift_vaddr,        // 306:275 load/store虚地址 for difftest
+        dift_vaddr,        // 338:307 load/store虚地址 for difftest
+        dift_paddr,        // 306:275 load/store物理地址 for difftest（= padd）
         dift_st_data,      // 274:243 store数据 for difftest
         `else
-        210'd0,            // 占位：保持非difftest字段bit位置不变
+        242'd0,            // 占位：保持非difftest字段bit位置不变
         `endif
         tlbrd_en,          // 242     tlbrd使能
         tlbwr_en,          // 241     tlbwf使能
@@ -228,15 +231,15 @@ module pre_mem_stage (
     assign is_mem_inst = (mem_we || res_from_mem);
     // TLB 握手控制
     assign rubish = pre_exc_valid || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || !pre_mem_valid;
-    wire need_tlb_lookup = ((mem_we || res_from_mem) && !cacop_en && mem_tlb_req) || tlbsrch_en;
+    wire need_tlb_lookup = ((mem_we || res_from_mem) && !(cacop_en && cacop_code_int[4:3] != 2'b10) && mem_tlb_req) || tlbsrch_en;
     wire tlb_ready       = !need_tlb_lookup || tlb_return || utlb_hit;
     // 下游异常/flush 时放行 PRE_MEM：否则 PRE_MEM 等 cache 但 cache 请求被阻断 → 死锁
     wire pre_mem_flush_pending;
-    assign pre_mem_flush_pending = pre_mem_exc_valid || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || pre_mem_rf_valid;
+    assign pre_mem_flush_pending = pre_exc_valid || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || pre_mem_rf_valid;
 
-    assign pre_mem_ready_go = pre_mem_valid && (mem_we || res_from_mem || tlbsrch_en) && !pre_mem_exc_valid ? tlb_ready && ((dcache_cpu_req && dcache_cpu_addr_ok) || req_already || tlbsrch_en || pre_mem_flush_pending) :
-                              pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || pre_mem_flush_pending) :
-                              pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || pre_mem_flush_pending) : 1'b1;
+    assign pre_mem_ready_go = pre_mem_valid && (mem_we || res_from_mem || tlbsrch_en) && !pre_exc_valid ? tlb_ready && ((dcache_cpu_req && dcache_cpu_addr_ok) || req_already || tlbsrch_en || pre_mem_flush_pending || pre_mem_exc_valid) :
+                              pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || pre_mem_flush_pending || pre_mem_exc_valid) :
+                              pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || pre_mem_flush_pending || pre_mem_exc_valid) : 1'b1;
     assign pre_mem_allowin    = ex_ready_go && pre_mem_ready_go && (mem_allowin || !pre_mem_valid);
     assign pre_mem_to_mem_valid = pre_mem_valid;
 
@@ -318,9 +321,9 @@ module pre_mem_stage (
     assign cacop_hit_mode = cacop_en && (cacop_code_int[4:3] == 2'b10);
     assign cacop_en_final = cacop_en && pre_mem_valid
                           && !pre_exc_valid && !mem_exc_valid
-                          && !(|pre_mem_exc || pre_mem_rf_valid)
+                          && !(|pre_mem_exc) && !pre_mem_rf_valid
                           && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid
-                          && !(cacop_hit_mode && |mem_tlb_exc)
+                          && !(cacop_hit_mode && |mem_tlb_exc && !tlb_ready)
                           && !i_cacop_req_already && !d_cacop_req_already;
 
     // ========== DCache 输出信号 ==========
@@ -339,7 +342,9 @@ module pre_mem_stage (
 
     // ========== 前递输出（给ID做stall检测 + 数据前递） ==========
     assign pre_mem_to_id_dest    = dest & {5{pre_mem_valid}} & {5{gr_we}};
-    assign pre_mem_to_id_result  = res_from_csr ? csr_rvalue : alu_result;
+    assign pre_mem_to_id_result  = res_from_csr ? csr_rvalue : 
+                                   res_from_timer ? timer_finalval :
+                                   alu_result;
     assign pre_mem_to_id_load_op = ex_load_op & pre_mem_valid;
 
     // ========== 检测异常与ertn（EX自身异常 + EX自身异常有效） ==========

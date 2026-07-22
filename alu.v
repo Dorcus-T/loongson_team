@@ -14,9 +14,11 @@ module alu (
     input  wire        ex_valid,       // 无效的ex指令就不发起除法请求
     // 时钟与复位
     input  wire        clk,            // 时钟信号
-    input  wire        reset,           // 复位信号（高有效）
+    input  wire        reset,          // 复位信号（高有效）
     // 乘法器握手
-    output wire        mul_ready       // 乘法器结果就绪（1拍脉冲，复用除法器停顿框架）
+    output wire        mul_ready,      // 乘法器结果就绪（1拍脉冲，复用除法器停顿框架）
+    // 流水线控制
+    input  wire        ex_allowin      // EX 级允许接收新指令，用于防 mul/div 重复握手
 );
 
     // ========== ALU 操作码定义（每位代表一种运算） ==========
@@ -139,7 +141,8 @@ module alu (
         else if (mul_handshake) begin
             mul_inst_new <= 1'b0;
         end
-        else if (mul_ready) begin
+        else if (ex_allowin) begin
+            // 旧指令流出 EX 后才允许新乘法启动，防止 mul_ready 后重复握手
             mul_inst_new <= 1'b1;
         end
     end
@@ -214,7 +217,8 @@ module alu (
         else if (signed_handshake || unsigned_handshake) begin
             div_inst_new <= 1'b0;
         end
-        else if (div_ready_signed || div_ready_unsigned) begin
+        else if (ex_allowin) begin
+            // 旧指令流出 EX 后才允许新除法启动，防止 div_ready 后重复握手
             div_inst_new <= 1'b1;
         end
     end

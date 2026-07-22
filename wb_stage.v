@@ -247,8 +247,8 @@ module wb_stage (
     //冲刷指令刚进入wb，valid必为1，发出冲刷信号，下一个上跳让除了if的valid都为0，因而无法再次发冲刷信号
 
     `ifdef DIFFTEST_EN
-    // 包含所有有效非异常指令（含分支/store），保证difftest与NEMU步调一致
-    wire real_valid = wb_valid && !wb_exc_valid;
+    // INT 不提交（只走 ExcpEvent→raise_intr），其余均提交
+    wire real_valid = wb_valid && (!wb_exc_valid || syscall || brk);
     assign ws_valid_diff        = real_valid        ;
     assign ws_timer_64_diff     = dift_timer_64     ;
     assign ws_cnt_inst_diff     = dift_cnt_inst     ;

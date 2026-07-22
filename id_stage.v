@@ -53,9 +53,7 @@ module id_stage (
     input  wire [31:0]                  csr_rvalue,          // csr访问指令读的数据
     output wire [13:0]                  csr_id_num,          // csr寄存器号码(id阶段用于读)
     // 来自csr的中断判断
-    input  wire                         has_int,
-    // 定时器值（用于difftest和计数器指令）
-    input  wire [63:0]                  timer_64
+    input  wire                         has_int
     `ifdef DIFFTEST_EN
     ,
     // difftest
@@ -604,7 +602,7 @@ module id_stage (
         inst_st_en,     // 411:404 store使能 for difftest
         inst_ld_en,     // 403:396 load使能 for difftest
         cnt_inst,       // 395     计数器指令 for difftest
-        timer_64,       // 394:331 定时器值 for difftest
+        64'd0,          // 394:331 定时器值 for difftest（由 EX 直接提供）
         id_inst,        // 330:299 指令编码 for difftest
         `else
         114'd0,         // 占位：保持非difftest字段bit位置不变

@@ -18,18 +18,43 @@ open_project $PROJECT
 
 # ========== 2. Sync source files ==========
 puts "=== 2. Sync source files ==="
+
+# 2a. Replace stale imported copies with fresh IP/myCPU/ sources
+# The project may have old copies in imports/myCPU/ that are out of date.
 set existing [get_files -quiet -of_objects [get_filesets sources_1]]
+set replaced 0
+set added 0
+
 foreach f [lsort [glob -nocomplain "$CPU_DIR/*.v"]] {
     set tail [file tail $f]
     set found 0
+    set stale_path ""
+
     foreach e $existing {
-        if {[file tail $e] eq $tail} { set found 1; break }
+        if {[file tail $e] eq $tail} {
+            set found 1
+            # Check if the project file is a stale copy (under imports/)
+            if {[string match "*imports*" $e]} {
+                set stale_path $e
+            }
+            break
+        }
     }
-    if {!$found} {
-        puts "  adding $tail"
+
+    if {$stale_path ne ""} {
+        # Replace stale import with fresh source
+        puts "  replace $tail (was stale import)"
+        remove_files -fileset sources_1 $stale_path -quiet
         import_files -fileset sources_1 $f
+        incr replaced
+    } elseif {!$found} {
+        # New file not yet in project
+        puts "  add $tail"
+        import_files -fileset sources_1 $f
+        incr added
     }
 }
+puts "  $replaced replaced, $added added"
 
 # ========== 3. Synthesis ==========
 puts "=== 3. Synthesis ==="

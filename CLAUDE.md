@@ -10,7 +10,7 @@ LoongArch (LA) 6级顺序流水线 CPU，FPGA 原型验证用。
 | 总线接口 | AXI3 Master，cache_axi_bridge 桥接 |
 | Cache | 2路组相联 ICache + DCache，各 8KB (256行×32B) |
 | TLB | 32项全相联 MTLB + STLB，虚拟地址翻译 |
-| 乘法器 | 64×64 纯组合逻辑（一拍出结果） |
+| 乘法器 | 64×64 流水线（3级，mult/unsigned/signed 三结果并行，96位输出） |
 | 除法器 | 串行迭代，多拍完成，带握手停顿 |
 | 综合规模 | ~566K cells, ~162K DFFs |
 | 当前 fmax | 待 Vivado 完整工程分析确定 |
@@ -34,7 +34,9 @@ regfile.v            — 32×32 通用寄存器堆，双读端口
 cache.v              — 2路组相联 Cache（例化 2 次：ICache + DCache）
 cache_axi_bridge.v   — Cache SRAM 协议 ↔ AXI3 转换
 sp_ram.v             — 单端口同步 RAM（参数化位宽/深度，字节写使能）
+mymul.v              — 流水线乘法器（IDLE→STAGE1→STAGE2，96位输出）
 mydiv.v / mydivu.v   — 有符号/无符号串行除法器（多拍握手）
+utlb.v               — 4项全相联 μTLB（组合逻辑同拍查找+LRU替换）
 timer_64bit.v        — 64位周期计数器
 decoder_2_4/4_16/5_32/6_64.v — 译码辅助模块
 mycpu.h              — 总线位宽、CSR 地址、异常编码宏定义
@@ -48,6 +50,16 @@ tmp/                 — 临时文件（仿真测试等）
 - Verilator 综合
 - iverilog lint（`.vscode/settings.json`）
 - difftest 对比验证（`DIFFTEST_EN` 宏控制）
+
+### 运行测试（WSL / 双击 bat）
+
+| 脚本 | 用途 |
+|------|------|
+| `tool/run_mycpu_func.bat` | mycpu 功能测试 |
+| `tool/run_nscscc_func.bat` | NSCSCC 功能测试 |
+| `tool/run_quick_sort.bat` | 快速排序测试 |
+| `tool/run_cpu_diag.bat` | CPU 诊断测试 |
+| `tool/run_perf.bat` | 性能测试 |
 
 ## 时序分析
 
@@ -64,10 +76,10 @@ tmp/                 — 临时文件（仿真测试等）
 
 ### 优化方向（基于模块分析）
 
-1. **乘法器流水化** — 64×64 纯组合乘法器是最大瓶颈，加 2-3 级流水预估 fmax 翻倍
+1. **乘法器已流水化** — 3 级流水乘法器(mymul.v)，STA 中仍需关注 mult 路径延迟
 2. **ALU 结果 MUX 平衡化** — 19路 OR 改二叉树，减少级联门延迟
 3. **TLB 加流水级** — 仅当 STA 确认在关键路径上才改（当前 TLB cell 在 400MHz 下几乎不增，可能非瓶颈）
-4. **乘法结果不参与前递** — 强迫走寄存器堆转发，避免跨级组合路径
+4. **乘法结果前递策略** — 流水化后多拍出结果，前递策略需根据 STA 重新评估
 
 > 精确 fmax 数字以 Vivado 完整工程分析为准，Yosys/OpenSTA 的结果仅用于横比。
 
@@ -78,7 +90,7 @@ tmp/                 — 临时文件（仿真测试等）
 - **SRAM 协议两通道独立**：inst_sram（取指）和 data_sram（访存）各自握手
 - **CSR 写后读冒险**：跟踪 CSR 写所在的流水级（EX→PRE_MEM→MEM→WB）来解决 RAW
 - **STA 假路径**：除法器多拍迭代路径在 STA 中需设 false_path/multicycle，否则 WNS 虚高
-- **乘法器不能前递**：乘结果一拍出不来（64×64 纯组合），前递给下条指令会导致时序违规。当前设计对此未做特殊处理
+- **乘法器前递**：乘结果为 3 级流水线多拍输出（mymul.v），前递时需注意流水状态。当前若前递给下条指令需检查时序
 - **dcache miss 停顿**：dcache miss 时 mem_stage 一直等 data_ok，期间不能流水前进
 - **PRE_MEM 级**：MMU 翻译（va→pa）延迟在此级隐藏；若时序仍有问题可加寄存器切分 MMU→cache tag 路径
 - **分支预测 0 气泡路径**：BTB/RAS 组合输出不经寄存器直连 pre_if_pc_r 的 D 端 MUX。

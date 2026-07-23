@@ -206,10 +206,8 @@ module icache (
             end
             MAIN_REFILL: begin
                 if (refill_last || cacop_en_r) begin
-                    // CACOP / uncached → IDLE
                     if (cacop_en_r || !refill_cached)
                         main_next = MAIN_IDLE;
-                    // 提前接受了新请求 → LOOKUP，否则 → IDLE
                     else if (refill_already_accept_new_req)
                         main_next = MAIN_LOOKUP;
                     else
@@ -223,14 +221,31 @@ module icache (
     end
 
     // ============================================================
+    // Tag/Data Bypass — LOOKUP-from-early-accept 时用 refill 数据替代过期 RAM 输出
+    // ============================================================
+    wire bypass_active;
+    assign bypass_active = main_lookup && refill_already_accept_new_req
+                         && (req_index == refill_index);
+
+    wire [`TAG_WIDTH:0] tagv_lookup [0:`WAY_NUM-1];
+    genvar gb_byp;
+    generate
+        for (gb_byp = 0; gb_byp < `WAY_NUM; gb_byp = gb_byp + 1) begin : tagv_bypass_gen
+            assign tagv_lookup[gb_byp] = (bypass_active && (gb_byp[WAY_IDX_W-1:0] == refill_replace_way))
+                                      ? {refill_tag, 1'b1}
+                                      : tagv_rdata[gb_byp];
+        end
+    endgenerate
+
+    // ============================================================
     // Tag 比较与命中判断
     // ============================================================
     wire [`WAY_NUM-1:0] way_hit;
     genvar gh;
     generate
         for (gh = 0; gh < `WAY_NUM; gh = gh + 1) begin : way_hit_gen
-            assign way_hit[gh] = tagv_rdata[gh][0]
-                               && (tagv_rdata[gh][`TAG_WIDTH:1] == req_tag)
+            assign way_hit[gh] = tagv_lookup[gh][0]
+                               && (tagv_lookup[gh][`TAG_WIDTH:1] == req_tag)
                                && (req_cached || cacop_en_r);
         end
     endgenerate
@@ -250,7 +265,7 @@ module icache (
     end
 
     // ============================================================
-    // 无效路查找（tagv_rdata 到齐后的 LOOKUP 拍有效）
+    // 无效路查找（使用 bypass 后的 tagv 视图）
     // ============================================================
     reg  [WAY_IDX_W-1:0] invalid_way;
     reg                  has_invalid;
@@ -259,7 +274,7 @@ module icache (
         has_invalid = 1'b0;
         invalid_way = {WAY_IDX_W{1'b0}};
         for (vwi = `WAY_NUM-1; vwi >= 0; vwi = vwi - 1)
-            if (!tagv_rdata[vwi][0]) begin
+            if (!tagv_lookup[vwi][0]) begin
                 has_invalid = 1'b1;
                 invalid_way = vwi[WAY_IDX_W-1:0];
             end
@@ -388,7 +403,7 @@ module icache (
             refill_already_accept_new_req <= 1'b0;
         else if (refill_early_accept && accept_ok)
             refill_already_accept_new_req <= 1'b1;
-        else if (main_refill && (refill_last || cacop_en_r))
+        else if (main_lookup || main_idle)
             refill_already_accept_new_req <= 1'b0;
     end
 
@@ -396,7 +411,9 @@ module icache (
     // 数据选择 — 命中路选字
     // ============================================================
     wire [31:0] hit_word;
-    assign hit_word = bank_rdata[hit_way_idx][req_offset[3:2]];
+    assign hit_word = (bypass_active && (hit_way_idx == refill_replace_way))
+                    ? refill_line[req_offset[3:2]]
+                    : bank_rdata[hit_way_idx][req_offset[3:2]];
 
     // ============================================================
     // 读结果就绪判断
@@ -601,44 +618,28 @@ module icache (
 
     // ============================================================
     // 性能计数器
-    //
-    //               perf_access_cnt   cached 指令 LOOKUP 拍数
-    //  未命中率 = -----------------
-    //               perf_miss_cnt     其中 miss 拍数
-    //
-    //               perf_refill_cnt   cache line AXI 填充次数
-    //
-    //  perf_cycle                    仿真总周期（含复位前）
     // ============================================================
-    reg [31:0] perf_total_req  /*verilator public*/;
-    reg [31:0] perf_access_cnt /*verilator public*/;
-    reg [31:0] perf_miss_cnt   /*verilator public*/;
-    reg [31:0] perf_refill_cnt /*verilator public*/;
-    reg [31:0] perf_cycle      /*verilator public*/;
+    reg [31:0] perf_total_req     /*verilator public*/;
+    reg [31:0] perf_access_cnt    /*verilator public*/;
+    reg [31:0] perf_miss_cnt      /*verilator public*/;
+    reg [31:0] perf_real_miss_cnt /*verilator public*/;
     always @(posedge clk) begin
         if (~resetn) begin
-            perf_total_req  <= 32'd0;
-            perf_access_cnt <= 32'd0;
-            perf_miss_cnt   <= 32'd0;
-            perf_refill_cnt <= 32'd0;
-            perf_cycle      <= 32'd0;
+            perf_total_req     <= 32'd0;
+            perf_access_cnt    <= 32'd0;
+            perf_miss_cnt      <= 32'd0;
+            perf_real_miss_cnt <= 32'd0;
         end
         else begin
-            perf_cycle <= perf_cycle + 32'd1;
-
             if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-
-            // 只统计 cached 指令，不含 uncached、CACOP
             if (main_lookup && req_cached && !cacop_en_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
-                if (!cache_inst_hit)
-                    perf_miss_cnt <= perf_miss_cnt + 32'd1;
+                if (!cache_inst_hit) begin
+                    perf_miss_cnt      <= perf_miss_cnt      + 32'd1;
+                    perf_real_miss_cnt <= perf_real_miss_cnt + 32'd1;
+                end
             end
-
-            // cache line 从 AXI 填充的次数（不含 CACOP/uncached）
-            if (enter_refill && req_cached && !cacop_en_r)
-                perf_refill_cnt <= perf_refill_cnt + 32'd1;
         end
     end
 

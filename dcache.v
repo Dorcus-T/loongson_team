@@ -44,7 +44,9 @@ module dcache (
     output wire                    cacop_rdy
 );
 
-    // ========== 局部参数 ==========
+    // ============================================================
+    // 局部参数
+    // ============================================================
     localparam INDEX_DEPTH = 1 << `INDEX_WIDTH;
     localparam BANK_NUM    = 4;
     localparam WAY_IDX_W   = $clog2(`WAY_NUM);
@@ -65,43 +67,36 @@ module dcache (
 
     localparam VC_IDX_W = (VC_DEPTH > 1) ? $clog2(VC_DEPTH) : 1;
 
-    // ========== RAM 存储阵列 ==========
-    reg                 d_ram    [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
-    wire [`TAG_WIDTH:0] tagv_rdata [0:`WAY_NUM-1];
-    reg                 d_rdata    [0:`WAY_NUM-1];
-    wire [31:0]         bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
+    // ============================================================
+    // RAM 存储阵列
+    // ============================================================
+    wire [`TAG_WIDTH:0]  tagv_rdata [0:`WAY_NUM-1];
+    reg                  d_rdata    [0:`WAY_NUM-1];
+    wire [31:0]          bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
+    reg                  d_ram      [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
 
-    // ========== 统一 RAM 读地址 ==========
-    wire [`INDEX_WIDTH-1:0] ram_raddr_req;
-    assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
-
-    // ========== 新请求接受条件（LOOKUP 命中衔接） ==========
-    wire lookup_accept_cond;
-    assign lookup_accept_cond = main_lookup && !hit_write_wb && accept_ok && (cpu_req || cacop_en);
-
-    wire ram_read_en;
-    assign ram_read_en = accept_new_req || main_swap;
-
-    wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = main_swap ? req_index : ram_raddr_req;
-
-    // ========== CACOP 逻辑 ==========
-    wire cacop_is_index;
-    wire cacop_is_hit;
-    wire [`INDEX_WIDTH-1:0] cacop_index;
-    wire [WAY_IDX_W-1:0] cacop_way;
-    assign cacop_is_index  = cacop_en && (cacop_code[4:3] != 2'b10);
-    assign cacop_is_hit    = cacop_en && (cacop_code[4:3] == 2'b10);
-    assign cacop_index = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
-    assign cacop_way = cacop_va[WAY_IDX_W-1:0];
-
-    // ========== 状态寄存器 ==========
+    // ============================================================
+    // 状态寄存器
+    // ============================================================
     reg  [4:0] main_state;
     reg  [4:0] main_next;
     reg        wb_state;
     reg        wb_next;
 
-    // ========== Request Buffer ==========
+    // ============================================================
+    // 状态机节点
+    // ============================================================
+    wire main_idle    = (main_state == MAIN_IDLE);
+    wire main_lookup  = (main_state == MAIN_LOOKUP);
+    wire main_swap    = (main_state == MAIN_SWAP);
+    wire main_replace = (main_state == MAIN_REPLACE);
+    wire main_refill  = (main_state == MAIN_REFILL);
+    wire wb_idle      = (wb_state == WB_IDLE);
+    wire wb_write     = (wb_state == WB_WRITE);
+
+    // ============================================================
+    // Request Buffer
+    // ============================================================
     reg                     req_op;
     reg  [`INDEX_WIDTH-1:0]  req_index;
     reg  [`TAG_WIDTH-1:0]   req_tag;
@@ -116,67 +111,110 @@ module dcache (
     reg                     cacop_is_index_r;
     reg                     cacop_is_hit_r;
 
-    // ========== Miss Buffer ==========
+    // ============================================================
+    // Miss Buffer
+    // ============================================================
     reg  [WAY_IDX_W-1:0] miss_replace_way;
-    reg  [ 1:0] miss_refill_cnt;
-    reg         wr_req_accepted;
+    reg  [ 1:0]          miss_refill_cnt;
+    reg                  wr_req_accepted;
 
-    // ========== Refill Buffer ==========
+    // ============================================================
+    // Refill Buffer
+    // ============================================================
     reg  [31:0] refill_buffer [0:BANK_NUM-1];
 
-    // ========== 树状伪 LRU ==========
-    reg  [PLRU_W-1:0] plru [0:INDEX_DEPTH-1];
-
-    // ========== Write Buffer ==========
+    // ============================================================
+    // Write Buffer
+    // ============================================================
     reg                  wb_valid;
     reg  [`WAY_NUM-1:0]   wb_way_hit;
     reg  [`INDEX_WIDTH-1:0] wb_index;
     reg  [ 1:0]          wb_bank;
     reg  [31:0]          wb_wstrb_mask;
     reg  [31:0]          wb_wdata;
-    reg                  hit_write_lookup_r;
 
-    // ========== Victim Cache 存储 ==========
+    // ============================================================
+    // Victim Cache 存储
+    // ============================================================
     reg                  vc_valid [0:VC_DEPTH-1];
     reg  [`TAG_WIDTH+`INDEX_WIDTH-1:0] vc_addr [0:VC_DEPTH-1];
     reg  [127:0]         vc_data  [0:VC_DEPTH-1];
     reg  [VC_IDX_W-1:0]  vc_fifo_ptr;
 
-    // ========== WB 碰撞记录 ==========
+    // ============================================================
+    // WB 碰撞记录
+    // ============================================================
     reg                  collide_valid_r;
     reg  [`WAY_NUM-1:0]   collide_wayhit_r;
     reg                  data_sent_r;
     reg                  vc_swap_wb_r;
 
-    // ========== 状态机节点 ==========
-    wire main_idle    = (main_state == MAIN_IDLE);
-    wire main_lookup  = (main_state == MAIN_LOOKUP);
-    wire main_swap    = (main_state == MAIN_SWAP);
-    wire main_replace = (main_state == MAIN_REPLACE);
-    wire main_refill  = (main_state == MAIN_REFILL);
-    wire wb_idle      = (wb_state == WB_IDLE);
-    wire wb_write     = (wb_state == WB_WRITE);
+    // ============================================================
+    // 树状伪 LRU
+    // ============================================================
+    reg  [PLRU_W-1:0] plru [0:INDEX_DEPTH-1];
 
-    // ========== Hit Write 冲突检测 ==========
-    wire new_is_load;
-    assign new_is_load = (cpu_op == 1'b0);
+    // ============================================================
+    // CACOP 辅助信号
+    // ============================================================
+    wire cacop_is_index;
+    wire cacop_is_hit;
+    wire [`INDEX_WIDTH-1:0] cacop_index;
+    wire [WAY_IDX_W-1:0]    cacop_way;
+    assign cacop_is_index  = cacop_en && (cacop_code[4:3] != 2'b10);
+    assign cacop_is_hit    = cacop_en && (cacop_code[4:3] == 2'b10);
+    assign cacop_index     = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
+    assign cacop_way       = cacop_va[WAY_IDX_W-1:0];
 
-    wire hit_write_lookup;
-    assign hit_write_lookup = main_lookup
-                            && cache_hit
-                            && req_op
-                            && cpu_req
-                            && new_is_load
-                            && (cpu_offset[3:2] == req_offset[3:2])
-                            && (cpu_index == req_index);
+    // ============================================================
+    // 统一 RAM 读地址
+    // ============================================================
+    wire [`INDEX_WIDTH-1:0] ram_raddr_req;
+    assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
 
-    wire hit_write_wb;
-    assign hit_write_wb = wb_write
-                       && cpu_req
-                       && new_is_load
-                       && (cpu_offset[3:2] == wb_bank);
+    wire ram_read_en;
+    assign ram_read_en = accept_new_req || main_swap;
 
-    // ========== Tag 比较与命中判断 ==========
+    wire [`INDEX_WIDTH-1:0] ram_raddr;
+    assign ram_raddr = main_swap ? req_index : ram_raddr_req;
+
+    // ============================================================
+    // accept_new_req
+    // ============================================================
+    wire accept_new_req;
+    assign accept_new_req = (main_idle && accept_ok && (cpu_req || cacop_en))
+                         || (main_lookup && !hit_write_block && accept_ok && (cpu_req || cacop_en) && cache_hit);
+
+    // ============================================================
+    // Hit Write 冲突检测
+    // ============================================================
+    // WB 被 RAM 读抢端口时暂缓写入
+    wire wb_stall;
+    assign wb_stall = wb_write && ram_read_en;
+
+    // LOOKUP st 命中 + WB 忙 + 新请求 → 阻塞（防止 WB 数据被覆盖）
+    wire hit_write_block;
+    assign hit_write_block = wb_write && (cpu_req || cacop_en)
+                           && main_lookup && cache_hit && req_op;
+
+    // WB 前推：当前 LOOKUP 是 ld 且 WB 有未写入的同 index/way/bank 数据
+    wire wb_fwd_active;
+    assign wb_fwd_active = main_lookup && wb_write && !req_op
+                         && (wb_index == req_index)
+                         && wb_way_hit[hit_way_idx]
+                         && (wb_bank == req_offset[3:2]);
+
+    wire [31:0] wb_fwd_data;
+    assign wb_fwd_data = (wb_wdata & wb_wstrb_mask)
+                       | (bank_rdata[hit_way_idx][req_offset[3:2]] & ~wb_wstrb_mask);
+
+    // WB 导致某路在 LOOKUP 当前行变为脏 — 综合到 victim/cacop 脏位判定
+    wire [`WAY_NUM-1:0] wb_line_dirty;
+    assign wb_line_dirty = ({`WAY_NUM{wb_write && (wb_index == req_index)}} & wb_way_hit);
+
+    // ============================================================
+    // Tag 比较与命中判断
+    // ============================================================
     wire [`WAY_NUM-1:0] way_hit;
     genvar gh;
     generate
@@ -190,7 +228,9 @@ module dcache (
     wire cache_hit;
     assign cache_hit = (|way_hit) && !cacop_en_r;
 
-    // ========== 替换 helper ==========
+    // ============================================================
+    // 命中路号编码
+    // ============================================================
     reg  [WAY_IDX_W-1:0] hit_way_idx;
     integer hwi;
     always @(*) begin
@@ -199,6 +239,9 @@ module dcache (
             if (way_hit[hwi]) hit_way_idx = hwi[WAY_IDX_W-1:0];
     end
 
+    // ============================================================
+    // 无效路查找
+    // ============================================================
     reg  [WAY_IDX_W-1:0] invalid_way;
     reg                  has_invalid;
     integer vwi;
@@ -212,7 +255,9 @@ module dcache (
             end
     end
 
-    // ========== 树状伪 LRU - 替换路预计算 ==========
+    // ============================================================
+    // PLRU 预计算
+    // ============================================================
     wire pre_plru_en;
     wire [`INDEX_WIDTH-1:0] pre_plru_index;
     assign pre_plru_en    = accept_new_req;
@@ -230,18 +275,35 @@ module dcache (
 
     reg  [WAY_IDX_W-1:0] plru_victim_r;
     always @(posedge clk) begin
-        if (~resetn) begin
+        if (~resetn)
             plru_victim_r <= {WAY_IDX_W{1'b0}};
-        end
-        else if (pre_plru_en) begin
+        else if (pre_plru_en)
             plru_victim_r <= plru_victim_pre;
-        end
     end
+
+    // ============================================================
+    // 受害者路号
+    // ============================================================
+    reg  [WAY_IDX_W-1:0] use_way;
+    always @(*) begin
+        if (cacop_en_r)
+            use_way = (cacop_code_r[4:3] == 2'b10) ? hit_way_idx : cacop_way_r;
+        else
+            use_way = victim_way;
+    end
+
+    wire victim_needed;
+    assign victim_needed = cacop_en_r
+                         ? (  (cacop_code_r[4:3] == 2'b01)
+                           || (cacop_code_r[4:3] == 2'b10 && (|way_hit)) )
+                         : req_cached;
 
     wire [WAY_IDX_W-1:0] victim_way;
     assign victim_way = has_invalid ? invalid_way : plru_victim_r;
 
-    // ========== VC 查找 ==========
+    // ============================================================
+    // VC 查找
+    // ============================================================
     wire [VC_DEPTH-1:0] vc_match;
     genvar gv;
     generate
@@ -281,21 +343,9 @@ module dcache (
     wire vc_serve;
     assign vc_serve = main_lookup && !cache_hit && vc_hit;
 
-    // ========== WB 碰撞检测 ==========
-    reg  [WAY_IDX_W-1:0] use_way;
-    always @(*) begin
-        if (cacop_en_r)
-            use_way = (cacop_code_r[4:3] == 2'b10) ? hit_way_idx : cacop_way_r;
-        else
-            use_way = victim_way;
-    end
-
-    wire victim_needed;
-    assign victim_needed = cacop_en_r
-                         ? (  (cacop_code_r[4:3] == 2'b01)
-                           || (cacop_code_r[4:3] == 2'b10 && (|way_hit)) )
-                         : req_cached;
-
+    // ============================================================
+    // 替换决策信号
+    // ============================================================
     wire wb_collide;
     assign wb_collide = victim_needed && tagv_rdata[use_way][0]
                       && (collide_valid_r && collide_wayhit_r[use_way]);
@@ -316,121 +366,97 @@ module dcache (
     wire need_bus_rd;
     assign need_bus_rd = (req_cached || !req_op) && !cacop_en_r;
 
-    // ========== 新请求接受标志 ==========
-    wire accept_new_req;
-    assign accept_new_req = (main_idle && !hit_write_wb && accept_ok && (cpu_req || cacop_en))
-                         || (lookup_accept_cond && cache_hit);
-
-    // ========== 主状态机 - 时序 ==========
+    // ============================================================
+    // 主状态机 — 时序
+    // ============================================================
     always @(posedge clk) begin
-        if (~resetn) begin
+        if (~resetn)
             main_state <= MAIN_IDLE;
-        end
-        else begin
+        else
             main_state <= main_next;
-        end
     end
 
-    // ========== Write Buffer 状态机 - 时序 ==========
-    always @(posedge clk) begin
-        if (~resetn) begin
-            wb_state <= WB_IDLE;
-        end
-        else begin
-            wb_state <= wb_next;
-        end
-    end
-
-    // ========== 主状态机 - 下一状态逻辑（D-cache：无预取） ==========
+    // ============================================================
+    // 主状态机 — 下一状态逻辑
+    // ============================================================
     always @(*) begin
         case (main_state)
             MAIN_IDLE: begin
-                if (accept_new_req) begin
+                if (accept_new_req)
                     main_next = MAIN_LOOKUP;
-                end
-                else begin
+                else
                     main_next = MAIN_IDLE;
-                end
             end
             MAIN_LOOKUP: begin
-                if (goto_swap) begin
+                if (goto_swap)
                     main_next = MAIN_SWAP;
-                end
-                else if (vc_fill_lookup) begin
+                else if (vc_fill_lookup)
                     main_next = MAIN_IDLE;
-                end
-                else if (vc_serve) begin
+                else if (vc_serve)
                     main_next = MAIN_REPLACE;
-                end
-                else if (rd_req_lookup && wr_req_lookup && rd_rdy && wr_rdy) begin
+                else if (rd_req_lookup && wr_req_lookup && rd_rdy && wr_rdy)
                     main_next = MAIN_REFILL;
-                end
-                else if (rd_req_lookup && rd_rdy) begin
+                else if (rd_req_lookup && rd_rdy)
                     main_next = MAIN_REFILL;
-                end
-                else if (!cache_hit) begin
+                else if (!cache_hit)
                     main_next = MAIN_REPLACE;
-                end
-                else if (accept_new_req) begin
+                else if (accept_new_req)
                     main_next = MAIN_LOOKUP;
-                end
-                else begin
+                else
                     main_next = MAIN_IDLE;
-                end
             end
             MAIN_SWAP: begin
                 main_next = MAIN_LOOKUP;
             end
             MAIN_REPLACE: begin
-                if (vc_swap_wb_r) begin
+                if (vc_swap_wb_r)
                     main_next = (wr_req && wr_rdy) ? MAIN_IDLE : MAIN_REPLACE;
-                end
-                else if (need_bus_rd && !miss_needs_write) begin
+                else if (need_bus_rd && !miss_needs_write)
                     main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
-                end
                 else if (need_bus_rd && miss_needs_write) begin
-                    if (wr_req_accepted || !(cached_wr || uncached_wr)) begin
+                    if (wr_req_accepted || !(cached_wr || uncached_wr))
                         main_next = rd_rdy ? MAIN_REFILL : MAIN_REPLACE;
-                    end
-                    else begin
+                    else
                         main_next = MAIN_REPLACE;
-                    end
                 end
                 else if (is_uncached_store) begin
-                    if (wr_req_accepted) begin
+                    if (wr_req_accepted)
                         main_next = wr_done ? MAIN_IDLE : MAIN_REPLACE;
-                    end
-                    else begin
+                    else
                         main_next = MAIN_REPLACE;
-                    end
                 end
                 else if (cacop_en_r) begin
-                    if (miss_needs_write && !wr_req_accepted) begin
+                    if (miss_needs_write && !wr_req_accepted)
                         main_next = MAIN_REPLACE;
-                    end
-                    else begin
+                    else
                         main_next = MAIN_REFILL;
-                    end
                 end
-                else begin
+                else
                     main_next = MAIN_IDLE;
-                end
             end
             MAIN_REFILL: begin
-                if (return_valid && return_last || cacop_en_r) begin
+                if (return_valid && return_last || cacop_en_r)
                     main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
-                end
-                else begin
+                else
                     main_next = MAIN_REFILL;
-                end
             end
-            default: begin
-                main_next = MAIN_IDLE;
-            end
+            default: main_next = MAIN_IDLE;
         endcase
     end
 
-    // ========== Write Buffer 状态机 - 下一状态逻辑 ==========
+    // ============================================================
+    // Write Buffer 状态机 — 时序
+    // ============================================================
+    always @(posedge clk) begin
+        if (~resetn)
+            wb_state <= WB_IDLE;
+        else
+            wb_state <= wb_next;
+    end
+
+    // ============================================================
+    // Write Buffer 状态机 — 下一状态逻辑
+    // ============================================================
     wire wb_new_store_hit;
     assign wb_new_store_hit = main_lookup && lookup_store_hit;
 
@@ -440,15 +466,17 @@ module dcache (
                 wb_next = wb_new_store_hit ? WB_WRITE : WB_IDLE;
             end
             WB_WRITE: begin
-                wb_next = wb_new_store_hit ? WB_WRITE : WB_IDLE;
+                wb_next = wb_stall ? WB_WRITE
+                       : wb_new_store_hit ? WB_WRITE
+                       : WB_IDLE;
             end
-            default: begin
-                wb_next = WB_IDLE;
-            end
+            default: wb_next = WB_IDLE;
         endcase
     end
 
-    // ========== 树状伪 LRU - 命中/填充时标 MRU ==========
+    // ============================================================
+    // PLRU 更新
+    // ============================================================
     wire                 plru_upd_en;
     wire [WAY_IDX_W-1:0] plru_upd_way;
     assign plru_upd_en  = (main_lookup && cache_hit)
@@ -474,7 +502,9 @@ module dcache (
         end
     end
 
-    // ========== Request Buffer ==========
+    // ============================================================
+    // Request Buffer — 时序更新
+    // ============================================================
     always @(posedge clk) begin
         if (accept_new_req) begin
             req_op      <= cpu_op;
@@ -497,7 +527,9 @@ module dcache (
         end
     end
 
-    // ========== Miss Buffer ==========
+    // ============================================================
+    // Miss Buffer — 时序更新
+    // ============================================================
     always @(posedge clk) begin
         if (~resetn) begin
             miss_replace_way <= {WAY_IDX_W{1'b0}};
@@ -511,27 +543,24 @@ module dcache (
                     else
                         miss_replace_way <= cacop_way_r;
                 end
-                else begin
+                else
                     miss_replace_way <= victim_way;
-                end
             end
             if ((main_lookup && rd_req_lookup && rd_rdy)
-             || (main_replace && need_bus_rd && rd_rdy)) begin
+             || (main_replace && need_bus_rd && rd_rdy))
                 miss_refill_cnt <= 2'd0;
-            end
-            else if (main_refill && return_valid) begin
+            else if (main_refill && return_valid)
                 miss_refill_cnt <= miss_refill_cnt + 2'd1;
-            end
-            if (main_replace && wr_req && wr_rdy) begin
+            if (main_replace && wr_req && wr_rdy)
                 wr_req_accepted <= 1'b1;
-            end
-            else if (!main_replace) begin
+            else if (!main_replace)
                 wr_req_accepted <= 1'b0;
-            end
         end
     end
 
-    // ========== Write Buffer - 锁存命中 store ==========
+    // ============================================================
+    // Write Buffer — 时序更新
+    // ============================================================
     always @(posedge clk) begin
         if (main_lookup && lookup_store_hit) begin
             wb_valid   <= 1'b1;
@@ -541,18 +570,14 @@ module dcache (
             wb_wstrb_mask <= req_wstrb_mask;
             wb_wdata   <= req_wdata;
         end
-        else if (wb_write && !wb_new_store_hit) begin
+        else if (wb_write && !wb_stall && !wb_new_store_hit) begin
             wb_valid <= 1'b0;
-        end
-        if (main_lookup && lookup_store_hit) begin
-            hit_write_lookup_r <= hit_write_lookup;
-        end
-        else begin
-            hit_write_lookup_r <= 1'b0;
         end
     end
 
-    // ========== WB 碰撞记录 / data_sent - 时序 ==========
+    // ============================================================
+    // WB 碰撞记录 — 时序
+    // ============================================================
     always @(posedge clk) begin
         if (~resetn) begin
             collide_valid_r  <= 1'b0;
@@ -568,34 +593,32 @@ module dcache (
             else if (main_swap) begin
                 collide_valid_r <= 1'b0;
             end
-            if (goto_swap) begin
+            if (goto_swap)
                 data_sent_r <= 1'b1;
-            end
-            else if (!main_swap) begin
+            else if (!main_swap)
                 data_sent_r <= 1'b0;
-            end
-            if (main_lookup) begin
+            if (main_lookup)
                 vc_swap_wb_r <= vc_serve && !wb_collide && victim_dirty;
-            end
         end
     end
 
-    // ========== WB 前推至 victim 行 — 窗口二消除 ==========
+    // ============================================================
+    // WB 前推至 victim 行 — 窗口二消除
+    // ============================================================
     reg wb_collide_lookup_r;
     always @(posedge clk) begin
-        if (~resetn) begin
+        if (~resetn)
             wb_collide_lookup_r <= 1'b0;
-        end
         else if (main_lookup && !cache_hit && victim_needed
-                 && wb_write && (wb_index == req_index) && wb_way_hit[use_way]) begin
+                 && wb_write && (wb_index == req_index) && wb_way_hit[use_way])
             wb_collide_lookup_r <= 1'b1;
-        end
-        else if (!main_replace) begin
+        else if (!main_replace)
             wb_collide_lookup_r <= 1'b0;
-        end
     end
 
-    // ========== VC 交换写 ==========
+    // ============================================================
+    // VC 交换写
+    // ============================================================
     wire vc_fill_lookup;
     wire vc_fill_replace;
     wire vc_fill;
@@ -616,7 +639,9 @@ module dcache (
         end
     endgenerate
 
-    // ========== VC 存储更新 ==========
+    // ============================================================
+    // VC 存储更新
+    // ============================================================
     wire vc_insert;
     assign vc_insert = refill_d_we && VC_EN
                      && tagv_rdata[miss_replace_way][0]
@@ -625,9 +650,8 @@ module dcache (
     integer vci;
     always @(posedge clk) begin
         if (~resetn) begin
-            for (vci = 0; vci < VC_DEPTH; vci = vci + 1) begin
+            for (vci = 0; vci < VC_DEPTH; vci = vci + 1)
                 vc_valid[vci] <= 1'b0;
-            end
             vc_fifo_ptr <= {VC_IDX_W{1'b0}};
         end
         else begin
@@ -635,9 +659,8 @@ module dcache (
                 for (vci = 0; vci < VC_DEPTH; vci = vci + 1) begin
                     if (vc_valid[vci]
                      && (cacop_is_hit_r ? (vc_addr[vci] == {req_tag, req_index})
-                                        : (vc_addr[vci][`INDEX_WIDTH-1:0] == req_index))) begin
+                                        : (vc_addr[vci][`INDEX_WIDTH-1:0] == req_index)))
                         vc_valid[vci] <= 1'b0;
-                    end
                 end
             end
             if (vc_fill) begin
@@ -647,9 +670,8 @@ module dcache (
                                              bank_rdata[victim_way][1], bank_rdata[victim_way][0]};
                     vc_valid[vc_hit_idx] <= 1'b1;
                 end
-                else begin
+                else
                     vc_valid[vc_hit_idx] <= 1'b0;
-                end
             end
             if (vc_insert) begin
                 vc_valid[vc_fifo_ptr] <= 1'b1;
@@ -660,7 +682,9 @@ module dcache (
         end
     end
 
-    // ========== 替换行 128bit 数据（含 WB 前推） ==========
+    // ============================================================
+    // 替换行数据
+    // ============================================================
     wire [31:0] victim_bank_wb [0:BANK_NUM-1];
     genvar gwb;
     generate
@@ -682,18 +706,18 @@ module dcache (
         victim_bank_wb[0]
     };
 
-    // ========== Data Select - LOOKUP 时选字 ==========
+    // ============================================================
+    // 数据选择
+    // ============================================================
     wire [31:0] hit_word;
     assign hit_word = bank_rdata[hit_way_idx][req_offset[3:2]];
 
-    wire [31:0] hit_write_data;
-    assign hit_write_data = (wb_wdata & wb_wstrb_mask)
-                          | (hit_word & ~wb_wstrb_mask);
-
     wire [31:0] lookup_rdata;
-    assign lookup_rdata = hit_write_lookup_r ? hit_write_data : hit_word;
+    assign lookup_rdata = wb_fwd_active ? wb_fwd_data : hit_word;
 
-    // ========== REFILL 合并写数据 ==========
+    // ============================================================
+    // REFILL 合并写数据
+    // ============================================================
     wire [3:0] req_wstrb_4b;
     assign req_wstrb_4b = {req_wstrb_mask[31], req_wstrb_mask[23],
                            req_wstrb_mask[15], req_wstrb_mask[ 7]};
@@ -706,7 +730,9 @@ module dcache (
                               ? ((req_wdata & req_wstrb_mask) | (return_data & ~req_wstrb_mask))
                               : return_data;
 
-    // ========== {Tag, V} RAM ==========
+    // ============================================================
+    // {Tag, V} RAM 写控制
+    // ============================================================
     wire refill_tagv_we;
     assign refill_tagv_we = (main_refill && return_valid && return_last && req_cached
                           || main_refill && cacop_en_r);
@@ -731,6 +757,9 @@ module dcache (
     assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }
                                        : {req_tag, 1'b1};
 
+    // ============================================================
+    // {Tag, V} RAM 例化
+    // ============================================================
     wire                    tagv_en   [0:`WAY_NUM-1];
     wire [ 3:0]            tagv_wen  [0:`WAY_NUM-1];
     wire [`INDEX_WIDTH-1:0] tagv_addr [0:`WAY_NUM-1];
@@ -759,7 +788,9 @@ module dcache (
         end
     endgenerate
 
-    // ========== D RAM ==========
+    // ============================================================
+    // D RAM
+    // ============================================================
     wire refill_d_we;
     assign refill_d_we = main_refill && return_valid && return_last && req_cached;
 
@@ -768,37 +799,35 @@ module dcache (
     always @(posedge clk) begin
         if (~resetn) begin
             for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1) begin
-                for (d_idx = 0; d_idx < INDEX_DEPTH; d_idx = d_idx + 1) begin
+                for (d_idx = 0; d_idx < INDEX_DEPTH; d_idx = d_idx + 1)
                     d_ram[d_wi][d_idx] <= 1'b0;
-                end
             end
         end
         else begin
             for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1) begin
-                if (refill_d_we && (miss_replace_way == d_wi)) begin
+                if (refill_d_we && (miss_replace_way == d_wi))
                     d_ram[d_wi][req_index] <= req_op;
-                end
-                else if (vc_fill && (vc_fill_way == d_wi)) begin
+                else if (vc_fill && (vc_fill_way == d_wi))
                     d_ram[d_wi][req_index] <= req_op;
-                end
-                else if (wb_write && wb_way_hit[d_wi]) begin
+                else if (wb_write && wb_way_hit[d_wi] && !wb_stall)
                     d_ram[d_wi][wb_index] <= 1'b1;
-                end
-                if (ram_read_en) begin
+                if (ram_read_en)
                     d_rdata[d_wi] <= d_ram[d_wi][ram_raddr];
-                end
             end
         end
     end
 
-    // ========== Refill Buffer ==========
+    // ============================================================
+    // Refill Buffer — 时序
+    // ============================================================
     always @(posedge clk) begin
-        if (main_refill && return_valid && req_cached) begin
+        if (main_refill && return_valid && req_cached)
             refill_buffer[miss_refill_cnt] <= refill_merged_word;
-        end
     end
 
-    // ========== Data Bank RAM ==========
+    // ============================================================
+    // Data Bank RAM 例化
+    // ============================================================
     wire                    bank_wr_refill [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire                    bank_wr_vcf    [0:`WAY_NUM-1][0:BANK_NUM-1];
     wire                    bank_wr_hit    [0:`WAY_NUM-1][0:BANK_NUM-1];
@@ -814,8 +843,8 @@ module dcache (
                 assign bank_wr_refill[gw][gb] = main_refill && return_valid && return_last
                                               && (miss_replace_way == gw)
                                               && req_cached;
-                assign bank_wr_vcf[gw][gb] = vc_fill && (vc_fill_way == gw);
-                assign bank_wr_hit[gw][gb] = wb_write && wb_way_hit[gw] && (wb_bank == gb);
+                assign bank_wr_vcf[gw][gb]    = vc_fill && (vc_fill_way == gw);
+                assign bank_wr_hit[gw][gb]    = wb_write && wb_way_hit[gw] && (wb_bank == gb) && !ram_read_en;
 
                 assign bank_en[gw][gb]    = bank_wr_refill[gw][gb]
                                           || bank_wr_vcf[gw][gb]
@@ -850,7 +879,9 @@ module dcache (
         end
     endgenerate
 
-    // ========== 输出 FIFO ==========
+    // ============================================================
+    // 输出 FIFO
+    // ============================================================
     reg  [31:0] cpu_fifo_mem [0:3];
     reg  [ 1:0] cpu_fifo_wptr;
     reg  [ 1:0] cpu_fifo_rptr;
@@ -927,7 +958,9 @@ module dcache (
         end
     end
 
-    // ========== AXI 读请求 ==========
+    // ============================================================
+    // AXI 读请求
+    // ============================================================
     wire rd_req_lookup;
     assign rd_req_lookup = main_lookup && !cache_hit
                          && need_bus_rd
@@ -938,7 +971,9 @@ module dcache (
                       && (!miss_needs_write || wr_req_accepted)
                       && !vc_swap_wb_r);
 
-    // ========== AXI 写请求 ==========
+    // ============================================================
+    // AXI 写请求
+    // ============================================================
     wire wr_req_lookup;
     assign wr_req_lookup = main_lookup && !cache_hit
                          && miss_needs_write
@@ -970,10 +1005,13 @@ module dcache (
 
     wire victim_dirty;
     wire cacop_dirty;
-    assign victim_dirty = d_rdata[victim_way] && tagv_rdata[victim_way][0];
+    assign victim_dirty = (d_rdata[victim_way] || wb_line_dirty[victim_way])
+                        && tagv_rdata[victim_way][0];
     assign cacop_dirty  = (cacop_code_r[4:3] == 2'b10)
-                        ? (d_rdata[hit_way_idx] && tagv_rdata[hit_way_idx][0])
-                        : (d_rdata[cacop_way_r] && tagv_rdata[cacop_way_r][0]);
+                        ? ((d_rdata[hit_way_idx] || wb_line_dirty[hit_way_idx])
+                           && tagv_rdata[hit_way_idx][0])
+                        : ((d_rdata[cacop_way_r] || wb_line_dirty[cacop_way_r])
+                           && tagv_rdata[cacop_way_r][0]);
 
     wire miss_needs_write;
     assign miss_needs_write = cacop_en_r ? (cacop_wb && cacop_dirty)
@@ -1013,29 +1051,31 @@ module dcache (
                     : {96'd0, req_wdata};
 
 `ifndef SYNTHESIS
-    // ========== 仿真断言 ==========
+    // ============================================================
+    // 仿真断言
+    // ============================================================
     always @(posedge clk) begin
         if (resetn && main_lookup && req_cached && !cacop_en_r && !data_sent_r) begin
-            if (cache_hit && (|vc_match)) begin
+            if (cache_hit && (|vc_match))
                 $display("[%m] ASSERT FAIL: line in both L1 and VC, tag=%h index=%h",
                          req_tag, req_index);
-            end
-            if ((|vc_match) && ((vc_match & (vc_match - 1)) != {VC_DEPTH{1'b0}})) begin
+            if ((|vc_match) && ((vc_match & (vc_match - 1)) != {VC_DEPTH{1'b0}}))
                 $display("[%m] ASSERT WARN: duplicate VC entries, tag=%h index=%h",
                          req_tag, req_index);
-            end
         end
     end
 `endif
 
-    // ========== 性能计数器 ==========
-    reg [31:0] perf_total_req  /*verilator public*/;
-    reg [31:0] perf_access_cnt /*verilator public*/;
-    reg [31:0] perf_miss_cnt   /*verilator public*/;
-    reg [31:0] perf_real_miss_cnt /*verilator public*/;
-    reg [31:0] perf_vc_hit_cnt     /*verilator public*/;
-    reg [31:0] perf_vc_insert_cnt  /*verilator public*/;
-    reg [31:0] perf_vc_fill_cnt    /*verilator public*/;
+    // ============================================================
+    // 性能计数器
+    // ============================================================
+    reg [31:0] perf_total_req       /*verilator public*/;
+    reg [31:0] perf_access_cnt      /*verilator public*/;
+    reg [31:0] perf_miss_cnt        /*verilator public*/;
+    reg [31:0] perf_real_miss_cnt   /*verilator public*/;
+    reg [31:0] perf_vc_hit_cnt      /*verilator public*/;
+    reg [31:0] perf_vc_insert_cnt   /*verilator public*/;
+    reg [31:0] perf_vc_fill_cnt     /*verilator public*/;
     always @(posedge clk) begin
         if (~resetn) begin
             perf_total_req        <= 32'd0;
@@ -1047,9 +1087,8 @@ module dcache (
             perf_vc_fill_cnt      <= 32'd0;
         end
         else begin
-            if (accept_new_req) begin
+            if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-            end
             if (main_lookup && req_cached && !cacop_en_r && !data_sent_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_hit)
@@ -1059,12 +1098,11 @@ module dcache (
                 if (!cache_hit && !vc_hit)
                     perf_real_miss_cnt <= perf_real_miss_cnt + 32'd1;
             end
-            if (vc_insert) begin
+            if (vc_insert)
                 perf_vc_insert_cnt <= perf_vc_insert_cnt + 32'd1;
-            end
-            if (vc_fill) begin
+            if (vc_fill)
                 perf_vc_fill_cnt <= perf_vc_fill_cnt + 32'd1;
-            end
         end
-   end
+    end
+
 endmodule

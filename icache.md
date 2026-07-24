@@ -66,7 +66,7 @@ if (accept_new_req):
 
 ### 2.2 Refill Buffer
 
-`enter_refill` 时从 Request Buffer 快照，整个 REFILL 期间不变。
+`main_lookup && !cache_inst_hit`（LOOKUP miss 拍）从 Request Buffer 快照，整个 REFILL 期间不变。比 `enter_refill` 早一拍——若 miss 后先入 WAITRD，Refill Buffer 已在 LOOKUP 拍锁好。
 
 | 寄存器 | 位宽 | 说明 |
 |--------|------|------|
@@ -75,7 +75,8 @@ if (accept_new_req):
 | `refill_offset` | 4 | 原始请求的 offset（用于 `read_miss_done` 判断） |
 | `refill_cached` | 1 | 是否 cached |
 | `refill_is_prefetch` | 1 | 该 REFILL 是否为预取发起 |
-| `refill_replace_way` | 1 | 替换目标路号（`enter_refill` 时从 `victim_way` 快照） |
+| `refill_was_cacop` | 1 | 该 REFILL 是否为 CACOP 发起 |
+| `refill_replace_way` | 1 | 替换目标路号（LOOKUP miss 拍从 `victim_way` 快照） |
 | `refill_cnt` | 2 | 已接收数据拍数（0..3） |
 | `refill_line[0:3]` | 4×32 | cache line 拼装缓冲区 |
 
@@ -154,7 +155,7 @@ IDLE (0001) → LOOKUP (0010) → WAITRD (0100) → REFILL (1000)
 #### REFILL
 
 - **进入**: `enter_refill`（LOOKUP miss+rd_rdy、LOOKUP cacop、或 WAITRD+rd_rdy）
-- **`enter_refill` 拍**: 快照 Request Buffer → Refill Buffer，`victim_way` 锁存
+- **Refill Buffer 快照**: `main_lookup && !cache_inst_hit` 拍（比 enter_refill 早一拍），锁存 `req_*`、`victim_way`、`refill_cnt=0`
 - **第 0–3 拍（return_valid）**: `refill_line[refill_cnt] <= return_data`，`refill_cnt++`
 - **`read_miss_done`**: `main_refill && return_valid && !refill_is_prefetch && (refill_cnt == refill_offset[3:2] || !refill_cached)`，预取 REFILL 不产生 read_miss_done
 - **`refill_last` 拍**:
@@ -241,7 +242,8 @@ assign hit_word = (bypass_active && hit_way_idx == refill_replace_way)
 
 ```verilog
 // IDLE 发射：刚完成 REFILL，CPU 空闲，上一行 offset 在最后一个 bank
-assign prefetch_idle   = main_idle && !cpu_req && !cacop_en && !refill_is_prefetch;
+assign prefetch_idle   = main_idle && !cpu_req && !cacop_en && !refill_is_prefetch
+                       && refill_cached && !refill_was_cacop;
 assign launch_prefetch_idle = prefetch_idle && (refill_offset[3:2] == 2'b11);
 
 // LOOKUP 发射：命中 cache，CPU 空闲，当前 offset 在最后一个 bank
@@ -253,6 +255,7 @@ assign launch_prefetch_lookup = prefetch_lookup && (req_offset[3:2] == 2'b11);
 - 只在 offset 落在最后一个 Bank 时触发
 - 不允许连续预取（`!req_is_prefetch` / `!refill_is_prefetch` 防止）
 - CPU 请求优先级高于预取（`!cpu_req`）
+- IDLE 发射额外排除 uncached（`refill_cached`）和 CACOP（`!refill_was_cacop`）
 
 ### 5.3 地址计算
 

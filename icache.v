@@ -91,6 +91,7 @@ module icache (
     reg  [`OFFSET_WIDTH-1:0] refill_offset;
     reg                     refill_cached;
     reg                     refill_is_prefetch;
+    reg                     refill_was_cacop;
     reg  [WAY_IDX_W-1:0]    refill_replace_way;
     reg  [ 1:0]             refill_cnt;
     reg  [31:0]             refill_line [0:BANK_NUM-1];
@@ -128,7 +129,8 @@ module icache (
     // ============================================================
     wire prefetch_idle;
     wire prefetch_lookup;
-    assign prefetch_idle   = main_idle && !cpu_req && !cacop_en && !refill_is_prefetch;
+    assign prefetch_idle   = main_idle && !cpu_req && !cacop_en && !refill_is_prefetch
+                           && refill_cached && !refill_was_cacop;
     assign prefetch_lookup = main_lookup && cache_inst_hit && !cpu_req && !cacop_en && !req_is_prefetch;
 
     wire last_offset;
@@ -439,6 +441,7 @@ module icache (
             refill_offset       <= req_offset;
             refill_cached       <= req_cached;
             refill_is_prefetch  <= req_is_prefetch;
+            refill_was_cacop    <= cacop_en_r;
             refill_replace_way  <= victim_way;
             refill_cnt          <= 2'd0;
         end

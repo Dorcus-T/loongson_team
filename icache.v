@@ -205,7 +205,7 @@ module icache (
     assign refill_last = main_refill && return_valid && return_last;
 
     // ============================================================
-    // enter_refill
+    // enter_refill — 状态转换条件
     // ============================================================
     wire enter_refill;
     assign enter_refill = (main_lookup && cacop_en_r)
@@ -430,10 +430,10 @@ module icache (
     end
 
     // ============================================================
-    // Refill Buffer — 时序更新
+    // Refill Buffer — LOOKUP miss 拍一次性锁存，整个 REFILL 期间不变
     // ============================================================
     always @(posedge clk) begin
-        if (enter_refill) begin
+        if (main_lookup && !cache_inst_hit) begin
             refill_index        <= req_index;
             refill_tag          <= req_tag;
             refill_offset       <= req_offset;

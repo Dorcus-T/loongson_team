@@ -37,7 +37,7 @@
 
 | 寄存器 | 位宽 | 说明 |
 |--------|------|------|
-| `req_op` | 1 | 0=load, 1=store |
+| `req_d` | 1 | 0=load, 1=store |
 | `req_index` | 8 | 请求 index |
 | `req_tag` | 20 | 请求 tag |
 | `req_offset` | 4 | 请求 offset（选中哪个 Bank） |
@@ -53,7 +53,7 @@
 
 ### 2.2 Refill Buffer
 
-不是 `enter_refill` 时加载，而是 **LOOKUP miss 拍一次性锁存**。整个 REFILL 期间不变（含 WAITRD）。
+**LOOKUP miss 拍一次性锁存，含写回握手管理和 VC 服务信息。** 整个 REFILL 期间不变（含 WAITRD）。替代了独立的 Writeback Buffer 和 VC 服务上下文。
 
 | 寄存器 | 位宽 | 说明 |
 |--------|------|------|
@@ -61,18 +61,23 @@
 | `refill_tag` | 20 | 新行 tag（`req_tag`） |
 | `refill_offset` | 4 | 原始请求的 offset（用于 `read_miss_done` 判断） |
 | `refill_cached` | 1 | 是否 cached |
-| `refill_op` | 1 | 原始请求的 op |
+| `refill_d` | 1 | 原始请求的 op（同时作为 D 位） |
 | `refill_replace_way` | 1 | 替换目标路号（`replace_way` 锁存） |
 | `refill_cnt` | 2 | 已接收数据拍数（0..3） |
 | `refill_line[0:3]` | 4×32 | 新行拼装缓冲区 |
 | `refill_victim_line[0:3]` | 4×32 | victim 行 128-bit（含 `live_fwd` WB 前推） |
-| `refill_victim_tag` | 20 | victim 行 tag（供 VC fill 使用） |
-| `refill_wdata` | 32 | 锁存的 store wdata（供 REFILL 合并用，防止 `req_wdata` 被覆盖） |
+| `refill_victim_tag` | 20 | victim 行 tag |
+| `refill_victim_valid` | 1 | victim 行 V 位 |
+| `refill_victim_dirty` | 1 | victim 行 D 位（含 `wb_line_dirty` 前推） |
+| `refill_wdata` | 32 | 锁存的 store wdata（供 REFILL/VC 合并用） |
 | `refill_wstrb_mask` | 32 | 锁存的 store wstrb_mask |
+| `refill_needs_write` | 1 | 有待发出的 AXI 写请求 |
+| `refill_wr_handshaked` | 1 | AXI 写握手已完成 |
+| `refill_vc_hit_idx` | VC_IDX_W | VC 命中条目号（仅 VC hit 时有效） |
 
-**加载时机**：`main_lookup && !cache_hit`（含 `vc_serve`）。
+**加载时机**：`main_lookup && !cache_hit`（含 `vc_serve`、uncached、CACOP）。
 
-此时 `bank_rdata` 还是 accept 拍读的数据（对应正确的 index），`live_fwd` 组合逻辑有效。一次性锁存在 Refill Buffer 后，后续状态切换不再依赖 live `bank_rdata`。
+此时 `bank_rdata` 还是 accept 拍读的数据（对应正确的 index），`live_fwd` / `victim_dirty` / `miss_needs_write` 组合逻辑有效。一次性锁存在 Refill Buffer 后，全部后续判断和 AXI 输出均从 Refill Buffer 推导（AXI 写输出在 LOOKUP 拍使用组合 live 数据，后续状态使用 Refill Buffer 快照）。
 
 ### 2.3 顶层标志
 
@@ -95,32 +100,25 @@
 
 WB 写入 bank RAM 时按 `wb_way_hit` 逐路写。store 只写一个 bank（`wb_bank`），但命中多路时所有命中路的同 bank 都更新。
 
-### 2.5 Writeback Buffer
+### 2.5 AXI 写请求（从 Refill Buffer 推导）
 
-**LOOKUP miss 拍一次性锁存 AXI 写回信息。** `wr_req` 从当拍起持续拉高，贯穿 WAITRD → REFILL → WAITWR，后台独立推进。
+不再有独立的 Writeback Buffer。`wr_req/type/addr/wstrb/data` 全部从 Refill Buffer 组合推导。
 
-| 寄存器 | 位宽 | 说明 |
-|--------|------|------|
-| `wr_pending` | 1 | 有待发出的写请求 |
-| `wr_handshaked` | 1 | `wr_req && wr_rdy` 已握手 |
-| `wr_is_uncached` | 1 | 0=cached 写回（握手即完），1=uncached store（需等 `wr_done`） |
-| `wr_wb_addr` | 32 | 写地址 |
-| `wr_wb_data` | 128 | 写数据 |
-| `wr_wb_wstrb` | 4 | 字节使能 |
-| `wr_wb_type` | 3 | burst 类型 |
+**双路径设计**：LOADUP 拍使用组合 live 数据（`lookup_wr_bank` / `tagv_lookup` / `req_*`），确保 LOOKUP 当拍即可发起写握手；LOADUP 之后各状态使用 Refill Buffer 快照（`refill_victim_line` / `refill_victim_tag` / `refill_*`），数据稳定。
 
-**加载条件**：`main_lookup && !cache_hit && miss_needs_write`（含 uncached store、cached miss+dirty）。
+| 输出 | LOOKUP 拍（live） | 后续状态（Refill Buffer 快照） |
+|------|-------------------|------------------------------|
+| `wr_req` | `main_lookup && miss_needs_write` | `refill_needs_write && !refill_wr_handshaked` |
+| `wr_type` | `req_cached \| cacop_en_r ? 3'b100 : uncached_rd_type` | `!refill_is_uncached_store ? 3'b100 : ...` |
+| `wr_addr` | burst:`{victim_tag, req_index, 4'd0}` / unc:`{req_tag, req_index, req_offset}` | burst:`{refill_victim_tag, refill_index, 4'd0}` / unc:`{refill_tag, refill_index, refill_offset}` |
+| `wr_wstrb` | burst:`4'b1111` / unc:`req_wstrb_4b` | burst:`4'b1111` / unc:`refill_wstrb_4b` |
+| `wr_data` | burst:`{lookup_wr_bank[3:0]}` / unc:`{96'd0, req_wdata}` | burst:`{refill_victim_line[3:0]}` / unc:`{96'd0, refill_wdata}` |
 
-### 2.6 VC 服务上下文
+`wr_req` 从 LOOKUP 拍起即拉高，贯穿 WAITRD → REFILL → WAITWR → WAITWB，后台独立推进。握手逻辑也在 LOOKUP 拍即可触发（`main_lookup && miss_needs_write && wr_rdy`），无需额外延迟。
 
-`vc_serve`（VC hit + L1 miss）时锁存，`vc_exchange` 后清除。WAITWB 期间保持。
+### 2.6 VC 服务信息（由 Refill Buffer 统一管理）
 
-| 寄存器 | 位宽 | 说明 |
-|--------|------|------|
-| `vc_serve_r` | 1 | VC serve 待处理 |
-| `vc_hit_idx_r` | VC_IDX_W | VC 命中条目号 |
-| `vc_victim_dirty_r` | 1 | victim 是否脏 |
-| `vc_serve_line` | 128 | VC 命中行的完整 128-bit 数据 |
+不再有独立的 VC 服务上下文。VC hit + L1 miss 的信息统一存入 Refill Buffer（`refill_vc_hit_idx` / `refill_victim_valid` / `refill_victim_dirty`）。VC→L1 数据从 `vc_data[refill_vc_hit_idx]` 直接读（WAITWB 路径），或从 `vc_data[vc_hit_idx]` 组合读（LOADUP 当拍交换路径）。
 
 ---
 
@@ -152,31 +150,31 @@ IDLE (000001) → LOOKUP (000010) → WAITRD (000100) → REFILL (001000)
         ┌──────┐  accept  ┌─────────┐  hit (ld/st)  ┌──────┐          │
         │ IDLE │ ───────> │ LOOKUP  │ ────────────> │ IDLE │          │
         └──────┘          └─────────┘               └──────┘          │
-            ▲              │  │    │                                  │
-            │     miss+    │  │    │ vc_serve+wb_busy                 │
-            │     rd_rdy   │  │    ▼                                  │
-            │              │  │  ┌──────────┐                         │
-            │              │  │  │ WAITWB   │──(!wb_write)──▶ IDLE/   │
-            │              │  │  └──────────┘               WAITWR    │
-            │              │  │                                       │
-            │    miss+     │  │                                       │
-            │    !rd_rdy   │  │  vc_serve+dirty                       │
-            │              ▼  ▼  / uncached_store                     │
-            │         ┌──────────┐                                    │
-            │         │ WAITRD   │──rd_rdy──┐                         │
-            │         └──────────┘          │                         │
-            │              ▲                ▼                         │
-            │              │         ┌──────────┐                     │
-            │              └──────── │ REFILL   │                     │
-            │                        └──────────┘                     │
-            │                           │                             │
-            │                      refill_last                        │
-            │                           │                             │
-            │                      wr未握手                           │
-            │                           ▼                             │
-            │                      ┌──────────┐                       │
-            └──────────────────────│ WAITWR   │◄──────────────────────┘
-                                   └──────────┘
+            ▲           │  │  │  │  │                                │
+            │  miss+    │  │  │  │  │ vc_serve+wb_busy               │
+            │  rd_rdy   │  │  │  │  ▼                                │
+            │           │  │  │  ├─ WAITWB ──(!wb_write)──▶ IDLE/    │
+            │           │  │  │  │                        WAITWR     │
+            │  miss+    │  │  │  │                                    │
+            │  !rd_rdy  │  │  │  │                                    │
+            │           ▼  │  │  │                                    │
+            │      ┌──────┐ │  │  │                                    │
+            │      │WAITRD│ │  │  │                                    │
+            │      └──────┘ │  │  │                                    │
+            │         │     │  │  │  vc_serve+dirty /                 │
+            │      rd_rdy   │  │  │  uncached_store                   │
+            │         │     │  │  ▼                                    │
+            │         ▼     │  ├─ WAITWR ◄──────────────────────┐     │
+            │      ┌──────┐ │  │                                 │     │
+            │      │REFILL│─┘  │  │                              │     │
+            │      └──────┘    │  │                              │     │
+            │         │        │  │  vc_serve+clean              │     │
+            │    refill_last   │  │  / vc_serve+dirty+wr_rdy     │     │
+            │    wr未握手      │  │                              │     │
+            │         ▼        │  ▼                              │     │
+            │      ┌──────┐    ├─ IDLE ──────────────────────────┘     │
+            └──────│WAITWR│◄───┘                                      │
+                   └──────┘                                            │
 ```
 
 ### 3.4 各状态详述
@@ -196,13 +194,14 @@ IDLE (000001) → LOOKUP (000010) → WAITRD (000100) → REFILL (001000)
 - **分支**（按优先级）:
   1. `vc_serve_wb_busy` → WAITWB（VC hit + WB 忙，等 WB 写完）
   2. `vc_serve && !victim_dirty` → IDLE（VC→L1 + victim→VC 交换完成）
-  3. `vc_serve && victim_dirty` → WAITWR（VC→L1 + victim 写回内存）
-  4. `is_uncached_store` → WAITWR
-  5. `cacop_en_r` → REFILL
-  6. `!cache_hit && rd_rdy` → REFILL（miss + 总线就绪）
-  7. `!cache_hit && !rd_rdy` → WAITRD（miss + 等总线）
-  8. `accept_new_req` → LOOKUP 自循环
-  9. 否则 → IDLE
+  3. `vc_serve && victim_dirty && wr_rdy` → IDLE（VC→L1 + wr 当拍握手完成）
+  4. `vc_serve && victim_dirty && !wr_rdy` → WAITWR（VC→L1 + victim 写回内存，等握手）
+  5. `is_uncached_store` → WAITWR
+  6. `cacop_en_r` → REFILL
+  7. `!cache_hit && rd_rdy` → REFILL（miss + 总线就绪）
+  8. `!cache_hit && !rd_rdy` → WAITRD（miss + 等总线）
+  9. `accept_new_req` → LOOKUP 自循环
+  10. 否则 → IDLE
 - **data_ok**: `read_hit_done`（load 命中）、`vc_read_done`（VC 命中 load）、`write_done`（store）
 - **PLRU**: `plru_upd_en = main_lookup && cache_hit || refill_tagv_we`
 
@@ -212,19 +211,19 @@ IDLE (000001) → LOOKUP (000010) → WAITRD (000100) → REFILL (001000)
 - **退出**: `rd_rdy` → REFILL
 - **RAM 动作**: 无
 - **rd_req**: 保持为 1
-- **wr_req**: 如已加载 Writeback Buffer，持续拉高
+- **wr_req**: 如 `refill_needs_write` 已置位，持续拉高
 
 #### REFILL
 
 - **进入**: `enter_refill = (LOOKUP miss + rd_rdy) || (LOOKUP cacop) || (WAITRD + rd_rdy)`
 - **第 0–3 拍（return_valid）**: `refill_line[refill_cnt] <= refill_merged_word`，`refill_cnt++`
-- **`read_miss_done`**: `main_refill && return_valid && !refill_op && (refill_cnt == refill_offset[3:2] || !refill_cached)`
+- **`read_miss_done`**: `main_refill && return_valid && !refill_d && (refill_cnt == refill_offset[3:2] || !refill_cached)`
 - **`refill_last` 拍**:
   - TagV + Bank RAM + d_ram 写回
   - PLRU 更新（`refill_replace_way` 标 MRU）
 - **退出**:
   - uncached / CACOP → IDLE
-  - `wr_pending && !wr_handshaked` → WAITWR
+  - `refill_needs_write && !refill_wr_handshaked` → WAITWR
   - `refill_already_accept_new_req` → LOOKUP
   - 否则 → IDLE
 - **refill_early_accept**: REFILL 中间拍可提前接受一个 CPU 请求（条件见 §4）
@@ -235,8 +234,8 @@ IDLE (000001) → LOOKUP (000010) → WAITRD (000100) → REFILL (001000)
 
 - **进入**: LOOKUP miss dirty / VC serve dirty / uncached store / REFILL 后 wr 未握手
 - **退出**:
-  - `!wr_handshaked` → 继续等握手
-  - `wr_is_uncached && !wr_done` → 等 `wr_done`
+  - `!refill_wr_handshaked` → 继续等握手
+  - `refill_is_uncached_store && !wr_done` → 等 `wr_done`
   - 握手完成且（cached || `wr_done`）→ accept→LOOKUP 或 IDLE
 - **wr_req**: 持续拉高直到握手
 - **握手拍立即 accept**: 可以在同拍 `accept_new_req` → LOOKUP
@@ -248,9 +247,9 @@ VC hit + WB 忙时等待 WB 写完。
 - **进入**: `vc_serve_wb_busy = vc_serve && wb_write`
 - **停留**: `wb_write` → 等 WB 完成
 - **退出**（`!wb_write`）:
-  - `!vc_victim_dirty_r` → IDLE
-  - `vc_victim_dirty_r && !wr_handshaked` → WAITWR
-  - 否则 → IDLE / accept→LOOKUP
+  - `refill_victim_dirty && !refill_wr_handshaked` → WAITWR
+  - `accept_new_req` → LOOKUP
+  - 否则 → IDLE
 - **vc_exchange**: `main_waitwb && !wb_write` 拍触发 VC↔L1 交换
 
 ### 3.5 WB FSM
@@ -283,10 +282,10 @@ refill_early_accept = main_refill && !refill_last
                     && !cacop_en_r && !cacop_en
                     && cpu_req
                     && refill_cached
-                    && !wr_pending;
+                    && !refill_needs_write;
 ```
 
-- WR 未完成时不允许提前 accept（避免 Writeback Buffer 冲突）
+- 写回未完成时不允许提前 accept（避免 Refill Buffer 写回数据冲突）
 - 每个 REFILL 只 accept 一次
 
 ### 4.3 Tag/Data/D Bypass
@@ -304,7 +303,7 @@ tagv_lookup[way] = bypass_active && way == refill_replace_way
 
 // D bypass
 d_lookup[way] = bypass_active && way == refill_replace_way
-              ? refill_op
+              ? refill_d
               : d_rdata[way];
 
 // Data bypass
@@ -360,9 +359,9 @@ victim_dirty = (d_lookup[way] || wb_line_dirty[way]) && tagv_lookup[way][0]
 
 此场景下 LOOKUP 拍需要：
 - VC 行数据通过 `vc_word` 返回 CPU（`vc_read_done`）
-- **VC→L1**：VC 行写入 L1（tagv + bank + d=0）
+- **VC→L1**：VC 行写入 L1（tagv + bank + d=req_d）
 - **L1→VC**（victim 干净）：victim 行写入 VC 同槽位
-- **L1→内存**（victim 脏）：victim 行 → Writeback Buffer → wr_req
+- **L1→内存**（victim 脏）：victim 行数据已在 Refill Buffer 中（`refill_victim_line`）→ wr_req
 
 ### 6.3 WB 忙时的 WAITWB 状态
 
@@ -375,25 +374,26 @@ victim_dirty = (d_lookup[way] || wb_line_dirty[way]) && tagv_lookup[way][0]
 ### 6.4 VC 数据交换
 
 **VC→L1（总是执行）**：
-- 数据源：`vc_serve_line`（LOOKUP 拍锁存的 VC 行）
+- LOOKUP 当拍：数据源 `vc_data[vc_hit_idx]` + 组合 `req_*`（live 数据）
+- WAITWB 末尾：数据源 `vc_data[refill_vc_hit_idx]` + Refill Buffer `refill_*`（快照）
 - tagv ← VC 行 tag + V=1
-- bank ← 128-bit VC data（store 时合并 `refill_wdata`）
-- d_ram ← `refill_op`（store=1 / load=0）
+- bank ← 128-bit VC data（store 时合并 `refill_wdata` / `req_wdata`）
+- d_ram ← `refill_d` / `req_d`（store=1 / load=0）
 
 **L1→VC（仅干净 victim）**：
-- 数据源：`refill_victim_line`（含 `live_fwd` WB 前推）
-- `vc_data[vc_hit_idx_r]` ← 128-bit victim 数据
-- `vc_addr[vc_hit_idx_r]` ← `{refill_victim_tag, refill_index}`
+- LOOKUP 当拍：数据源 `lookup_wr_bank` + 组合 `req_*`（live 数据），写 `vc_data[vc_hit_idx]`
+- WAITWB 末尾：数据源 `refill_victim_line`（Refill Buffer 快照），写 `vc_data[refill_vc_hit_idx]`
+- `vc_addr[...]` ← `{refill_victim_tag, refill_index}` / `{tagv_lookup[replace_way][...], req_index}`
 
 ### 6.5 VC insert（refill_last 拍）
 
-干净 victim 在 refill_last 拍写入 VC：
+干净 victim 在 refill_last 拍写入 VC（全部从 Refill Buffer 取，不读 RAM 端口）：
 ```
 vc_insert = refill_d_we && VC_EN
-         && tagv_rdata[refill_replace_way][0]
-         && !d_rdata[refill_replace_way];
+         && refill_victim_valid
+         && !refill_victim_dirty;
 ```
-数据从 `refill_victim_line` 取（LOOKUP miss 拍锁存，含 live_fwd）。
+数据从 `refill_victim_line` 取，tag 从 `refill_victim_tag` 取（LOOKUP miss 拍锁存，含 live_fwd WB 前推）。
 
 ---
 
@@ -412,12 +412,12 @@ vc_insert = refill_d_we && VC_EN
 
 | 时机 | 说明 |
 |------|------|
-| LOOKUP miss + dirty | Writeback Buffer 加载，`wr_req` 当拍拉高 |
-| LOOKUP uncached store | Writeback Buffer 加载，`wr_req` 当拍拉高 |
+| LOOKUP miss + dirty | Refill Buffer 加载，`wr_req` 当拍拉高 |
+| LOOKUP uncached store | Refill Buffer 加载，`wr_req` 当拍拉高 |
 | REFILL 期间 | `wr_req` 后台持续拉高 |
 | WAITWR | `wr_req` 持续拉高直到握手 |
 
-`wr_req = wr_pending && !wr_handshaked`。cached 写回握手即完成，uncached store 需要等 `wr_done`。
+`wr_req = (main_lookup && miss_needs_write) || (refill_needs_write && !refill_wr_handshaked)`。LOADUP 拍组合拉高，后续状态从 Refill Buffer 推导。cached 写回握手即完成，uncached store 需要等 `wr_done`。
 
 ### 7.3 wr_req 窗口
 
@@ -467,7 +467,7 @@ accept_new_req (cacop_en=1)
   → LOOKUP（读 tagv，cache_hit=0）
   → 直接进 REFILL（无总线读请求）
   → REFILL 中 cacop_en_r 触发 tagv 写
-  → 若有脏行需写回 → Writeback Buffer 加载，wr 后台
+  → 若有脏行需写回 → Refill Buffer 加载写回信息，wr 后台
   → cacop_en_r ← 0，FSM → IDLE
 ```
 
@@ -494,7 +494,7 @@ live_rdata =
 ### 10.2 输出 FIFO
 
 - 深度 4，解耦数据生产和 CPU 消费
-- `accept_ok`：store 无条件接受；load 需 FIFO 有空位（`< 3` 或 `==3 && req_op` 即当前是 store 产生 write_done 不占 FIFO）
+- `accept_ok`：store 无条件接受；load 需 FIFO 有空位（`< 3` 或 `==3 && req_d` 即当前是 store 产生 write_done 不占 FIFO）
 - FIFO 空且数据就绪时，数据直通（bypass FIFO）
 
 ---
@@ -534,7 +534,7 @@ live_rdata =
 | `cpu_*` | CPU 接口 |
 | `cacop_*` | CACOP 接口/上下文 |
 | `wb_*` | Write Buffer |
-| `wr_*` | Writeback Buffer / AXI 写接口 |
+| `wr_*` | AXI 写接口（数据从 Refill Buffer 组合推导） |
 | `vc_*` | Victim Cache |
 | `plru_*` | PLRU 替换算法 |
 | `perf_*` | 性能计数器 |
@@ -549,11 +549,13 @@ live_rdata =
 | `refill_last` | `main_refill && return_valid && return_last` |
 | `cache_hit` | `(\|way_hit) && !cacop_en_r` |
 | `vc_serve` | `main_lookup && !cache_hit && vc_hit` |
-| `vc_exchange` | `(LOOKUP + vc_serve + !wb_write) \| (WAITWB + !wb_write)` |
+| `vc_exchange_lookup` | `main_lookup && vc_serve && !wb_write` |
+| `vc_exchange_waitwb` | `main_waitwb && !wb_write` |
+| `wr_req` | `(main_lookup && miss_needs_write) \| (refill_needs_write && !refill_wr_handshaked)` |
 | `miss_needs_write` | `cacop ? (cacop_wb && cacop_dirty) : ((req_cached && victim_dirty) \| is_uncached_store)` |
-| `hit_write_block` | `wb_write && cpu_req && main_lookup && cache_hit && req_op` |
+| `hit_write_block` | `wb_write && cpu_req && main_lookup && cache_hit && req_d` |
 | `wb_stall` | `wb_write && ram_read_en` |
-| `wb_fwd_active` | `main_lookup && wb_write && !req_op && 同 index/way/bank` |
+| `wb_fwd_active` | `main_lookup && wb_write && !req_d && 同 index/way/bank` |
 | `read_result_ready` | `read_hit_done \| vc_read_done \| read_miss_done` |
 | `cpu_addr_ok` | `accept_new_req && !cacop_en` |
 | `cpu_data_ok` | `read_result_ready \| !cpu_fifo_empty \| write_done` |

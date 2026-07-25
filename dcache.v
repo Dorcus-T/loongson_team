@@ -99,7 +99,7 @@ module dcache (
     // ============================================================
     // Request Buffer — accept_new_req 时更新，LOOKUP 期间保持
     // ============================================================
-    reg                     req_op;
+    reg                     req_d;
     reg  [`INDEX_WIDTH-1:0]  req_index;
     reg  [`TAG_WIDTH-1:0]   req_tag;
     reg  [`OFFSET_WIDTH-1:0] req_offset;
@@ -120,22 +120,19 @@ module dcache (
     reg  [`TAG_WIDTH-1:0]   refill_tag;
     reg  [`OFFSET_WIDTH-1:0] refill_offset;
     reg                     refill_cached;
-    reg                     refill_op;
+    reg                     refill_d;
     reg  [WAY_IDX_W-1:0]    refill_replace_way;
     reg  [ 1:0]             refill_cnt;
     reg  [31:0]             refill_line [0:BANK_NUM-1];
     reg  [31:0]             refill_victim_line [0:BANK_NUM-1];
     reg  [`TAG_WIDTH-1:0]  refill_victim_tag;
+    reg                     refill_victim_valid;
+    reg                     refill_victim_dirty;
     reg  [31:0]             refill_wdata;
     reg  [31:0]             refill_wstrb_mask;
-
-    // ============================================================
-    // VC 服务上下文 — VC hit L1 miss 时锁存，WAITWB 期间保持
-    // ============================================================
-    reg                  vc_serve_r;
-    reg  [VC_IDX_W-1:0]  vc_hit_idx_r;
-    reg                  vc_victim_dirty_r;
-    reg  [127:0]         vc_serve_line;
+    reg                     refill_needs_write;
+    reg                     refill_wr_handshaked;
+    reg  [VC_IDX_W-1:0]     refill_vc_hit_idx;
 
     // ============================================================
     // 顶层标志
@@ -151,17 +148,6 @@ module dcache (
     reg  [ 1:0]          wb_bank;
     reg  [31:0]          wb_wstrb_mask;
     reg  [31:0]          wb_wdata;
-
-    // ============================================================
-    // Writeback Buffer — LOOKUP miss 拍一次性锁存 AXI 写回信息
-    // ============================================================
-    reg                  wr_pending;
-    reg                  wr_handshaked;
-    reg                  wr_is_uncached;
-    reg  [31:0]          wr_wb_addr;
-    reg  [127:0]         wr_wb_data;
-    reg  [ 3:0]          wr_wb_wstrb;
-    reg  [ 2:0]          wr_wb_type;
 
     // ============================================================
     // Victim Cache 存储
@@ -214,13 +200,13 @@ module dcache (
                                && !cacop_en_r && !cacop_en
                                && cpu_req
                                && refill_cached
-                               && !wr_pending;
+                               && !refill_needs_write;
 
     wire accept_new_req;
     assign accept_new_req = (idle_accept && accept_ok)
                          || (hit_accept && accept_ok)
                          || (refill_early_accept && accept_ok)
-                         || (main_waitwr && wr_handshaked && (!wr_is_uncached || wr_done) && accept_ok && (cpu_req || cacop_en));
+                         || (main_waitwr && refill_wr_handshaked && (!refill_is_uncached_store || wr_done) && accept_ok && (cpu_req || cacop_en));
 
     // ============================================================
     // enter_refill — LOOKUP miss 且 rd_rdy，或 WAITRD 等到 rd_rdy
@@ -246,11 +232,11 @@ module dcache (
     // LOOKUP st 命中 + WB 忙 + 新请求 → 阻塞（防止 WB 数据被覆盖）
     wire hit_write_block;
     assign hit_write_block = wb_write && (cpu_req || cacop_en)
-                           && main_lookup && cache_hit && req_op;
+                           && main_lookup && cache_hit && req_d;
 
     // WB 前推：当前 LOOKUP 是 ld 且 WB 有未写入的同 index/way/bank 数据
     wire wb_fwd_active;
-    assign wb_fwd_active = main_lookup && wb_write && !req_op
+    assign wb_fwd_active = main_lookup && wb_write && !req_d
                          && (wb_index == req_index)
                          && wb_way_hit[hit_way_idx]
                          && (wb_bank == req_offset[3:2]);
@@ -281,14 +267,14 @@ module dcache (
     endgenerate
 
     // ============================================================
-    // D Bypass — LOOKUP-from-early-accept 时用 refill_op 替代过期的 d_rdata
+    // D Bypass — LOOKUP-from-early-accept 时用 refill_d 替代过期的 d_rdata
     // ============================================================
     reg  d_lookup [0:`WAY_NUM-1];
     integer dbp;
     always @(*) begin
         for (dbp = 0; dbp < `WAY_NUM; dbp = dbp + 1)
             d_lookup[dbp] = (bypass_active && (dbp[WAY_IDX_W-1:0] == refill_replace_way))
-                          ? refill_op
+                          ? refill_d
                           : d_rdata[dbp];
     end
 
@@ -415,22 +401,28 @@ module dcache (
     wire vc_serve_wb_busy;
     assign vc_serve_wb_busy = vc_serve && wb_write;
 
-    // VC↔L1 交换：LOOKUP + WB idle，或 WAITWB 末尾 WB 刚完成
+    // VC↔L1 交换：LOOKUP + WB idle（用组合 live 数据），或 WAITWB 末尾（用 Refill Buffer 快照）
+    wire vc_exchange_lookup;
+    wire vc_exchange_waitwb;
+    assign vc_exchange_lookup  = main_lookup && vc_serve && !wb_write;
+    assign vc_exchange_waitwb  = main_waitwb && !wb_write;
     wire vc_exchange;
-    assign vc_exchange = (main_lookup && vc_serve && !wb_write)
-                       || (main_waitwb && !wb_write);
+    assign vc_exchange = vc_exchange_lookup || vc_exchange_waitwb;
 
     // ============================================================
     // LOOKUP 决策信号
     // ============================================================
     wire lookup_store_hit;
-    assign lookup_store_hit = main_lookup && cache_hit && req_op;
+    assign lookup_store_hit = main_lookup && cache_hit && req_d;
 
     wire is_uncached_store;
-    assign is_uncached_store = !req_cached && req_op && !cacop_en_r;
+    assign is_uncached_store = !req_cached && req_d && !cacop_en_r;
+
+    wire refill_is_uncached_store;
+    assign refill_is_uncached_store = !refill_cached && refill_d;
 
     wire need_bus_rd;
-    assign need_bus_rd = (req_cached || !req_op) && !cacop_en_r;
+    assign need_bus_rd = (req_cached || !req_d) && !cacop_en_r;
 
     // ============================================================
     // 主状态机 — 时序
@@ -459,7 +451,7 @@ module dcache (
                 else if (vc_serve && !victim_dirty)
                     main_next = MAIN_IDLE;
                 else if (vc_serve && victim_dirty)
-                    main_next = MAIN_WAITWR;
+                    main_next = wr_rdy ? MAIN_IDLE : MAIN_WAITWR;
                 else if (is_uncached_store)
                     main_next = MAIN_WAITWR;
                 else if (cacop_en_r)
@@ -483,7 +475,7 @@ module dcache (
                 if (refill_last || cacop_en_r) begin
                     if (!refill_cached && !cacop_en_r)
                         main_next = MAIN_IDLE;
-                    else if (wr_pending && !wr_handshaked)
+                    else if (refill_needs_write && !refill_wr_handshaked)
                         main_next = MAIN_WAITWR;
                     else if (refill_already_accept_new_req)
                         main_next = MAIN_LOOKUP;
@@ -494,9 +486,9 @@ module dcache (
                     main_next = MAIN_REFILL;
             end
             MAIN_WAITWR: begin
-                if (!wr_handshaked)
+                if (!refill_wr_handshaked)
                     main_next = MAIN_WAITWR;
-                else if (wr_is_uncached && !wr_done)
+                else if (refill_is_uncached_store && !wr_done)
                     main_next = MAIN_WAITWR;
                 else if (accept_new_req)
                     main_next = MAIN_LOOKUP;
@@ -506,7 +498,7 @@ module dcache (
             MAIN_WAITWB: begin
                 if (wb_write)
                     main_next = MAIN_WAITWB;
-                else if (vc_victim_dirty_r && !wr_handshaked)
+                else if (refill_victim_dirty && !refill_wr_handshaked)
                     main_next = MAIN_WAITWR;
                 else if (accept_new_req)
                     main_next = MAIN_LOOKUP;
@@ -580,7 +572,7 @@ module dcache (
     // ============================================================
     always @(posedge clk) begin
         if (~resetn) begin
-            req_op           <= 1'b0;
+            req_d           <= 1'b0;
             req_index        <= {`INDEX_WIDTH{1'b0}};
             req_tag          <= {`TAG_WIDTH{1'b0}};
             req_offset       <= {`OFFSET_WIDTH{1'b0}};
@@ -595,7 +587,7 @@ module dcache (
             cacop_is_hit_r   <= 1'b0;
         end
         else if (accept_new_req) begin
-            req_op           <= cpu_op;
+            req_d           <= cpu_op;
             req_index        <= cacop_en ? cacop_index : cpu_index;
             req_tag          <= (cacop_en && cacop_is_hit) ? cacop_tag : cpu_tag;
             req_offset       <= cpu_offset;
@@ -633,49 +625,53 @@ module dcache (
     end
 
     // ============================================================
-    // Refill Buffer — LOOKUP miss 拍一次性锁存
+    // Refill Buffer — LOOKUP miss 拍一次性锁存，含写回握手管理
     // ============================================================
     always @(posedge clk) begin
-        if (main_lookup && !cache_hit) begin
-            refill_index       <= req_index;
-            refill_tag         <= req_tag;
-            refill_offset      <= req_offset;
-            refill_cached      <= req_cached;
-            refill_op          <= req_op;
-            refill_wdata       <= req_wdata;
-            refill_wstrb_mask  <= req_wstrb_mask;
-            refill_replace_way <= replace_way;
-            refill_cnt         <= 2'd0;
-            refill_victim_tag  <= tagv_lookup[replace_way][`TAG_WIDTH:1];
-            // 始终保存 victim 行数据：脏时供 writeback，干净时供 VC insert
-            if (tagv_lookup[replace_way][0]) begin
-                refill_victim_line[0] <= lookup_wr_bank[0];
-                refill_victim_line[1] <= lookup_wr_bank[1];
-                refill_victim_line[2] <= lookup_wr_bank[2];
-                refill_victim_line[3] <= lookup_wr_bank[3];
+        if (~resetn) begin
+            refill_needs_write   <= 1'b0;
+            refill_wr_handshaked <= 1'b0;
+        end
+        else begin
+            // LOOKUP miss 拍加载
+            if (main_lookup && !cache_hit) begin
+                refill_index       <= req_index;
+                refill_tag         <= req_tag;
+                refill_offset      <= req_offset;
+                refill_cached      <= req_cached;
+                refill_d          <= req_d;
+                refill_wdata       <= req_wdata;
+                refill_wstrb_mask  <= req_wstrb_mask;
+                refill_replace_way <= replace_way;
+                refill_cnt         <= 2'd0;
+                refill_victim_tag   <= tagv_lookup[replace_way][`TAG_WIDTH:1];
+                refill_victim_valid <= tagv_lookup[replace_way][0];
+                refill_victim_dirty <= (d_lookup[replace_way] || wb_line_dirty[replace_way])
+                                     && tagv_lookup[replace_way][0];
+                refill_needs_write   <= miss_needs_write;
+                refill_wr_handshaked <= 1'b0;
+                refill_vc_hit_idx   <= vc_hit_idx;
+                // 始终保存 victim 行数据：脏时供 writeback，干净时供 VC insert
+                if (tagv_lookup[replace_way][0]) begin
+                    refill_victim_line[0] <= lookup_wr_bank[0];
+                    refill_victim_line[1] <= lookup_wr_bank[1];
+                    refill_victim_line[2] <= lookup_wr_bank[2];
+                    refill_victim_line[3] <= lookup_wr_bank[3];
+                end
             end
+            // REFILL 计数（与 LOOKUP miss 互斥）
+            if (main_refill && return_valid) begin
+                refill_cnt <= refill_cnt + 2'd1;
+                if (refill_cached)
+                    refill_line[refill_cnt] <= refill_merged_word;
+            end
+            // 写回握手管理（后台独立推进；LOADUP 当拍用组合 miss_needs_write 判断）
+            if ((main_lookup && miss_needs_write && wr_rdy)
+                || (refill_needs_write && !refill_wr_handshaked && wr_rdy))
+                refill_wr_handshaked <= 1'b1;
+            else if (refill_needs_write && refill_wr_handshaked && (!refill_is_uncached_store || wr_done))
+                refill_needs_write <= 1'b0;
         end
-        else if (main_refill && return_valid) begin
-            refill_cnt <= refill_cnt + 2'd1;
-            if (refill_cached)
-                refill_line[refill_cnt] <= refill_merged_word;
-        end
-    end
-
-    // ============================================================
-    // VC 服务上下文 — LOOKUP VC hit 时锁存，exchange 后清除
-    // ============================================================
-    always @(posedge clk) begin
-        if (~resetn)
-            vc_serve_r <= 1'b0;
-        else if (main_lookup && vc_serve) begin
-            vc_serve_r        <= 1'b1;
-            vc_hit_idx_r      <= vc_hit_idx;
-            vc_victim_dirty_r <= victim_dirty;
-            vc_serve_line     <= vc_data[vc_hit_idx];
-        end
-        else if (vc_exchange)
-            vc_serve_r <= 1'b0;
     end
 
     // ============================================================
@@ -691,71 +687,46 @@ module dcache (
     end
 
     // ============================================================
-    // Writeback Buffer — LOOKUP miss + 需写回时锁存
-    // ============================================================
-    always @(posedge clk) begin
-        if (~resetn) begin
-            wr_pending    <= 1'b0;
-            wr_handshaked <= 1'b0;
-        end
-        else begin
-            if (main_lookup && !cache_hit && miss_needs_write) begin
-                wr_pending    <= 1'b1;
-                wr_handshaked <= 1'b0;
-                wr_is_uncached <= is_uncached_store;
-                wr_wb_type     <= (req_cached || cacop_en_r) ? 3'b100 : uncached_rd_type;
-                wr_wb_wstrb    <= (req_cached || cacop_en_r) ? 4'b1111 : req_wstrb_4b;
-                if (is_uncached_store) begin
-                    wr_wb_addr <= {req_tag, req_index, req_offset};
-                    wr_wb_data <= {96'd0, req_wdata};
-                end
-                else begin
-                    wr_wb_addr <= {tagv_rdata[replace_way][`TAG_WIDTH:1], req_index, 4'b0000};
-                    wr_wb_data <= {lookup_wr_bank[3], lookup_wr_bank[2],
-                                   lookup_wr_bank[1], lookup_wr_bank[0]};
-                end
-            end
-            else if (wr_pending && !wr_handshaked && wr_rdy) begin
-                wr_handshaked <= 1'b1;
-            end
-            else if (wr_pending && wr_handshaked && (!wr_is_uncached || wr_done)) begin
-                wr_pending <= 1'b0;
-            end
-        end
-    end
-
-    // ============================================================
     // VC 交换写
     // ============================================================
     // VC→L1: 永远在 vc_exchange 拍执行
     // L1→VC: 仅在 victim 干净时
     wire vc_fill_lookup;
     wire vc_fill;
-    assign vc_fill_lookup  = vc_exchange && !vc_victim_dirty_r;
+    assign vc_fill_lookup  = (vc_exchange_lookup && !victim_dirty)
+                           || (vc_exchange_waitwb && !refill_victim_dirty);
     assign vc_fill         = vc_exchange;
 
     wire [WAY_IDX_W-1:0] vc_fill_way;
-    assign vc_fill_way = refill_replace_way;
+    assign vc_fill_way = vc_exchange_lookup ? replace_way : refill_replace_way;
 
-    // L1→VC 数据源：Refill Buffer 中的 victim 行（含 live_fwd），不再读 bank_rdata
+    // L1→VC 数据源：LOADUP 用 live lookup_wr_bank，WAITWB 用 Refill Buffer 快照
     wire [31:0] vc_fill_word [0:BANK_NUM-1];
     genvar gf;
     generate
         for (gf = 0; gf < BANK_NUM; gf = gf + 1) begin : vc_fill_word_gen
-            assign vc_fill_word[gf] = (req_op && (req_offset[3:2] == gf))
-                                    ? ((req_wdata & req_wstrb_mask) | (refill_victim_line[gf] & ~req_wstrb_mask))
-                                    : refill_victim_line[gf];
+            wire [31:0] vc_fill_lookup_data = (req_d && (req_offset[3:2] == gf))
+                                            ? ((req_wdata & req_wstrb_mask) | (lookup_wr_bank[gf] & ~req_wstrb_mask))
+                                            : lookup_wr_bank[gf];
+            wire [31:0] vc_fill_refill_data = (refill_d && (refill_offset[3:2] == gf))
+                                            ? ((refill_wdata & refill_wstrb_mask) | (refill_victim_line[gf] & ~refill_wstrb_mask))
+                                            : refill_victim_line[gf];
+            assign vc_fill_word[gf] = vc_exchange_lookup ? vc_fill_lookup_data : vc_fill_refill_data;
         end
     endgenerate
 
-    // VC→L1 数据：LOOKUP 拍锁存的 vc_serve_line，store 时合并 wdata
+    // VC→L1 数据：LOADUP 用 combo req_* + vc_hit_idx，WAITWB 用 refill + refill_vc_hit_idx
     wire [31:0] vc_serve_bank_word [0:BANK_NUM-1];
     genvar gvs;
     generate
         for (gvs = 0; gvs < BANK_NUM; gvs = gvs + 1) begin : vc_serve_bank_gen
-            assign vc_serve_bank_word[gvs] = (refill_op && (refill_offset[3:2] == gvs))
-                                           ? ((refill_wdata & refill_wstrb_mask) | (vc_serve_line[gvs*32 +: 32] & ~refill_wstrb_mask))
-                                           : vc_serve_line[gvs*32 +: 32];
+            wire [31:0] vc_serve_lookup = (req_d && (req_offset[3:2] == gvs))
+                                        ? ((req_wdata & req_wstrb_mask) | (vc_data[vc_hit_idx][gvs*32 +: 32] & ~req_wstrb_mask))
+                                        : vc_data[vc_hit_idx][gvs*32 +: 32];
+            wire [31:0] vc_serve_refill = (refill_d && (refill_offset[3:2] == gvs))
+                                        ? ((refill_wdata & refill_wstrb_mask) | (vc_data[refill_vc_hit_idx][gvs*32 +: 32] & ~refill_wstrb_mask))
+                                        : vc_data[refill_vc_hit_idx][gvs*32 +: 32];
+            assign vc_serve_bank_word[gvs] = vc_exchange_lookup ? vc_serve_lookup : vc_serve_refill;
         end
     endgenerate
 
@@ -764,8 +735,8 @@ module dcache (
     // ============================================================
     wire vc_insert;
     assign vc_insert = refill_d_we && VC_EN
-                     && tagv_rdata[refill_replace_way][0]
-                     && !d_rdata[refill_replace_way];
+                     && refill_victim_valid
+                     && !refill_victim_dirty;
 
     integer vci;
     always @(posedge clk) begin
@@ -784,14 +755,22 @@ module dcache (
                 end
             end
             if (vc_fill_lookup) begin
-                vc_addr[vc_hit_idx_r]  <= {refill_victim_tag, refill_index};
-                vc_data[vc_hit_idx_r]  <= {refill_victim_line[3], refill_victim_line[2],
-                                           refill_victim_line[1], refill_victim_line[0]};
-                vc_valid[vc_hit_idx_r] <= 1'b1;
+                if (vc_exchange_lookup) begin
+                    vc_addr[vc_hit_idx]  <= {tagv_lookup[replace_way][`TAG_WIDTH:1], req_index};
+                    vc_data[vc_hit_idx]  <= {vc_fill_word[3], vc_fill_word[2],
+                                              vc_fill_word[1], vc_fill_word[0]};
+                    vc_valid[vc_hit_idx] <= 1'b1;
+                end
+                else begin
+                    vc_addr[refill_vc_hit_idx]  <= {refill_victim_tag, refill_index};
+                    vc_data[refill_vc_hit_idx]  <= {vc_fill_word[3], vc_fill_word[2],
+                                                     vc_fill_word[1], vc_fill_word[0]};
+                    vc_valid[refill_vc_hit_idx] <= 1'b1;
+                end
             end
             if (vc_insert) begin
                 vc_valid[vc_fifo_ptr] <= 1'b1;
-                vc_addr[vc_fifo_ptr]  <= {tagv_rdata[refill_replace_way][`TAG_WIDTH:1], refill_index};
+                vc_addr[vc_fifo_ptr]  <= {refill_victim_tag, refill_index};
                 vc_data[vc_fifo_ptr]  <= {refill_victim_line[3], refill_victim_line[2],
                                           refill_victim_line[1], refill_victim_line[0]};
                 vc_fifo_ptr <= vc_fifo_ptr + 1'b1;
@@ -817,8 +796,15 @@ module dcache (
     assign req_wstrb_4b = {req_wstrb_mask[31], req_wstrb_mask[23],
                            req_wstrb_mask[15], req_wstrb_mask[ 7]};
 
+    wire [3:0] refill_wstrb_4b;
+    assign refill_wstrb_4b = {refill_wstrb_mask[31], refill_wstrb_mask[23],
+                               refill_wstrb_mask[15], refill_wstrb_mask[ 7]};
+
+    wire refill_wstrb_hw;
+    assign refill_wstrb_hw = (refill_wstrb_4b == 4'b0011) || (refill_wstrb_4b == 4'b1100);
+
     wire is_refill_store_target;
-    assign is_refill_store_target = refill_op && (refill_cnt == refill_offset[3:2]);
+    assign is_refill_store_target = refill_d && (refill_cnt == refill_offset[3:2]);
 
     wire [31:0] refill_merged_word;
     assign refill_merged_word = is_refill_store_target
@@ -852,7 +838,9 @@ module dcache (
     assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001
                                                            : {TAGV_BYTES{1'b1}};
     wire [`TAG_WIDTH:0] vc_serve_tagv_wdata;
-    assign vc_serve_tagv_wdata = {vc_addr[vc_hit_idx_r][`TAG_WIDTH+`INDEX_WIDTH-1:`INDEX_WIDTH], 1'b1};
+    assign vc_serve_tagv_wdata = vc_exchange_lookup
+        ? {vc_addr[vc_hit_idx][`TAG_WIDTH+`INDEX_WIDTH-1:`INDEX_WIDTH], 1'b1}
+        : {vc_addr[refill_vc_hit_idx][`TAG_WIDTH+`INDEX_WIDTH-1:`INDEX_WIDTH], 1'b1};
     assign tagv_wdata_sel = vc_fill ? vc_serve_tagv_wdata
                           : cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }
                           : {refill_tag, 1'b1};
@@ -906,9 +894,9 @@ module dcache (
         else begin
             for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1) begin
                 if (refill_d_we && (refill_replace_way == d_wi))
-                    d_ram[d_wi][refill_index] <= refill_op;
+                    d_ram[d_wi][refill_index] <= refill_d;
                 else if (vc_fill && (vc_fill_way == d_wi))
-                    d_ram[d_wi][req_index] <= req_op;
+                    d_ram[d_wi][req_index] <= req_d;
                 else if (wb_write && wb_way_hit[d_wi] && !wb_stall)
                     d_ram[d_wi][wb_index] <= 1'b1;
                 if (ram_read_en)
@@ -990,10 +978,10 @@ module dcache (
     wire vc_read_done;
     wire write_done;
     wire read_miss_done;
-    assign read_hit_done  = main_lookup && cache_hit && !req_op;
-    assign vc_read_done   = vc_serve && !req_op;
-    assign write_done     = main_lookup && req_op;
-    assign read_miss_done = main_refill && return_valid && !refill_op
+    assign read_hit_done  = main_lookup && cache_hit && !req_d;
+    assign vc_read_done   = vc_serve && !req_d;
+    assign write_done     = main_lookup && req_d;
+    assign read_miss_done = main_refill && return_valid && !refill_d
                           && (refill_cnt == refill_offset[3:2] || !refill_cached);
 
     wire read_result_ready;
@@ -1012,7 +1000,7 @@ module dcache (
     wire accept_ok;
     assign accept_ok = cpu_op
                      || (cpu_fifo_cnt < 3'd3)
-                     || (cpu_fifo_cnt == 3'd3 && req_op);
+                     || (cpu_fifo_cnt == 3'd3 && req_d);
 
     assign cpu_addr_ok = accept_new_req && !cacop_en;
     assign cacop_rdy   = accept_new_req && cacop_en;
@@ -1064,7 +1052,7 @@ module dcache (
     assign wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);
 
     wire [2:0] uncached_rd_type;
-    assign uncached_rd_type = !req_op             ? 3'b010
+    assign uncached_rd_type = !req_d             ? 3'b010
                             : (&req_wstrb_4b)     ? 3'b010
                             : wstrb_hw            ? 3'b001
                                                   : 3'b000;
@@ -1119,13 +1107,47 @@ module dcache (
     endgenerate
 
     // ============================================================
-    // AXI 写请求 — 来自 Writeback Buffer
+    // AXI 写请求 — LOOKUP 拍用组合 live 数据，后续状态用 Refill Buffer 快照
     // ============================================================
-    assign wr_req   = wr_pending && !wr_handshaked;
-    assign wr_type  = wr_wb_type;
-    assign wr_addr  = wr_wb_addr;
-    assign wr_wstrb = wr_wb_wstrb;
-    assign wr_data  = wr_wb_data;
+    wire lookup_wr_req;
+    assign lookup_wr_req = main_lookup && miss_needs_write;
+
+    assign wr_req = lookup_wr_req || (refill_needs_write && !refill_wr_handshaked);
+
+    wire lookup_wr_is_burst;
+    assign lookup_wr_is_burst = req_cached || cacop_en_r;
+
+    wire is_burst_wr;
+    assign is_burst_wr = !refill_is_uncached_store;
+
+    // wr_type
+    assign wr_type = lookup_wr_req
+        ? (lookup_wr_is_burst ? 3'b100 : uncached_rd_type)
+        : (is_burst_wr ? 3'b100
+           : ((&refill_wstrb_4b) ? 3'b010
+              : refill_wstrb_hw    ? 3'b001
+                                   : 3'b000));
+
+    // wr_addr
+    assign wr_addr = lookup_wr_req
+        ? (lookup_wr_is_burst ? {tagv_lookup[replace_way][`TAG_WIDTH:1], req_index, 4'b0000}
+                              : {req_tag, req_index, req_offset})
+        : (is_burst_wr ? {refill_victim_tag, refill_index, 4'b0000}
+                       : {refill_tag, refill_index, refill_offset});
+
+    // wr_wstrb
+    assign wr_wstrb = lookup_wr_req
+        ? (lookup_wr_is_burst ? 4'b1111 : req_wstrb_4b)
+        : (is_burst_wr ? 4'b1111 : refill_wstrb_4b);
+
+    // wr_data
+    assign wr_data = lookup_wr_req
+        ? (lookup_wr_is_burst ? {lookup_wr_bank[3], lookup_wr_bank[2],
+                                  lookup_wr_bank[1], lookup_wr_bank[0]}
+                              : {96'd0, req_wdata})
+        : (is_burst_wr ? {refill_victim_line[3], refill_victim_line[2],
+                           refill_victim_line[1], refill_victim_line[0]}
+                       : {96'd0, refill_wdata});
 
 `ifndef SYNTHESIS
     // ============================================================

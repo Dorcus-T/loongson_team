@@ -528,7 +528,6 @@ module icache (
     // CPU / CACOP 接口
     // ============================================================
     assign cpu_addr_ok = (accept_new_req && !cacop_en)
-                        || (main_lookup && mmu_cancel)
                         || (main_refill && return_last && prefetch_match_after_shake && accept_ok);
     assign cacop_rdy   = accept_new_req && cacop_en;
     assign bus_accept  = 1'b1;

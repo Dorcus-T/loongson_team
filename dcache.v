@@ -1009,8 +1009,7 @@ module dcache (
                      || (cpu_fifo_cnt < 3'd3)
                      || (cpu_fifo_cnt == 3'd3 && req_d);
 
-    assign cpu_addr_ok = (accept_new_req && !cacop_en)
-                      || (main_lookup && mmu_cancel);
+    assign cpu_addr_ok = accept_new_req && !cacop_en;
     assign cacop_rdy   = accept_new_req && cacop_en;
     assign bus_accept  = 1'b1;
     assign cpu_data_ok = read_result_ready || !cpu_fifo_empty || write_done;

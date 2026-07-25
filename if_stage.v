@@ -9,12 +9,9 @@ module if_stage (
     output wire                     if_to_id_upd,         // IF→ID 更新 data_n
     // 与 ICache 的接口
     output wire                     icache_cpu_req,      // ICache 请求有效
-    output wire                     icache_cpu_op,       // ICache 操作类型（0读）
     output wire [`INDEX_WIDTH-1:0]  icache_cpu_index,    // ICache 组索引
     output wire [`TAG_WIDTH-1:0]    icache_cpu_tag,      // ICache 标签
     output wire [`OFFSET_WIDTH-1:0] icache_cpu_offset,   // ICache 块内偏移
-    output wire [ 3:0]              icache_cpu_wstrb,    // ICache 写掩码（未使用）
-    output wire [31:0]              icache_cpu_wdata,    // ICache 写数据（未使用）
     input  wire                     icache_cpu_addr_ok,  // ICache 地址就绪
     input  wire                     icache_cpu_data_ok,  // ICache 数据就绪
     input  wire [31:0]              icache_cpu_rdata,    // ICache 读数据
@@ -113,6 +110,7 @@ module if_stage (
     } = if_current;
 
     wire        pre_if_ready_go;             // 预取值阶段就绪标志
+    wire        if_ready_go;                 // IF 阶段就绪标志
     // ========== 控制信号解析 ==========
     wire [31:0] seq_pc;                 // 顺序下一条PC（当前PC+4）
     wire [31:0] nextpc;                 // 下一周期PC（顺序或分支）
@@ -292,12 +290,9 @@ module if_stage (
     // ========== ICache 输出信号 ==========
     assign if_to_mmu_vaddr = pre_if_pc_r;
     assign icache_cpu_req   = pre_if_can_req && !req_already && tlb_ready;
-    assign icache_cpu_op    = 1'b0;
     assign icache_cpu_index  = pre_if_pc_r[`OFFSET_WIDTH +: `INDEX_WIDTH];
     assign icache_cpu_tag    = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
     assign icache_cpu_offset = pre_if_pc_r[0 +: `OFFSET_WIDTH];
-    assign icache_cpu_wstrb  = 4'h0;
-    assign icache_cpu_wdata  = 32'b0;
     assign icache_cpu_cached = if_cached;
     assign icache_cpu_accept = if_ready_go && lpower[1] || inst_dirty != 3'b0;
     assign if_inst           = icache_cpu_rdata;

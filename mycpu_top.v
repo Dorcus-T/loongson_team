@@ -215,12 +215,9 @@ module core_top (
     // ICache — CPU 侧连线
     // ================================================================
     wire        icache_cpu_req;
-    wire        icache_cpu_op;
     wire [ 7:0] icache_cpu_index;
     wire [19:0] icache_cpu_tag;
     wire [ 3:0] icache_cpu_offset;
-    wire [ 3:0] icache_cpu_wstrb;
-    wire [31:0] icache_cpu_wdata;
     wire        icache_cpu_cached;
     wire        icache_cpu_addr_ok;
     wire        icache_cpu_data_ok;
@@ -430,12 +427,9 @@ module core_top (
         .if_to_id_bus       (if_to_id_bus),
         .if_to_id_upd       (if_to_id_upd),
         .icache_cpu_req     (icache_cpu_req),
-        .icache_cpu_op      (icache_cpu_op),
         .icache_cpu_index   (icache_cpu_index),
         .icache_cpu_tag     (icache_cpu_tag),
         .icache_cpu_offset  (icache_cpu_offset),
-        .icache_cpu_wstrb   (icache_cpu_wstrb),
-        .icache_cpu_wdata   (icache_cpu_wdata),
         .icache_cpu_cached  (icache_cpu_cached),
         .icache_cpu_addr_ok (icache_cpu_addr_ok),
         .icache_cpu_data_ok (icache_cpu_data_ok),
@@ -822,17 +816,14 @@ module core_top (
     // ================================================================
     // ICache
     // ================================================================
-    cache u_icache (
+    icache u_icache (
         .clk          (clk),
         .resetn       (~reset),
         // CPU 接口
         .cpu_req      (icache_cpu_req),
-        .cpu_op       (icache_cpu_op),
         .cpu_index    (icache_cpu_index),
         .cpu_tag      (icache_cpu_tag),
         .cpu_offset   (icache_cpu_offset),
-        .cpu_wstrb    (icache_cpu_wstrb),
-        .cpu_wdata    (icache_cpu_wdata),
         .cpu_cached   (icache_cpu_cached),
         .cpu_addr_ok  (icache_cpu_addr_ok),
         .cpu_data_ok  (icache_cpu_data_ok),
@@ -852,20 +843,13 @@ module core_top (
         .return_valid (icache_return_valid),
         .return_last  (icache_return_last),
         .return_data  (icache_return_data),
-        .wr_req       (),
-        .wr_type      (),
-        .wr_addr      (),
-        .wr_wstrb     (),
-        .wr_data      (),
-        .wr_rdy       (1'b1),
-        .wr_done      (1'b0),
         .bus_accept   (icache_bus_accept)
     );
 
     // ================================================================
     // DCache
     // ================================================================
-    cache u_dcache (
+    dcache u_dcache (
         .clk          (clk),
         .resetn       (~reset),
         // CPU 接口

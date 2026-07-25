@@ -134,7 +134,7 @@ module cache_axi_bridge (
 
     // DCache 读优先级高于 ICache（load 比取指更紧急）
     // FIFO 满时拒绝接受新读请求，防溢出
-    assign dcache_rd_rdy = (ar_state == AR_IDLE) && !dcache_conflict && !dcache_fifo_full;
+    assign dcache_rd_rdy = (ar_state == AR_IDLE) && !dcache_fifo_full;
     assign icache_rd_rdy = (ar_state == AR_IDLE) && !icache_conflict
                           && !(dcache_rd_req && !dcache_conflict) && !icache_fifo_full;
 
@@ -323,7 +323,7 @@ module cache_axi_bridge (
     assign dcache_return_valid = !dcache_fifo_empty || (rvalid && rready && (rid == 4'd1));
     assign dcache_return_data  = dcache_fifo_empty ? rdata : dcache_fifo_mem[dcache_fifo_rptr][31:0];
     assign dcache_return_last  = dcache_fifo_empty ? rlast : dcache_fifo_mem[dcache_fifo_rptr][32];
-
+    
     // ================================================================
     // 写请求处理 — 状态机、写数据分拍、写追踪器、写响应、AXI 写输出
     // ================================================================

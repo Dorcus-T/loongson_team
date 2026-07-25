@@ -134,7 +134,7 @@ module cache_axi_bridge (
 
     // DCache 读优先级高于 ICache（load 比取指更紧急）
     // FIFO 满时拒绝接受新读请求，防溢出
-    assign dcache_rd_rdy = (ar_state == AR_IDLE) && !dcache_conflict && !dcache_fifo_full;
+    assign dcache_rd_rdy = (ar_state == AR_IDLE) && !dcache_fifo_full;
     assign icache_rd_rdy = (ar_state == AR_IDLE) && !icache_conflict
                           && !(dcache_rd_req && !dcache_conflict) && !icache_fifo_full;
 

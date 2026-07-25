@@ -133,6 +133,7 @@ module dcache (
     reg                     refill_needs_write;
     reg                     refill_wr_handshaked;
     reg  [VC_IDX_W-1:0]     refill_vc_hit_idx;
+    reg                     refill_cacop;
 
     // ============================================================
     // 顶层标志
@@ -419,7 +420,7 @@ module dcache (
     assign is_uncached_store = !req_cached && req_d && !cacop_en_r;
 
     wire refill_is_uncached_store;
-    assign refill_is_uncached_store = !refill_cached && refill_d;
+    assign refill_is_uncached_store = !refill_cached && refill_d && !refill_cacop;
 
     wire need_bus_rd;
     assign need_bus_rd = (req_cached || !req_d) && !cacop_en_r;
@@ -651,6 +652,7 @@ module dcache (
                 refill_needs_write   <= miss_needs_write;
                 refill_wr_handshaked <= 1'b0;
                 refill_vc_hit_idx   <= vc_hit_idx;
+                refill_cacop        <= cacop_en_r;
                 // 始终保存 victim 行数据：脏时供 writeback，干净时供 VC insert
                 if (tagv_lookup[replace_way][0]) begin
                     refill_victim_line[0] <= lookup_wr_bank[0];

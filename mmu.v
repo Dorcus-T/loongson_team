@@ -38,11 +38,20 @@ module mmu (
     output wire [ 4:0]               tlbfill_rand_index,  // TLBFILL 随机替换 index（for difftest）
 
     // pre_mem 访存 TLB 查询控制
-    output wire         mem_tlb_req,    // 访存需要查 TLB 页表（页表翻译模式 && DMW 未命中）
-    output wire         utlb_hit,       // μTLB 命中（发 pre_mem_stage，跳过 tlb_wait）
+    output wire         s1_mem_tlb_req,    // 访存需要查 TLB 页表（页表翻译模式 && DMW 未命中）
+    output wire         s1_utlb_hit,       // μTLB 命中（发 pre_mem_stage，跳过 tlb_wait）
+
+    // IF 取指 TLB 查询控制
+    output wire         s0_if_tlb_req,     // 取指需要查 TLB 页表（页表翻译模式 && DMW 未命中）
+    output wire         s0_utlb_hit,       // s0 μTLB 命中（发 if_stage，跳过 tlb_wait）
 
     // pre_mem 废弃标志
-    input  wire         rubish          // 当前指令将被废弃，不对 MMU 操作
+    input  wire         need_mmu,       // 本指令需要用 MMU
+    input  wire         pre_if_can_req_pre, // IF 取指请求有效（清 s0 miss 状态）
+
+    // μTLB refill 抑制（来自 linectrl）
+    input  wire         s0_flush,       // pre_if 之后有冲刷 → 抑制 s0 refill
+    input  wire         s1_flush        // pre_mem 之后有冲刷 → 抑制 s1 refill
 );
     // if decode
     wire [18:0] if_vppn;
@@ -85,14 +94,25 @@ module mmu (
     wire [18:0] s0_vppn;
     wire        s0_va_bit12;
     wire [ 9:0] s0_asid;
-    wire        s0_found;
-    wire [ 4:0] s0_index;
-    wire [19:0] s0_ppn;
-    wire [ 5:0] s0_ps;
-    wire [ 1:0] s0_plv;
-    wire [ 1:0] s0_mat;
-    wire        s0_d;
-    wire        s0_v;
+    wire        tlb_s0_found;
+    wire [ 4:0] tlb_s0_index;
+    wire [19:0] tlb_s0_ppn;
+    wire [ 5:0] tlb_s0_ps;
+    wire [ 1:0] tlb_s0_plv;
+    wire [ 1:0] tlb_s0_mat;
+    wire        tlb_s0_d;
+    wire        tlb_s0_v;
+    // s0 未 mux TLB 输出（供 μTLB 回填）
+    wire [19:0] tlb_s0_ppn0;
+    wire [19:0] tlb_s0_ppn1;
+    wire [ 1:0] tlb_s0_plv0;
+    wire [ 1:0] tlb_s0_plv1;
+    wire [ 1:0] tlb_s0_mat0;
+    wire [ 1:0] tlb_s0_mat1;
+    wire        tlb_s0_d0;
+    wire        tlb_s0_d1;
+    wire        tlb_s0_v0;
+    wire        tlb_s0_v1;
 
     // s1 io — 大 TLB 输出（已寄存）
     wire [18:0] s1_vppn;
@@ -118,14 +138,14 @@ module mmu (
     wire        tlb_s1_v1;
 
     // μTLB 输出（组合逻辑）
-    wire        utlb_found;
-    wire [ 1:0] utlb_index;
-    wire [19:0] utlb_ppn;
-    wire [ 5:0] utlb_ps;
-    wire [ 1:0] utlb_plv;
-    wire [ 1:0] utlb_mat;
-    wire        utlb_d;
-    wire        utlb_v;
+    wire        s1_utlb_found;
+    wire [ 1:0] s1_utlb_index;
+    wire [19:0] s1_utlb_ppn;
+    wire [ 5:0] s1_utlb_ps;
+    wire [ 1:0] s1_utlb_plv;
+    wire [ 1:0] s1_utlb_mat;
+    wire        s1_utlb_d;
+    wire        s1_utlb_v;
 
     // 最终选源: μTLB 命中 → μTLB, 否则 → 大 TLB（TLBSRCH/INVTLB 强制走大 TLB）
     wire        s1_found;
@@ -137,15 +157,45 @@ module mmu (
     wire        s1_d;
     wire        s1_v;
 
-    assign utlb_hit    = utlb_found && !tlbsrch_en && !invtlb_en;
-    assign s1_found    = utlb_hit ? 1'b1      : tlb_s1_found;
+    assign s1_utlb_hit    = s1_utlb_found && !tlbsrch_en && !invtlb_en;
+    assign s1_found    = s1_utlb_hit ? 1'b1      : tlb_s1_found;
     assign s1_index    = tlb_s1_index;  // 始终用大 TLB index（TLBSRCH 需要）
-    assign s1_ppn      = utlb_hit ? utlb_ppn   : tlb_s1_ppn;
-    assign s1_ps       = utlb_hit ? utlb_ps    : tlb_s1_ps;
-    assign s1_plv      = utlb_hit ? utlb_plv   : tlb_s1_plv;
-    assign s1_mat      = utlb_hit ? utlb_mat   : tlb_s1_mat;
-    assign s1_d        = utlb_hit ? utlb_d     : tlb_s1_d;
-    assign s1_v        = utlb_hit ? utlb_v     : tlb_s1_v;
+    assign s1_ppn      = s1_utlb_hit ? s1_utlb_ppn   : tlb_s1_ppn;
+    assign s1_ps       = s1_utlb_hit ? s1_utlb_ps    : tlb_s1_ps;
+    assign s1_plv      = s1_utlb_hit ? s1_utlb_plv   : tlb_s1_plv;
+    assign s1_mat      = s1_utlb_hit ? s1_utlb_mat   : tlb_s1_mat;
+    assign s1_d        = s1_utlb_hit ? s1_utlb_d     : tlb_s1_d;
+    assign s1_v        = s1_utlb_hit ? s1_utlb_v     : tlb_s1_v;
+
+    // s0 μTLB 输出（组合逻辑）
+    wire        s0_utlb_found;
+    wire [ 1:0] s0_utlb_index;
+    wire [19:0] s0_utlb_ppn;
+    wire [ 5:0] s0_utlb_ps;
+    wire [ 1:0] s0_utlb_plv;
+    wire [ 1:0] s0_utlb_mat;
+    wire        s0_utlb_d;
+    wire        s0_utlb_v;
+
+    // s0 最终选源: μTLB 命中 → μTLB, 否则 → 大 TLB
+    wire        s0_found;
+    wire [ 4:0] s0_index;
+    wire [19:0] s0_ppn;
+    wire [ 5:0] s0_ps;
+    wire [ 1:0] s0_plv;
+    wire [ 1:0] s0_mat;
+    wire        s0_d;
+    wire        s0_v;
+
+    assign s0_utlb_hit    = s0_utlb_found && !invtlb_en;
+    assign s0_found    = s0_utlb_hit ? 1'b1          : tlb_s0_found;
+    assign s0_index    = tlb_s0_index;  // 始终用大 TLB index
+    assign s0_ppn      = s0_utlb_hit ? s0_utlb_ppn   : tlb_s0_ppn;
+    assign s0_ps       = s0_utlb_hit ? s0_utlb_ps    : tlb_s0_ps;
+    assign s0_plv      = s0_utlb_hit ? s0_utlb_plv   : tlb_s0_plv;
+    assign s0_mat      = s0_utlb_hit ? s0_utlb_mat   : tlb_s0_mat;
+    assign s0_d        = s0_utlb_hit ? s0_utlb_d     : tlb_s0_d;
+    assign s0_v        = s0_utlb_hit ? s0_utlb_v     : tlb_s0_v;
 
     // invtlb opcode
     wire        invtlb_valid;
@@ -205,14 +255,24 @@ module mmu (
         .s0_vppn        (s0_vppn        ),
         .s0_va_bit12    (s0_va_bit12    ),
         .s0_asid        (s0_asid        ),
-        .s0_found       (s0_found       ),
-        .s0_index       (s0_index       ),
-        .s0_ppn         (s0_ppn         ),
-        .s0_ps          (s0_ps          ),
-        .s0_plv         (s0_plv         ),
-        .s0_mat         (s0_mat         ),
-        .s0_d           (s0_d           ),
-        .s0_v           (s0_v           ),
+        .s0_found       (tlb_s0_found   ),
+        .s0_index       (tlb_s0_index   ),
+        .s0_ppn         (tlb_s0_ppn     ),
+        .s0_ps          (tlb_s0_ps      ),
+        .s0_plv         (tlb_s0_plv     ),
+        .s0_mat         (tlb_s0_mat     ),
+        .s0_d           (tlb_s0_d       ),
+        .s0_v           (tlb_s0_v       ),
+        .s0_ppn0        (tlb_s0_ppn0    ),
+        .s0_ppn1        (tlb_s0_ppn1    ),
+        .s0_plv0        (tlb_s0_plv0    ),
+        .s0_plv1        (tlb_s0_plv1    ),
+        .s0_mat0        (tlb_s0_mat0    ),
+        .s0_mat1        (tlb_s0_mat1    ),
+        .s0_d0          (tlb_s0_d0      ),
+        .s0_d1          (tlb_s0_d1      ),
+        .s0_v0          (tlb_s0_v0      ),
+        .s0_v1          (tlb_s0_v1      ),
 
         .s1_vppn        (s1_vppn        ),
         .s1_va_bit12    (s1_va_bit12    ),
@@ -279,130 +339,260 @@ module mmu (
     // μTLB（4 项全相联，组合查找，同拍命中）
     // ============================================================
     // 回填写端口
-    wire        utlb_we;
-    wire [ 1:0] utlb_w_index;
-    wire [18:0] utlb_w_vppn;
-    wire [ 5:0] utlb_w_ps;
-    wire [ 9:0] utlb_w_asid;
-    wire        utlb_w_g;
-    wire [19:0] utlb_w_ppn0;
-    wire [ 1:0] utlb_w_plv0;
-    wire [ 1:0] utlb_w_mat0;
-    wire        utlb_w_d0;
-    wire        utlb_w_v0;
-    wire [19:0] utlb_w_ppn1;
-    wire [ 1:0] utlb_w_plv1;
-    wire [ 1:0] utlb_w_mat1;
-    wire        utlb_w_d1;
-    wire        utlb_w_v1;
+    wire        s1_utlb_we;
+    wire [ 1:0] s1_utlb_w_index;
+    wire [18:0] s1_utlb_w_vppn;
+    wire [ 5:0] s1_utlb_w_ps;
+    wire [ 9:0] s1_utlb_w_asid;
+    wire        s1_utlb_w_g;
+    wire [19:0] s1_utlb_w_ppn0;
+    wire [ 1:0] s1_utlb_w_plv0;
+    wire [ 1:0] s1_utlb_w_mat0;
+    wire        s1_utlb_w_d0;
+    wire        s1_utlb_w_v0;
+    wire [19:0] s1_utlb_w_ppn1;
+    wire [ 1:0] s1_utlb_w_plv1;
+    wire [ 1:0] s1_utlb_w_mat1;
+    wire        s1_utlb_w_d1;
+    wire        s1_utlb_w_v1;
 
-    wire [ 1:0] utlb_lru_victim;
+    wire [ 1:0] s1_utlb_lru_victim;
 
-    utlb u_utlb (
+    utlb u_s1_utlb (
         .clk            (clk            ),
         .reset          (reset          ),
 
         .s_vppn         (s1_vppn        ),
         .s_va_bit12     (s1_va_bit12    ),
         .s_asid         (s1_asid        ),
-        .s_found        (utlb_found     ),
-        .s_index        (utlb_index     ),
-        .s_ppn          (utlb_ppn       ),
-        .s_ps           (utlb_ps        ),
-        .s_plv          (utlb_plv       ),
-        .s_mat          (utlb_mat       ),
-        .s_d            (utlb_d         ),
-        .s_v            (utlb_v         ),
-        .lru_victim     (utlb_lru_victim),
+        .s_found        (s1_utlb_found     ),
+        .s_index        (s1_utlb_index     ),
+        .s_ppn          (s1_utlb_ppn       ),
+        .s_ps           (s1_utlb_ps        ),
+        .s_plv          (s1_utlb_plv       ),
+        .s_mat          (s1_utlb_mat       ),
+        .s_d            (s1_utlb_d         ),
+        .s_v            (s1_utlb_v         ),
+        .lru_victim     (s1_utlb_lru_victim),
 
-        .we             (utlb_we        ),
-        .w_index        (utlb_w_index   ),
-        .w_vppn         (utlb_w_vppn    ),
-        .w_ps           (utlb_w_ps      ),
-        .w_asid         (utlb_w_asid    ),
-        .w_g            (utlb_w_g       ),
-        .w_ppn0         (utlb_w_ppn0    ),
-        .w_plv0         (utlb_w_plv0    ),
-        .w_mat0         (utlb_w_mat0    ),
-        .w_d0           (utlb_w_d0      ),
-        .w_v0           (utlb_w_v0      ),
-        .w_ppn1         (utlb_w_ppn1    ),
-        .w_plv1         (utlb_w_plv1    ),
-        .w_mat1         (utlb_w_mat1    ),
-        .w_d1           (utlb_w_d1      ),
-        .w_v1           (utlb_w_v1      ),
+        .we             (s1_utlb_we        ),
+        .w_index        (s1_utlb_w_index   ),
+        .w_vppn         (s1_utlb_w_vppn    ),
+        .w_ps           (s1_utlb_w_ps      ),
+        .w_asid         (s1_utlb_w_asid    ),
+        .w_g            (s1_utlb_w_g       ),
+        .w_ppn0         (s1_utlb_w_ppn0    ),
+        .w_plv0         (s1_utlb_w_plv0    ),
+        .w_mat0         (s1_utlb_w_mat0    ),
+        .w_d0           (s1_utlb_w_d0      ),
+        .w_v0           (s1_utlb_w_v0      ),
+        .w_ppn1         (s1_utlb_w_ppn1    ),
+        .w_plv1         (s1_utlb_w_plv1    ),
+        .w_mat1         (s1_utlb_w_mat1    ),
+        .w_d1           (s1_utlb_w_d1      ),
+        .w_v1           (s1_utlb_w_v1      ),
+
+        .invtlb_valid   (invtlb_valid   )
+    );
+
+    // ========== s0 μTLB 实例（4 项全相联，组合查找，同拍命中） ==========
+    wire        s0_utlb_we;
+    wire [ 1:0] s0_utlb_w_index;
+    wire [18:0] s0_utlb_w_vppn;
+    wire [ 5:0] s0_utlb_w_ps;
+    wire [ 9:0] s0_utlb_w_asid;
+    wire        s0_utlb_w_g;
+    wire [19:0] s0_utlb_w_ppn0;
+    wire [ 1:0] s0_utlb_w_plv0;
+    wire [ 1:0] s0_utlb_w_mat0;
+    wire        s0_utlb_w_d0;
+    wire        s0_utlb_w_v0;
+    wire [19:0] s0_utlb_w_ppn1;
+    wire [ 1:0] s0_utlb_w_plv1;
+    wire [ 1:0] s0_utlb_w_mat1;
+    wire        s0_utlb_w_d1;
+    wire        s0_utlb_w_v1;
+
+    wire [ 1:0] s0_utlb_lru_victim;
+
+    utlb u_s0_utlb (
+        .clk            (clk            ),
+        .reset          (reset          ),
+
+        .s_vppn         (s0_vppn        ),
+        .s_va_bit12     (s0_va_bit12    ),
+        .s_asid         (s0_asid        ),
+        .s_found        (s0_utlb_found     ),
+        .s_index        (s0_utlb_index     ),
+        .s_ppn          (s0_utlb_ppn       ),
+        .s_ps           (s0_utlb_ps        ),
+        .s_plv          (s0_utlb_plv       ),
+        .s_mat          (s0_utlb_mat       ),
+        .s_d            (s0_utlb_d         ),
+        .s_v            (s0_utlb_v         ),
+        .lru_victim     (s0_utlb_lru_victim),
+
+        .we             (s0_utlb_we        ),
+        .w_index        (s0_utlb_w_index   ),
+        .w_vppn         (s0_utlb_w_vppn    ),
+        .w_ps           (s0_utlb_w_ps      ),
+        .w_asid         (s0_utlb_w_asid    ),
+        .w_g            (s0_utlb_w_g       ),
+        .w_ppn0         (s0_utlb_w_ppn0    ),
+        .w_plv0         (s0_utlb_w_plv0    ),
+        .w_mat0         (s0_utlb_w_mat0    ),
+        .w_d0           (s0_utlb_w_d0      ),
+        .w_v0           (s0_utlb_w_v0      ),
+        .w_ppn1         (s0_utlb_w_ppn1    ),
+        .w_plv1         (s0_utlb_w_plv1    ),
+        .w_mat1         (s0_utlb_w_mat1    ),
+        .w_d1           (s0_utlb_w_d1      ),
+        .w_v1           (s0_utlb_w_v1      ),
 
         .invtlb_valid   (invtlb_valid   )
     );
 
     // ========== μTLB → 大 TLB 映射表（4×5bit，维护 TLBWR/TLBFILL 一致性） ==========
-    reg  [19:0] utlb_src;  // 打包: 4 项 × 5 bit 大 TLB index
+    reg  [19:0] s1_utlb_src;  // 打包: 4 项 × 5 bit 大 TLB index
 
     always @(posedge clk) begin
         if (reset) begin
-            utlb_src <= 20'd0;
+            s1_utlb_src <= 20'd0;
         end
-        else if (utlb_refill_we) begin
-            case (utlb_w_index)
-                2'd0: utlb_src[ 4: 0] <= tlb_s1_index;
-                2'd1: utlb_src[ 9: 5] <= tlb_s1_index;
-                2'd2: utlb_src[14:10] <= tlb_s1_index;
-                2'd3: utlb_src[19:15] <= tlb_s1_index;
+        else if (s1_utlb_refill_we) begin
+            case (s1_utlb_w_index)
+                2'd0: s1_utlb_src[ 4: 0] <= tlb_s1_index;
+                2'd1: s1_utlb_src[ 9: 5] <= tlb_s1_index;
+                2'd2: s1_utlb_src[14:10] <= tlb_s1_index;
+                2'd3: s1_utlb_src[19:15] <= tlb_s1_index;
             endcase
         end
     end
 
     // TLBWR/TLBFILL: 查找映射表，匹配项直接更新（非失效）
-    wire [3:0] utlb_match_entry;
+    wire [3:0] s1_utlb_match_entry;
     genvar k;
     generate
         for (k = 0; k < 4; k = k + 1) begin : gen_utlb_match
-            assign utlb_match_entry[k] = (tlbwr_en || tlbfill_en)
-                                      && (utlb_src[k*5 +: 5] == w_index);
+            assign s1_utlb_match_entry[k] = (tlbwr_en || tlbfill_en)
+                                      && (s1_utlb_src[k*5 +: 5] == w_index);
         end
     endgenerate
 
-    wire tlbwr_hit_utlb = |utlb_match_entry;
+    wire s1_tlbwr_hit_utlb = |s1_utlb_match_entry;
 
     // 优先编码器：找到匹配的 μTLB 项号
-    wire [1:0] tlbwr_match_idx;
-    assign tlbwr_match_idx = utlb_match_entry[0] ? 2'd0 :
-                              utlb_match_entry[1] ? 2'd1 :
-                              utlb_match_entry[2] ? 2'd2 : 2'd3;
+    wire [1:0] s1_tlbwr_match_idx;
+    assign s1_tlbwr_match_idx = s1_utlb_match_entry[0] ? 2'd0 :
+                              s1_utlb_match_entry[1] ? 2'd1 :
+                              s1_utlb_match_entry[2] ? 2'd2 : 2'd3;
 
     // ========== μTLB 写端口（双源: TLB 写更新 > 回填） ==========
     // 访存类指令 μTLB miss 时，下一拍大 TLB 结果有效后回填
-    reg utlb_miss_r;
+    reg s1_utlb_miss_r;
 
     always @(posedge clk) begin
-        if (reset || rubish)
-            utlb_miss_r <= 1'b0;
-        else if (utlb_refill_we)
-            utlb_miss_r <= 1'b0;
-        else if (!utlb_found && mem_tlb_req)
-            utlb_miss_r <= 1'b1;
+        if (reset)
+            s1_utlb_miss_r <= 1'b0;
+        else if (s1_utlb_refill_we)
+            s1_utlb_miss_r <= 1'b0;
+        else if (!s1_utlb_found && s1_mem_tlb_req)
+            s1_utlb_miss_r <= 1'b1;
+        else 
+            s1_utlb_miss_r <= 1'b0;
     end
 
-    wire utlb_refill_we = (utlb_miss_r && tlb_s1_found) && !tlbwr_hit_utlb;
-    wire utlb_tlbwr_we  = tlbwr_hit_utlb;
+    wire s1_utlb_refill_we = (s1_utlb_miss_r && tlb_s1_found) && !s1_tlbwr_hit_utlb && !s1_flush;
+    wire s1_utlb_tlbwr_we  = s1_tlbwr_hit_utlb;
 
-    assign utlb_we      = utlb_refill_we || utlb_tlbwr_we;
-    assign utlb_w_index = utlb_tlbwr_we ? tlbwr_match_idx : utlb_lru_victim;
+    assign s1_utlb_we      = s1_utlb_refill_we || s1_utlb_tlbwr_we;
+    assign s1_utlb_w_index = s1_utlb_tlbwr_we ? s1_tlbwr_match_idx : s1_utlb_lru_victim;
     // 写数据选源: TLB 写 → 用 TLB 写端口数据; 回填 → 用大 TLB 搜索结果
-    assign utlb_w_vppn  = utlb_tlbwr_we ? w_vppn  : s1_vppn;
-    assign utlb_w_ps    = utlb_tlbwr_we ? w_ps    : tlb_s1_ps;
-    assign utlb_w_asid  = utlb_tlbwr_we ? w_asid  : s1_asid;
-    assign utlb_w_g     = utlb_tlbwr_we ? w_g     : 1'b0;
-    assign utlb_w_ppn0  = utlb_tlbwr_we ? w_ppn0  : tlb_s1_ppn0;
-    assign utlb_w_ppn1  = utlb_tlbwr_we ? w_ppn1  : tlb_s1_ppn1;
-    assign utlb_w_plv0  = utlb_tlbwr_we ? w_plv0  : tlb_s1_plv0;
-    assign utlb_w_plv1  = utlb_tlbwr_we ? w_plv1  : tlb_s1_plv1;
-    assign utlb_w_mat0  = utlb_tlbwr_we ? w_mat0  : tlb_s1_mat0;
-    assign utlb_w_mat1  = utlb_tlbwr_we ? w_mat1  : tlb_s1_mat1;
-    assign utlb_w_d0    = utlb_tlbwr_we ? w_d0    : tlb_s1_d0;
-    assign utlb_w_d1    = utlb_tlbwr_we ? w_d1    : tlb_s1_d1;
-    assign utlb_w_v0    = utlb_tlbwr_we ? w_v0    : tlb_s1_v0;
-    assign utlb_w_v1    = utlb_tlbwr_we ? w_v1    : tlb_s1_v1;
+    assign s1_utlb_w_vppn  = s1_utlb_tlbwr_we ? w_vppn  : s1_vppn;
+    assign s1_utlb_w_ps    = s1_utlb_tlbwr_we ? w_ps    : tlb_s1_ps;
+    assign s1_utlb_w_asid  = s1_utlb_tlbwr_we ? w_asid  : s1_asid;
+    assign s1_utlb_w_g     = s1_utlb_tlbwr_we ? w_g     : 1'b0;
+    assign s1_utlb_w_ppn0  = s1_utlb_tlbwr_we ? w_ppn0  : tlb_s1_ppn0;
+    assign s1_utlb_w_ppn1  = s1_utlb_tlbwr_we ? w_ppn1  : tlb_s1_ppn1;
+    assign s1_utlb_w_plv0  = s1_utlb_tlbwr_we ? w_plv0  : tlb_s1_plv0;
+    assign s1_utlb_w_plv1  = s1_utlb_tlbwr_we ? w_plv1  : tlb_s1_plv1;
+    assign s1_utlb_w_mat0  = s1_utlb_tlbwr_we ? w_mat0  : tlb_s1_mat0;
+    assign s1_utlb_w_mat1  = s1_utlb_tlbwr_we ? w_mat1  : tlb_s1_mat1;
+    assign s1_utlb_w_d0    = s1_utlb_tlbwr_we ? w_d0    : tlb_s1_d0;
+    assign s1_utlb_w_d1    = s1_utlb_tlbwr_we ? w_d1    : tlb_s1_d1;
+    assign s1_utlb_w_v0    = s1_utlb_tlbwr_we ? w_v0    : tlb_s1_v0;
+    assign s1_utlb_w_v1    = s1_utlb_tlbwr_we ? w_v1    : tlb_s1_v1;
+
+    // ========== s0 μTLB → 大 TLB 映射表（4×5bit，维护 TLBWR/TLBFILL 一致性） ==========
+    reg  [19:0] s0_utlb_src;  // 打包: 4 项 × 5 bit 大 TLB index
+
+    always @(posedge clk) begin
+        if (reset) begin
+            s0_utlb_src <= 20'd0;
+        end
+        else if (s0_utlb_refill_we) begin
+            case (s0_utlb_w_index)
+                2'd0: s0_utlb_src[ 4: 0] <= tlb_s0_index;
+                2'd1: s0_utlb_src[ 9: 5] <= tlb_s0_index;
+                2'd2: s0_utlb_src[14:10] <= tlb_s0_index;
+                2'd3: s0_utlb_src[19:15] <= tlb_s0_index;
+            endcase
+        end
+    end
+
+    // TLBWR/TLBFILL: 查找映射表，匹配项直接更新（非失效）
+    wire [3:0] s0_utlb_match_entry;
+    genvar km;
+    generate
+        for (km = 0; km < 4; km = km + 1) begin : gen_s0_utlb_match
+            assign s0_utlb_match_entry[km] = (tlbwr_en || tlbfill_en)
+                                      && (s0_utlb_src[km*5 +: 5] == w_index);
+        end
+    endgenerate
+
+    wire s0_tlbwr_hit_utlb = |s0_utlb_match_entry;
+
+    // 优先编码器：找到匹配的 μTLB 项号
+    wire [1:0] s0_tlbwr_match_idx;
+    assign s0_tlbwr_match_idx = s0_utlb_match_entry[0] ? 2'd0 :
+                                s0_utlb_match_entry[1] ? 2'd1 :
+                                s0_utlb_match_entry[2] ? 2'd2 : 2'd3;
+
+    // ========== s0 μTLB 写端口（双源: TLB 写更新 > 回填） ==========
+    // 取指 μTLB miss 时，下一拍大 TLB 结果有效后回填
+    reg s0_utlb_miss_r;
+
+    always @(posedge clk) begin
+        if (reset)
+            s0_utlb_miss_r <= 1'b0;
+        else if (s0_utlb_refill_we)
+            s0_utlb_miss_r <= 1'b0;
+        else if (!s0_utlb_found && s0_if_tlb_req)
+            s0_utlb_miss_r <= 1'b1;
+        else
+            s0_utlb_miss_r <= 1'b0;
+    end
+
+    wire s0_utlb_refill_we = (s0_utlb_miss_r && tlb_s0_found) && !s0_tlbwr_hit_utlb && !s0_flush;
+    wire s0_utlb_tlbwr_we  = s0_tlbwr_hit_utlb;
+
+    assign s0_utlb_we      = s0_utlb_refill_we || s0_utlb_tlbwr_we;
+    assign s0_utlb_w_index = s0_utlb_tlbwr_we ? s0_tlbwr_match_idx : s0_utlb_lru_victim;
+    // 写数据选源: TLB 写 → 用 TLB 写端口数据; 回填 → 用大 TLB 搜索结果
+    assign s0_utlb_w_vppn  = s0_utlb_tlbwr_we ? w_vppn  : s0_vppn;
+    assign s0_utlb_w_ps    = s0_utlb_tlbwr_we ? w_ps    : tlb_s0_ps;
+    assign s0_utlb_w_asid  = s0_utlb_tlbwr_we ? w_asid  : s0_asid;
+    assign s0_utlb_w_g     = s0_utlb_tlbwr_we ? w_g     : 1'b0;
+    assign s0_utlb_w_ppn0  = s0_utlb_tlbwr_we ? w_ppn0  : tlb_s0_ppn0;
+    assign s0_utlb_w_ppn1  = s0_utlb_tlbwr_we ? w_ppn1  : tlb_s0_ppn1;
+    assign s0_utlb_w_plv0  = s0_utlb_tlbwr_we ? w_plv0  : tlb_s0_plv0;
+    assign s0_utlb_w_plv1  = s0_utlb_tlbwr_we ? w_plv1  : tlb_s0_plv1;
+    assign s0_utlb_w_mat0  = s0_utlb_tlbwr_we ? w_mat0  : tlb_s0_mat0;
+    assign s0_utlb_w_mat1  = s0_utlb_tlbwr_we ? w_mat1  : tlb_s0_mat1;
+    assign s0_utlb_w_d0    = s0_utlb_tlbwr_we ? w_d0    : tlb_s0_d0;
+    assign s0_utlb_w_d1    = s0_utlb_tlbwr_we ? w_d1    : tlb_s0_d1;
+    assign s0_utlb_w_v0    = s0_utlb_tlbwr_we ? w_v0    : tlb_s0_v0;
+    assign s0_utlb_w_v1    = s0_utlb_tlbwr_we ? w_v1    : tlb_s0_v1;
 
     // random index gen
     always @(posedge clk) begin
@@ -445,6 +635,7 @@ module mmu (
                         s0_exc_pil ? 3'b010 :
                         s0_exc_ppl ? 3'b001 : 3'b000;
     assign if_tlb_exc = s0_tlb_exc & {3{dapg==2'b01}} & {3{if_match==2'b0}};
+    assign s0_if_tlb_req = (dapg == 2'b01) && (if_match == 2'b00) && pre_if_can_req_pre;
     // MAT 选源：直接翻译 → DATF / DMW窗口 → DMW MAT / 页表 → TLB MAT
     wire [1:0] if_mat_final;
     assign if_mat_final = (dapg == 2'b10) ? datf_in           :
@@ -488,8 +679,7 @@ module mmu (
                         exc_pis ? 5'b00010 :
                         exc_pme ? 5'b00001 : 5'b00000;
     assign ex_tlb_exc = s1_tlb_exc & {5{dapg==2'b01}} & {5{ex_match==2'b0}};
-    assign mem_tlb_req = (dapg == 2'b01) && (ex_match == 2'b00)
-                       && !tlbsrch_en && !invtlb_en && !rubish;
+    assign s1_mem_tlb_req = (dapg == 2'b01) && (ex_match == 2'b00) && need_mmu;
     // MAT 选源：直接翻译 → DATM / DMW窗口 → DMW MAT / 页表 → TLB MAT
     wire [1:0] ex_mat_final;
     assign ex_mat_final = (dapg == 2'b10) ? datm_in           :

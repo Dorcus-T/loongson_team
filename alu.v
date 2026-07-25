@@ -5,20 +5,15 @@ module alu (
     input  wire [31:0] alu_src2,       // 源操作数2（来自寄存器或立即数）
     output wire [31:0] alu_result,     // ALU运算结果
     // 除法器流水线控制信号
-    output wire        div_ready,      // 除法器就绪信号（用于流水线停顿）
-    input  wire        mem_exc_valid,  // mem异常就不发起除法请求
-    input  wire        mem_ertn_flush, // mem为ertn就不发起除法请求
-    input  wire        wb_exc_valid,   // wb有异常冲刷就不发起除法请求
-    input  wire        wb_ertn_flush,  // wb有ertn指令就不发出除法请求
-    input  wire [ 9:0] ex_exc,         // 在ex阶段之前产生的异常类型
-    input  wire        ex_valid,       // 无效的ex指令就不发起除法请求
+    output wire        div_ready_o,    // 除法器就绪信号（用于流水线停顿）
     // 时钟与复位
     input  wire        clk,            // 时钟信号
     input  wire        reset,          // 复位信号（高有效）
     // 乘法器握手
-    output wire        mul_ready,      // 乘法器结果就绪（1拍脉冲，复用除法器停顿框架）
-    // 流水线控制
-    input  wire        ex_allowin      // EX 级允许接收新指令，用于防 mul/div 重复握手
+    output wire        mul_ready_o,      // 乘法器结果就绪（1拍脉冲，复用除法器停顿框架）
+    // 流水线控制（简化为 can_req + ldata）
+    input  wire        can_req,        // 本拍有权且有效，可发起乘除法请求
+    input  wire        ldata           // 新指令到达，复位单发锁
 );
 
     // ========== ALU 操作码定义（每位代表一种运算） ==========
@@ -126,42 +121,32 @@ module alu (
     wire is_mul_inst = op_mul | op_mulh | op_mulhu;
 
     // 乘法器握手控制信号
-    reg  s_axis_mul_tvalid;
+    wire s_axis_mul_tvalid;
     wire s_axis_mul_tready;
+    reg  mul_ing; //   乘法器正在处理请求
+    wire mul_ready;           // 乘法器 IP 输出就绪
 
-    // 握手拴 no_flush_or_exc（与除法器一致）
-    wire mul_handshake = s_axis_mul_tvalid && s_axis_mul_tready && no_flush_or_exc;
+    // 乘法握手
+    wire mul_handshake = s_axis_mul_tvalid && s_axis_mul_tready;
+    assign s_axis_mul_tvalid = is_mul_inst && can_req && !mul_ing;
 
-    // 乘法请求去重（同除法器 div_inst_new）
-    reg mul_inst_new;
+    // mul_ing 控制
     always @(posedge clk) begin
         if (reset) begin
-            mul_inst_new <= 1'b1;
+            mul_ing <= 1'b0;
         end
         else if (mul_handshake) begin
-            mul_inst_new <= 1'b0;
+            mul_ing <= 1'b1;
         end
-        else if (ex_allowin) begin
-            // 旧指令流出 EX 后才允许新乘法启动，防止 mul_ready 后重复握手
-            mul_inst_new <= 1'b1;
+        else if (ldata | mul_ready) begin
+            mul_ing <= 1'b0;
         end
     end
 
-    // tvalid 控制（同除法器模式）
-    always @(posedge clk) begin
-        if (reset) begin
-            s_axis_mul_tvalid <= 1'b0;
-        end
-        else if (mul_handshake) begin
-            s_axis_mul_tvalid <= 1'b0;
-        end
-        else if (is_mul_inst && mul_inst_new && ex_valid && no_flush_or_exc) begin
-            s_axis_mul_tvalid <= 1'b1;
-        end
-        else begin
-            s_axis_mul_tvalid <= s_axis_mul_tvalid;
-        end
-    end
+    assign mul_ready_o = mul_ready & mul_ing & !ldata;
+
+    wire div_signed_ready   = div_ready_signed   & div_ing_signed   & !ldata;
+    wire div_unsigned_ready = div_ready_unsigned & div_ing_unsigned & !ldata;
 
     // ========== 乘法器 IP 核实例化 ==========
     mymul u_mul_inst (
@@ -179,16 +164,16 @@ module alu (
     // ============================================================
 
     // 有符号除法器控制信号
-    reg  s_axis_divisor_tvalid_signed;   // 除数有效（有符号）
+    wire s_axis_divisor_tvalid_signed;   // 除数有效（有符号）
     wire s_axis_divisor_tready_signed;   // 除数准备就绪（IP核输出）
-    reg  s_axis_dividend_tvalid_signed;  // 被除数有效（有符号）
+    wire s_axis_dividend_tvalid_signed;  // 被除数有效（有符号）
     wire s_axis_dividend_tready_signed;  // 被除数准备就绪（IP核输出）
     wire div_ready_signed;               // 有符号除法结果有效
 
     // 无符号除法器控制信号
-    reg  s_axis_divisor_tvalid_unsigned;  // 除数有效（无符号）
+    wire s_axis_divisor_tvalid_unsigned;  // 除数有效（无符号）
     wire s_axis_divisor_tready_unsigned;  // 除数准备就绪
-    reg  s_axis_dividend_tvalid_unsigned; // 被除数有效（无符号）
+    wire s_axis_dividend_tvalid_unsigned; // 被除数有效（无符号）
     wire s_axis_dividend_tready_unsigned; // 被除数准备就绪
     wire div_ready_unsigned;              // 无符号除法结果有效
 
@@ -196,89 +181,27 @@ module alu (
     wire signed_div_inst   = op_div_w | op_mod_w;
     wire unsigned_div_inst = op_div_wu | op_mod_wu;
 
-    // 如果 mem 或 wb 阶段有异常/ertn，不发起除法握手（一条除法很占资源）
-    wire no_flush_or_exc = !(|ex_exc) && !mem_exc_valid && !mem_ertn_flush
-                         && ex_valid && !wb_ertn_flush && !wb_exc_valid;
+    // ── 除法握手（同 mul 模式）──
+    wire div_signed_handshake   = s_axis_divisor_tvalid_signed  && s_axis_divisor_tready_signed
+                               && s_axis_dividend_tvalid_signed && s_axis_dividend_tready_signed;
+    wire div_unsigned_handshake = s_axis_divisor_tvalid_unsigned  && s_axis_divisor_tready_unsigned
+                               && s_axis_dividend_tvalid_unsigned && s_axis_dividend_tready_unsigned;
 
-    wire signed_handshake = s_axis_divisor_tvalid_signed && s_axis_divisor_tready_signed
-                          && s_axis_dividend_tvalid_signed && s_axis_dividend_tready_signed
-                          && no_flush_or_exc;
+    assign s_axis_divisor_tvalid_signed   = signed_div_inst   && can_req && !div_ing_signed;
+    assign s_axis_dividend_tvalid_signed  = signed_div_inst   && can_req && !div_ing_signed;
+    assign s_axis_divisor_tvalid_unsigned = unsigned_div_inst && can_req && !div_ing_unsigned;
+    assign s_axis_dividend_tvalid_unsigned = unsigned_div_inst && can_req && !div_ing_unsigned;
 
-    wire unsigned_handshake = s_axis_divisor_tvalid_unsigned && s_axis_divisor_tready_unsigned
-                            && s_axis_dividend_tvalid_unsigned && s_axis_dividend_tready_unsigned
-                            && no_flush_or_exc;
-
-    // 除法指令是否已发送过请求（1: 空闲可接受新请求 / 0: 已发请求等待结果）
-    reg div_inst_new;
+    reg div_ing_signed, div_ing_unsigned;
     always @(posedge clk) begin
-        if (reset) begin
-            div_inst_new <= 1'b1;
-        end
-        else if (signed_handshake || unsigned_handshake) begin
-            div_inst_new <= 1'b0;
-        end
-        else if (ex_allowin) begin
-            // 旧指令流出 EX 后才允许新除法启动，防止 div_ready 后重复握手
-            div_inst_new <= 1'b1;
-        end
+        if (reset)                                                   div_ing_signed   <= 1'b0;
+        else if (div_signed_handshake)                               div_ing_signed   <= 1'b1;
+        else if (ldata | div_ready_signed)                           div_ing_signed   <= 1'b0;
     end
-
-    // ========== 有符号除法器控制状态机 ==========
     always @(posedge clk) begin
-        if (reset) begin
-            s_axis_divisor_tvalid_signed  <= 1'b0;
-            s_axis_dividend_tvalid_signed <= 1'b0;
-        end
-        else begin
-            if (signed_handshake) begin
-                s_axis_divisor_tvalid_signed <= 1'b0;
-            end
-            else if (signed_div_inst && div_inst_new && ex_valid) begin
-                s_axis_divisor_tvalid_signed <= 1'b1;
-            end
-            else begin
-                s_axis_divisor_tvalid_signed <= s_axis_divisor_tvalid_signed;
-            end
-
-            if (signed_handshake) begin
-                s_axis_dividend_tvalid_signed <= 1'b0;
-            end
-            else if (signed_div_inst && div_inst_new && ex_valid) begin
-                s_axis_dividend_tvalid_signed <= 1'b1;
-            end
-            else begin
-                s_axis_dividend_tvalid_signed <= s_axis_dividend_tvalid_signed;
-            end
-        end
-    end
-
-    // ========== 无符号除法器控制状态机（逻辑同有符号） ==========
-    always @(posedge clk) begin
-        if (reset) begin
-            s_axis_divisor_tvalid_unsigned  <= 1'b0;
-            s_axis_dividend_tvalid_unsigned <= 1'b0;
-        end
-        else begin
-            if (unsigned_handshake) begin
-                s_axis_divisor_tvalid_unsigned <= 1'b0;
-            end
-            else if (unsigned_div_inst && div_inst_new && ex_valid) begin
-                s_axis_divisor_tvalid_unsigned <= 1'b1;
-            end
-            else begin
-                s_axis_divisor_tvalid_unsigned <= s_axis_divisor_tvalid_unsigned;
-            end
-
-            if (unsigned_handshake) begin
-                s_axis_dividend_tvalid_unsigned <= 1'b0;
-            end
-            else if (unsigned_div_inst && div_inst_new && ex_valid) begin
-                s_axis_dividend_tvalid_unsigned <= 1'b1;
-            end
-            else begin
-                s_axis_dividend_tvalid_unsigned <= s_axis_dividend_tvalid_unsigned;
-            end
-        end
+        if (reset)                                                   div_ing_unsigned <= 1'b0;
+        else if (div_unsigned_handshake)                             div_ing_unsigned <= 1'b1;
+        else if (ldata | div_ready_unsigned)                         div_ing_unsigned <= 1'b0;
     end
 
     // ========== 有符号除法器 IP 核实例化 ==========
@@ -307,8 +230,8 @@ module alu (
         .m_axis_dout_tdata      ({div_result_unsigned, mod_result_unsigned})
     );
 
-    assign div_ready = (signed_div_inst && div_ready_signed)
-                    || (unsigned_div_inst && div_ready_unsigned);
+    assign div_ready_o = (signed_div_inst   && div_signed_ready)
+                    || (unsigned_div_inst && div_unsigned_ready);
 
     // ========== 最终结果选择（二叉树 MUX，log2(17)≈5级，替代平坦OR） ==========
     // Level 1: 17 → 9（掩码选择 + 二合一归约）

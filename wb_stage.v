@@ -4,12 +4,9 @@ module wb_stage (
     // 时钟和复位信号
     input  wire                         clk,
     input  wire                         reset,
-    // allowin
-    output wire                         wb_allowin,           // 写回级是否允许接收新指令
     // 来自mem阶段
     input  wire                         mem_to_wb_valid,       // MEM到WB有效
     input  wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM传递的总线数据
-    input  wire                         mem_ready_go,          // MEM阶段就绪标志
     // 输出给寄存器文件
     output wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,          // 写回级到寄存器文件的总线
     // 调试接口（用于波形追踪）
@@ -21,20 +18,28 @@ module wb_stage (
     // 前递控制
     output wire [ 4:0]                  wb_to_id_dest,         // 转发给译码级的目的寄存器号
     output wire [31:0]                  wb_to_id_result,       // 转发给译码级的计算结果
-    // 异常与ertn信号
-    output wire                         wb_ertn_flush,         // 发给流水线每个阶段（也在总线中送给csr）
-    output wire                         wb_exc_valid,          // 发给流水线除IF每个阶段
     // csr与ertn冒险
     output wire                         wb_csr_we,             // wb阶段确定写csr
     output wire [13:0]                  wb_csr_num,            // wb阶段写csr的寄存器号
     // 输出给csr寄存器堆（包含异常处理和写交互信号）
     output wire [`WB_TO_CSR_BUS_WD-1:0] wb_to_csr_bus,         // 写回级到csr寄存器的总线
-    // 重取指相关控制
+    // 冲刷相关控制
+    output wire                         wb_ertn_flush,         // ertn 冲刷，不经过 linectrl
     output wire                         exc_no_rf,             // 异常和重取指同时出现时，除中断外，避免进入异常处理程序，发IF和CSR
     output wire                         rf_valid,              // 重取指信号，发IF
     output wire [31:0]                  wb_pc_back,            // 重取指指令PC，发IF
     // MMU读写控制
-    output wire [ 2:0]                  tlbrwf_valid           // {tlbrd_en, tlbwr_en, tlbfill_en}
+    output wire [ 2:0]                  tlbrwf_valid,          // {tlbrd_en, tlbwr_en, tlbfill_en}
+
+    // ── linectrl 接口 ──
+    input  wire                         ldata,                 // 0=用旧寄存器, 1=用新寄存器
+    input  wire                         lvalid,                // 本拍可呈现数据
+    input  wire                         lpower,                // 本拍有权发请求
+    input  wire                         lready,                // 维持就绪
+    input  wire                         upd,                   // 上级已准备且有权力 → 更新 data_n
+
+    output wire                         wb_valid_o,            // → linectrl valid_i
+    output wire                         wb_ready_go            // → linectrl readygo_i
     `ifdef DIFFTEST_EN
     ,
     output wire        ws_valid_diff                    ,
@@ -52,9 +57,51 @@ module wb_stage (
 `endif
 );
 
-    reg  wb_valid;                                    // 写回级有效标志
-    wire wb_ready_go;                                 // 写回级是否准备好前进（数据已稳定）
-    reg  [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus_r;     // 锁存的访存级数据
+    wire wb_valid;                                    // 本拍有效 = (ldata? valid_n : valid_o) & lvalid
+    wire wb_exc_valid;                                // 异常有效 = (|wb_exc || wb_rf_valid) && wb_valid
+    wire can_req;                                      // 可发请求 = wb_valid && !wb_exc_valid && lpower
+
+    // ========== 双寄存器结构 ==========
+    reg  [`MEM_TO_WB_BUS_WD-1:0] data_n;              // 新数据寄存器（upd 时捕获）
+    reg                          valid_n;             // 新 valid
+    reg  [`MEM_TO_WB_BUS_WD-1:0] data_o;              // 旧数据寄存器
+    reg                          valid_o;             // 旧 valid
+
+    // ── data_n: upd 时从上游捕获 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_n  <= `MEM_TO_WB_BUS_WD'd0;
+            valid_n <= 1'b0;
+        end
+        else if (upd) begin
+            data_n  <= mem_to_wb_bus;
+            valid_n <= mem_to_wb_valid;
+        end
+    end
+
+    // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_o  <= `MEM_TO_WB_BUS_WD'd0;
+            valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata)  data_o  <= data_n;
+            valid_o <= (ldata ? valid_n : valid_o) & lvalid;
+        end
+    end
+
+    // ── ldata 选通 ──
+    wire [`MEM_TO_WB_BUS_WD-1:0] current_bus;
+    assign current_bus = ldata ? data_n : data_o;
+    assign wb_valid    = (ldata ? valid_n : valid_o) & lvalid;
+    assign can_req     = wb_valid && !wb_exc_valid && lpower;
+
+    // ── ready_go = work_done || !valid || lready,  wb: work_done ≡ 1 ──
+    assign wb_ready_go = 1'b1;
+
+    // ── → linectrl ──
+    assign wb_valid_o = wb_valid;
 
     // ========== 异常信号 ==========
     wire ale;
@@ -138,7 +185,7 @@ module wb_stage (
         dest,                  // 68-64： 目的寄存器号（5位）
         final_result,          // 63-32： 最终计算结果（32位）
         wb_pc                  // 31-0：  PC值（32位）
-    } = mem_to_wb_bus_r;
+    } = current_bus;
 
     // ========== 输出给csr寄存器堆的总线 ==========
     assign wb_to_csr_bus = {
@@ -161,37 +208,14 @@ module wb_stage (
         rf_wdata            // 位31-0： 写数据
     };
 
-    // ========== 流水线控制 ==========
-    assign wb_ready_go = 1'b1;
-    assign wb_allowin  = mem_ready_go && wb_ready_go;
-
-    // 写回级有效标志更新
-    always @(posedge clk) begin
-        if (reset || wb_ertn_flush || wb_exc_valid) begin
-            wb_valid <= 1'b0;
-        end
-        else if (wb_allowin) begin
-            wb_valid <= mem_to_wb_valid;
-        end
-        else if (wb_ready_go) begin
-            wb_valid <= 1'b0;
-        end
-    end
-    // 写回级数据传递
-    always @(posedge clk) begin
-        if (wb_allowin) begin
-            mem_to_wb_bus_r <= mem_to_wb_bus;
-        end
-    end
-
     // ========== 寄存器文件写回控制 ==========
     // 只有当写回级有效且指令需要写寄存器时，才使能寄存器写操作
-    assign rf_we    = gr_we && wb_valid && !wb_exc_valid;
+    assign rf_we    = gr_we && can_req; 
     assign rf_waddr = dest;
     assign rf_wdata = final_result;
 
     // ========== csr写文件写回控制 ==========
-    assign wb_csr_we = csr_we && wb_valid && !wb_exc_valid;  // 异常或者失效指令不能发出写使能
+    assign wb_csr_we = csr_we && can_req;  // 异常或者失效指令不能发出写使能
 
     // ========== 调试信息输出 ==========
     assign debug_wb_pc       = wb_pc;                        // 当前写回的PC值
@@ -209,13 +233,13 @@ module wb_stage (
     assign wb_to_id_result = final_result;
 
     // ========== MMU读写控制 ==========
-    assign tlbrwf_valid = {tlbrd_en, tlbwr_en, tlbfill_en} & {3{!wb_exc_valid}} & {3{wb_valid}};
+    assign tlbrwf_valid = {tlbrd_en, tlbwr_en, tlbfill_en} & {3{can_req}};  // 只有在wb_valid且无异常且有权时才允许发出tlb操作请求
 
     // ========== 重取指控制 ==========
     assign wb_pc_back  = wb_pc;
     assign wb_rf_valid = mem_to_wb_rf_valid && wb_valid;
-    assign exc_no_rf   = (wb_rf_valid ? (intr ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;
-    assign rf_valid    = wb_rf_valid;
+    assign exc_no_rf   = (wb_rf_valid ? (intr ? 1'b1 : 1'b0) : |wb_exc) && wb_valid;  // 异常和重取指同时出现时，除中断外，避免进入异常处理程序，发IF和CSR
+    assign rf_valid    = wb_rf_valid && wb_valid;
 
     // ========== 异常信号解析 ==========
     assign {intr, adef, tlbr, pif, ppi, syscall, brk, ine, ipe, fpd, fpe, adem, ale, pil, pis, pme} = wb_exc;
@@ -242,7 +266,7 @@ module wb_stage (
     assign wb_exc_esubcode = adem ? `ESUBCODE_ADEM : `ESUBCODE_ADEF;
 
     // ========== 冲刷信号生成 ==========
-    assign wb_ertn_flush = ertn_flush && wb_valid;
+    assign wb_ertn_flush = ertn_flush && can_req; 
     assign wb_exc_valid  = (|wb_exc || wb_rf_valid) && wb_valid;
     //冲刷指令刚进入wb，valid必为1，发出冲刷信号，下一个上跳让除了if的valid都为0，因而无法再次发冲刷信号
 

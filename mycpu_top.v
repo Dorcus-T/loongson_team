@@ -68,24 +68,34 @@ module core_top (
     wire clk = aclk;
     always @(posedge clk) reset <= ~aresetn;
 
-    // ========== 流水线控制信号（各级之间的握手信号） ==========
-    wire if_ready_go;                    // IF阶段就绪标志
-    wire id_allowin;                     // ID阶段允许接收（来自ID）
-    wire ex_allowin;                     // EX阶段允许接收（来自EX）
-    wire pre_mem_allowin;                // PRE_MEM阶段允许接收（来自PRE_MEM）
-    wire mem_allowin;                    // MEM阶段允许接收（来自MEM）
-    wire wb_allowin;                     // WB阶段允许接收（来自WB）
+    // ========== 流水线控制信号（linectrl 集中控制） ==========
+    wire [6:0] ldata;                                 // linectrl → 各级
+    wire [6:0] lvalid;                                // linectrl → 各级
+    wire [6:0] lpower;                                // linectrl → 各级
+    wire [6:0] lready;                                // linectrl → 各级
+    wire [6:0] valid_i;                               // 各级 → linectrl valid
+    wire [6:0] readygo_i;                             // 各级 → linectrl ready_go
+    wire [6:0] exc_i;                                 // 各级 → linectrl exc
+    wire [6:0] ertn_i;                                // 各级 → linectrl ertn
+    wire [6:0] mispred_i;                             // 各级 → linectrl mispred
+    wire       bp_valid;                              // linectrl → EX
+    wire       s0_flush;                              // linectrl → MMU/IF
+    wire       s1_flush;                              // linectrl → MMU
 
-    // 各级流水线有效标志
-    wire if_to_id_valid;                 // IF -> ID 有效
-    wire id_to_ex_valid;                 // ID -> EX 有效
-    wire id_ready_go;                    // ID阶段就绪标志
-    wire ex_ready_go;                    // EX阶段就绪标志
-    wire pre_mem_ready_go;               // PRE_MEM阶段就绪标志
-    wire mem_ready_go;                   // MEM阶段就绪标志
-    wire ex_to_pre_mem_valid;            // EX -> PRE_MEM 有效
-    wire pre_mem_to_mem_valid;           // PRE_MEM -> MEM 有效
-    wire mem_to_wb_valid;                // MEM -> WB 有效
+    // 各级间 upd（上级 ready && lpower → 更新下级 data_n）
+    wire pre_if_to_if_upd;                            // pre_if → IF
+    wire if_to_id_upd;                                // IF → ID
+    wire id_to_ex_upd;                                // ID → EX
+    wire ex_to_pre_mem_upd;                           // EX → PRE_MEM
+    wire pre_mem_to_mem_upd;                          // PRE_MEM → MEM
+    wire mem_to_wb_upd;                               // MEM → WB
+
+    // 各级 valid（旧接口兼容）
+    wire if_to_id_valid;
+    wire id_to_ex_valid;
+    wire ex_to_pre_mem_valid;
+    wire pre_mem_to_mem_valid;
+    wire mem_to_wb_valid;
 
     // ========== 流水线总线（各级之间的数据传递） ==========
     wire [`IF_TO_ID_BUS_WD-1:0]     if_to_id_bus;       // IF -> ID 总线
@@ -111,19 +121,9 @@ module core_top (
     wire [29:0] bp_ras_target;
     wire [ 3:0] bp_ras_index;
 
-    wire        bp_update_en;
-    wire [29:0] bp_update_pc;
-    wire        bp_update_is_branch;
-    wire [ 1:0] bp_update_br_type;
-    wire        bp_update_taken;
-    wire [29:0] bp_update_target;
-    wire [ 4:0] bp_update_btb_index;
-    wire        bp_update_push_ras;
-    wire [29:0] bp_update_ras_data;
-    wire        bp_update_pop_ras;
-    wire        bp_update_delete_entry;
-
-    wire        ex_mispredict;
+    wire [`BP_BUS_WD-1:0] bp_bus;
+    wire                  bp_update_en;
+    wire                  ex_mispredict;
     wire [31:0] ex_corr_target;
 
     assign mispred_bus = {ex_mispredict, ex_corr_target};
@@ -137,24 +137,24 @@ module core_top (
     wire [31:0] mem_to_id_result;        // MEM阶段计算结果
     wire [31:0] wb_to_id_result;         // WB阶段计算结果
     wire        ex_to_id_load_op;        // EX阶段是否为加载指令（用于load-use检测）
+    wire        calc_not_ready;          // EX → ID mul/div 结果未就绪
     wire        mem_to_id_data_ok;       // MEM前递给id的数据是否准备好
 
-    // ========== 异常信号与ertn ==========
-    wire ex_exc_valid;   // EX阶段异常有效
-    wire wb_exc_valid;       // WB阶段异常有效
-    wire wb_ertn_flush;      // WB阶段有ertn指令
-    wire mem_exc_valid;      // MEM阶段异常有效
-    wire mem_ertn_flush;     // MEM阶段有ertn指令
+    // ========== 异常信号与ertn（各阶段直连 ID 做 csr_stall） ==========
     wire ex_ertn_flush;
+    wire mem_ertn_flush;
+    wire pre_mem_ertn_flush;
+    wire wb_ertn_flush;
+    wire ex_exc_valid;
+    wire pre_mem_exc_valid;
+    wire mem_exc_valid;
 
-    // ========== pre_mem 前递 / 异常信号 ==========
+    // ========== pre_mem 前递信号 ==========
     wire [ 4:0] pre_mem_to_id_dest;
     wire [31:0] pre_mem_to_id_result;
     wire        pre_mem_to_id_load_op;
     wire        pre_mem_csr_we;
     wire [13:0] pre_mem_csr_num;
-    wire        pre_mem_ertn_flush;
-    wire        pre_mem_exc_valid;
 
     // ========== 重取指信号 ==========
     wire exc_not_rf;         // wb发if，csr除中断外被rf覆盖异常信号
@@ -199,9 +199,12 @@ module core_top (
     wire [ 4:0] pre_mem_tlb_exc;    // 发pre_mem tlb相关异常
     wire [ 1:0] pre_mem_mat;        // pre_mem 访存方式
     wire        pre_mem_cached;     // pre_mem 访问可缓存
-    wire        mem_tlb_req;        // pre_mem 访存需要查 TLB（发 pre_mem_stage）
-    wire        utlb_hit;           // μTLB 命中（发 pre_mem_stage，跳过 tlb_wait）
-    wire        rubish;             // pre_mem 指令废弃标志（发 mmu，取消操作）
+    wire        s1_mem_tlb_req;        // pre_mem 访存需要查 TLB（发 pre_mem_stage）
+    wire        s1_utlb_hit;           // μTLB 命中（发 pre_mem_stage，跳过 tlb_wait）
+    wire        s0_if_tlb_req;         // IF 取指需要查 TLB（发 if_stage）
+    wire        s0_utlb_hit;           // s0 μTLB 命中（发 if_stage）
+    wire        pre_if_can_req_pre;            // IF 取指请求有效（发 mmu，清 s0 miss）
+    wire        need_mmu;           // pre_mem → mmu 本次需要用 MMU
     wire [`TLBRD_BUS_WD-1:0] tlbrd_value;        // 发csr tlbrd使能和数据
     wire [ 4:0]               tlbfill_rand_index; // TLBFILL 随机替换 index（for difftest）
 
@@ -375,28 +378,47 @@ module core_top (
     // 分支预测器 (BTB + BHT + RAS)
     // ================================================================
     branch_predict u_branch_predict (
-        .clk                  (clk),
-        .reset                (reset),
-        .lookup_pc_i          (if_to_mmu_vaddr[31:2]),
-        .btb_hit_o            (bp_btb_hit),
-        .btb_target_o         (bp_btb_target),
-        .btb_counter_o        (bp_btb_counter),
-        .btb_index_o          (bp_btb_index),
-        .ras_hit_o            (bp_ras_hit),
-        .ras_target_o         (bp_ras_target),
-        .ras_index_o          (bp_ras_index),
-        .update_en            (bp_update_en),
-        .update_pc            (bp_update_pc),
-        .update_is_branch     (bp_update_is_branch),
-        .update_br_type       (bp_update_br_type),
-        .update_taken         (bp_update_taken),
-        .update_target        (bp_update_target),
-        .update_btb_index     (bp_update_btb_index),
-        .update_push_ras      (bp_update_push_ras),
-        .update_ras_data      (bp_update_ras_data),
-        .update_pop_ras       (bp_update_pop_ras),
-        .update_delete_entry  (bp_update_delete_entry)
+        .clk         (clk),
+        .reset       (reset),
+        .lookup_pc_i (if_to_mmu_vaddr[31:2]),
+        .btb_hit_o   (bp_btb_hit),
+        .btb_target_o(bp_btb_target),
+        .btb_counter_o(bp_btb_counter),
+        .btb_index_o (bp_btb_index),
+        .ras_hit_o   (bp_ras_hit),
+        .ras_target_o(bp_ras_target),
+        .ras_index_o (bp_ras_index),
+        .update_en   (bp_update_en),
+        .update_bus  (bp_bus)
     );
+
+    // ================================================================
+    // 流水线控制器 (linectrl)
+    // ================================================================
+    linectrl u_linectrl (
+        .clk          (clk),
+        .reset        (reset),
+        .valid_i      (valid_i),
+        .readygo_i    (readygo_i),
+        .exc_i        (exc_i),
+        .ertn_i       (ertn_i),
+        .mispred_i    (mispred_i),
+        .lvalid       (lvalid),
+        .lpower       (lpower),
+        .ldata        (ldata),
+        .lready       (lready),
+        .bp_valid     (bp_valid),
+        .s0_flush     (s0_flush),
+        .s1_flush     (s1_flush)
+    );
+
+    // ========== 异常/ertn 直连 ID（csr_stall 使用） ==========
+    assign ex_ertn_flush      = ertn_i[3];
+    assign pre_mem_ertn_flush = ertn_i[4];
+    assign mem_ertn_flush     = ertn_i[5];
+    assign ex_exc_valid       = exc_i[3];
+    assign pre_mem_exc_valid  = exc_i[4];
+    assign mem_exc_valid      = exc_i[5];
 
     // ================================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
@@ -404,10 +426,9 @@ module core_top (
     if_stage u_if_stage (
         .clk                (clk),
         .reset              (reset),
-        .id_allowin         (id_allowin),
         .if_to_id_valid     (if_to_id_valid),
         .if_to_id_bus       (if_to_id_bus),
-        .if_ready_go        (if_ready_go),
+        .if_to_id_upd       (if_to_id_upd),
         .icache_cpu_req     (icache_cpu_req),
         .icache_cpu_op      (icache_cpu_op),
         .icache_cpu_index   (icache_cpu_index),
@@ -424,6 +445,9 @@ module core_top (
         .padd               (paddr_to_if),
         .if_tlb_exc         (if_tlb_exc),
         .if_cached          (if_cached),
+        .s0_if_tlb_req      (s0_if_tlb_req),
+        .s0_utlb_hit        (s0_utlb_hit),
+        .pre_if_can_req_pre (pre_if_can_req_pre),
         .exc_no_rf          (exc_not_rf),
         .wb_ertn_flush      (wb_ertn_flush),
         .exc_entry          (exc_entry),
@@ -437,59 +461,70 @@ module core_top (
         .bp_ras_hit         (bp_ras_hit),
         .bp_ras_target      (bp_ras_target),
         .bp_ras_index       (bp_ras_index),
-        .mispred_bus        (mispred_bus)
+        .mispred_bus        (mispred_bus),
+        .ldata              (ldata[1:0]),
+        .lvalid             (lvalid[1:0]),
+        .lpower             (lpower[1:0]),
+        .lready             (lready[1:0]),
+        .if_valid_o         (valid_i[1:0]),
+        .if_ready_o         (readygo_i[1:0]),
+        .if_exc_o           (exc_i[1:0]),
+        .if_ertn_o          (ertn_i[1:0]),
+        .s0_flush           (s0_flush)
     );
 
     // ================================================================
     // 第二阶段：译码阶段 (ID - Instruction Decode)
     // ================================================================
     id_stage u_id_stage (
-        .clk               (clk),
-        .reset             (reset),
-        .ex_allowin        (ex_allowin),
-        .id_allowin        (id_allowin),
-        .if_to_id_valid    (if_to_id_valid),
-        .if_to_id_bus      (if_to_id_bus),
-        .if_ready_go        (if_ready_go),
-        .id_to_ex_valid    (id_to_ex_valid),
-        .id_to_ex_bus      (id_to_ex_bus),
-        .id_ready_go        (id_ready_go),
-        .wb_to_rf_bus      (wb_to_rf_bus),
-        .ex_to_id_dest     (ex_to_id_dest),
-        .mem_to_id_dest    (mem_to_id_dest),
-        .wb_to_id_dest     (wb_to_id_dest),
-        .ex_to_id_load_op  (ex_to_id_load_op),
-        .ex_to_id_result   (ex_to_id_result),
-        .mem_to_id_result  (mem_to_id_result),
-        .wb_to_id_result   (wb_to_id_result),
-        .mem_to_id_data_ok (mem_to_id_data_ok),
-        .mem_exc_valid     (mem_exc_valid),
-        .ex_csr_we         (ex_csr_we),
-        .ex_csr_num        (ex_csr_num),
-        .ex_ertn_flush     (ex_ertn_flush),
+        .clk                (clk),
+        .reset              (reset),
+        .if_to_id_valid     (if_to_id_valid),
+        .if_to_id_bus       (if_to_id_bus),
+        .id_to_ex_valid     (id_to_ex_valid),
+        .id_to_ex_bus       (id_to_ex_bus),
+        .id_to_ex_upd       (id_to_ex_upd),
+        .id_ready_go        (readygo_i[2]),
+        .wb_to_rf_bus       (wb_to_rf_bus),
+        .ex_to_id_dest      (ex_to_id_dest),
+        .mem_to_id_dest     (mem_to_id_dest),
+        .wb_to_id_dest      (wb_to_id_dest),
+        .ex_to_id_load_op   (ex_to_id_load_op),
+        .ex_to_id_result    (ex_to_id_result),
+        .mem_to_id_result   (mem_to_id_result),
+        .wb_to_id_result    (wb_to_id_result),
+        .mem_to_id_data_ok  (mem_to_id_data_ok),
+        .calc_not_ready     (calc_not_ready),
+        .ex_csr_we          (ex_csr_we),
+        .ex_csr_num         (ex_csr_num),
+        .ex_ertn_flush      (ex_ertn_flush),
         .pre_mem_csr_we     (pre_mem_csr_we),
         .pre_mem_csr_num    (pre_mem_csr_num),
         .pre_mem_ertn_flush (pre_mem_ertn_flush),
-        .pre_mem_exc_valid  (pre_mem_exc_valid),
         .pre_mem_to_id_dest    (pre_mem_to_id_dest),
         .pre_mem_to_id_result  (pre_mem_to_id_result),
         .pre_mem_to_id_load_op (pre_mem_to_id_load_op),
-        .mem_csr_we        (mem_csr_we),
-        .mem_csr_num       (mem_csr_num),
-        .mem_ertn_flush    (mem_ertn_flush),
-        .ex_exc_valid   (ex_exc_valid),
-        .ex_mispredict     (ex_mispredict),
-        .wb_csr_we         (wb_csr_we),
-        .wb_csr_num        (wb_csr_num),
-        .wb_exc_valid      (wb_exc_valid),
-        .wb_ertn_flush     (wb_ertn_flush),
-        .csr_rvalue        (csr_rvalue),
-        .csr_id_num        (csr_id_num),
-        .has_int           (has_int),
-        .csr_da_pg         (da_pg_out)
+        .mem_csr_we         (mem_csr_we),
+        .mem_csr_num        (mem_csr_num),
+        .mem_ertn_flush     (mem_ertn_flush),
+        .wb_csr_we          (wb_csr_we),
+        .wb_csr_num         (wb_csr_num),
+        .wb_ertn_flush      (wb_ertn_flush),
+        .csr_rvalue         (csr_rvalue),
+        .csr_id_num         (csr_id_num),
+        .has_int            (has_int),
+        .csr_da_pg          (da_pg_out),
+        .ldata              (ldata[2]),
+        .lvalid             (lvalid[2]),
+        .lpower             (lpower[2]),
+        .lready             (lready[2]),
+        .upd                (if_to_id_upd),
+        .id_valid_o         (valid_i[2]),
+        .id_exc_o           (exc_i[2]),
+        .id_ertn_o          (ertn_i[2])
         `ifdef DIFFTEST_EN
         ,
-        .rf_to_diff        (regs)
+        .rf_to_diff         (regs)
         `endif
     );
 
@@ -499,127 +534,117 @@ module core_top (
     exe_stage u_exe_stage (
         .clk                (clk),
         .reset              (reset),
-        .pre_mem_allowin    (pre_mem_allowin),
-        .ex_allowin         (ex_allowin),
         .id_to_ex_valid     (id_to_ex_valid),
         .id_to_ex_bus       (id_to_ex_bus),
-        .id_ready_go         (id_ready_go),
         .ex_to_pre_mem_valid (ex_to_pre_mem_valid),
         .ex_to_pre_mem_bus   (ex_to_pre_mem_bus),
-        .ex_ready_go         (ex_ready_go),
+        .ex_to_pre_mem_upd  (ex_to_pre_mem_upd),
+        .ex_ready_go        (readygo_i[3]),
         .ex_to_id_dest      (ex_to_id_dest),
         .ex_to_id_result    (ex_to_id_result),
         .ex_to_id_load_op   (ex_to_id_load_op),
-        .ex_exc_valid       (ex_exc_valid),  // 保持兼容：ID 仍用旧名
-        .wb_exc_valid       (wb_exc_valid),
-        .wb_ertn_flush      (wb_ertn_flush),
-        .mem_exc_valid      (mem_exc_valid),
-        .mem_ertn_flush     (mem_ertn_flush),
-        .pre_mem_exc_valid  (pre_mem_exc_valid),
         .ex_csr_we          (ex_csr_we),
         .ex_csr_num         (ex_csr_num),
-        .ex_ertn_flush          (ex_ertn_flush),
-        .timer_value            (timer_value),
-        .pre_mem_ertn_flush     (pre_mem_ertn_flush),
-        .ex_mispredict          (ex_mispredict),
-        .ex_corr_target         (ex_corr_target),
-        .pred_event             (ex_pred_event),
-        .mispred_event          (ex_mispred_event),
-        .bp_update_en           (bp_update_en),
-        .bp_update_pc           (bp_update_pc),
-        .bp_update_is_branch    (bp_update_is_branch),
-        .bp_update_br_type      (bp_update_br_type),
-        .bp_update_taken        (bp_update_taken),
-        .bp_update_target       (bp_update_target),
-        .bp_update_btb_index    (bp_update_btb_index),
-        .bp_update_push_ras     (bp_update_push_ras),
-        .bp_update_ras_data     (bp_update_ras_data),
-        .bp_update_pop_ras      (bp_update_pop_ras),
-        .bp_update_delete_entry (bp_update_delete_entry)
+        .timer_value        (timer_value),
+        .bp_update_en       (bp_update_en),
+        .bp_bus             (bp_bus),
+        .ex_mispredict      (ex_mispredict),
+        .ex_corr_target     (ex_corr_target),
+        .calc_not_ready     (calc_not_ready),
+        .pred_event         (ex_pred_event),
+        .mispred_event      (ex_mispred_event),
+        .ldata              (ldata[3]),
+        .lvalid             (lvalid[3]),
+        .lpower             (lpower[3]),
+        .lready             (lready[3]),
+        .upd                (id_to_ex_upd),
+        .ex_valid_o         (valid_i[3]),
+        .ex_exc_o           (exc_i[3]),
+        .ex_ertn_o          (ertn_i[3]),
+        .ex_mispred_o       (mispred_i[3]),
+        .bp_valid           (bp_valid)
     );
 
     // ================================================================
     // 第四阶段：访存前置阶段 (PRE_MEM - Pre-Memory Access)
     // ================================================================
     pre_mem_stage u_pre_mem_stage (
-        .clk                (clk),
-        .reset              (reset),
-        .mem_allowin        (mem_allowin),
-        .pre_mem_allowin    (pre_mem_allowin),
+        .clk                 (clk),
+        .reset               (reset),
         .ex_to_pre_mem_valid (ex_to_pre_mem_valid),
         .ex_to_pre_mem_bus   (ex_to_pre_mem_bus),
-        .ex_ready_go         (ex_ready_go),
         .pre_mem_to_mem_valid (pre_mem_to_mem_valid),
-        .pre_mem_to_mem_bus   (pre_mem_to_mem_bus),
-        .pre_mem_ready_go     (pre_mem_ready_go),
-        .pre_mem_to_mmu_vaddr (pre_mem_to_mmu_vaddr),
-        .dcache_cpu_req     (dcache_cpu_req),
-        .dcache_cpu_op      (dcache_cpu_op),
-        .dcache_cpu_index   (dcache_cpu_index),
-        .dcache_cpu_tag     (dcache_cpu_tag),
-        .dcache_cpu_offset  (dcache_cpu_offset),
-        .dcache_cpu_wstrb   (dcache_cpu_wstrb),
-        .dcache_cpu_wdata   (dcache_cpu_wdata),
-        .dcache_cpu_cached  (dcache_cpu_cached),
-        .dcache_cpu_addr_ok (dcache_cpu_addr_ok),
-        .vtlb_enop          (vtlb_enop),
-        .ld_and_str         (ld_and_str),
-        .padd               (paddr_to_pre_mem),
-        .srch_value         (srch_value),
-        .mem_tlb_exc        (pre_mem_tlb_exc),
-        .pre_cached         (pre_mem_cached),
-        .mem_tlb_req        (mem_tlb_req),
-        .utlb_hit           (utlb_hit),
-        .rubish             (rubish),
-        // CACOP
-        .cacop_code         (cacop_code),
-        .cacop_en_final     (cacop_en_final),
-        .cacop_va           (cacop_va),
-        .cacop_tag          (cacop_tag),
-        .icache_cacop_rdy   (icache_cacop_rdy),
-        .dcache_cacop_rdy   (dcache_cacop_rdy),
-        // 异常冲刷
-        .wb_exc_valid       (wb_exc_valid),
-        .wb_ertn_flush      (wb_ertn_flush),
-        .mem_exc_valid      (mem_exc_valid),
-        .mem_ertn_flush     (mem_ertn_flush),
-        // CSR与ERTN冒险
-        .pre_mem_csr_we     (pre_mem_csr_we),
-        .pre_mem_csr_num    (pre_mem_csr_num),
-        .pre_mem_ertn_flush (pre_mem_ertn_flush),
-        .pre_mem_exc_valid  (pre_mem_exc_valid),
-        // 前递控制
-        .pre_mem_to_id_dest    (pre_mem_to_id_dest),
-        .pre_mem_to_id_result  (pre_mem_to_id_result),
-        .pre_mem_to_id_load_op (pre_mem_to_id_load_op)
+        .pre_mem_to_mem_bus  (pre_mem_to_mem_bus),
+        .pre_mem_to_mem_upd  (pre_mem_to_mem_upd),
+        .pre_mem_ready_go    (readygo_i[4]),
+        .pre_mem_to_mmu_vaddr(pre_mem_to_mmu_vaddr),
+        .dcache_cpu_req      (dcache_cpu_req),
+        .dcache_cpu_op       (dcache_cpu_op),
+        .dcache_cpu_index    (dcache_cpu_index),
+        .dcache_cpu_tag      (dcache_cpu_tag),
+        .dcache_cpu_offset   (dcache_cpu_offset),
+        .dcache_cpu_wstrb    (dcache_cpu_wstrb),
+        .dcache_cpu_wdata    (dcache_cpu_wdata),
+        .dcache_cpu_cached   (dcache_cpu_cached),
+        .dcache_cpu_addr_ok  (dcache_cpu_addr_ok),
+        .vtlb_enop           (vtlb_enop),
+        .ld_and_str          (ld_and_str),
+        .padd                (paddr_to_pre_mem),
+        .srch_value          (srch_value),
+        .mem_tlb_exc         (pre_mem_tlb_exc),
+        .pre_cached          (pre_mem_cached),
+        .s1_mem_tlb_req      (s1_mem_tlb_req),
+        .s1_utlb_hit         (s1_utlb_hit),
+        .need_mmu            (need_mmu),
+        .cacop_code          (cacop_code),
+        .cacop_en_final      (cacop_en_final),
+        .cacop_va            (cacop_va),
+        .cacop_tag           (cacop_tag),
+        .icache_cacop_rdy    (icache_cacop_rdy),
+        .dcache_cacop_rdy    (dcache_cacop_rdy),
+        .pre_mem_csr_we      (pre_mem_csr_we),
+        .pre_mem_csr_num     (pre_mem_csr_num),
+        .pre_mem_to_id_dest  (pre_mem_to_id_dest),
+        .pre_mem_to_id_result(pre_mem_to_id_result),
+        .pre_mem_to_id_load_op(pre_mem_to_id_load_op),
+        .ldata               (ldata[4]),
+        .lvalid              (lvalid[4]),
+        .lpower              (lpower[4]),
+        .lready              (lready[4]),
+        .upd                 (ex_to_pre_mem_upd),
+        .pre_mem_valid_o     (valid_i[4]),
+        .pre_mem_exc_o       (exc_i[4]),
+        .pre_mem_ertn_o      (ertn_i[4])
     );
 
     // ================================================================
     // 第五阶段：访存数据阶段 (MEM - Memory Access)
     // ================================================================
     mem_stage u_mem_stage (
-        .clk                  (clk),
-        .reset                (reset),
-        .wb_allowin           (wb_allowin),
-        .mem_allowin          (mem_allowin),
-        .pre_mem_to_mem_valid  (pre_mem_to_mem_valid),
-        .pre_mem_to_mem_bus    (pre_mem_to_mem_bus),
-        .pre_mem_ready_go     (pre_mem_ready_go),
-        .mem_to_wb_valid      (mem_to_wb_valid),
-        .mem_to_wb_bus        (mem_to_wb_bus),
-        .mem_ready_go         (mem_ready_go),
-        .dcache_cpu_rdata     (dcache_cpu_rdata),
-        .dcache_cpu_data_ok   (dcache_cpu_data_ok),
-        .mem_to_id_dest       (mem_to_id_dest),
-        .mem_to_id_result     (mem_to_id_result),
-        .mem_to_id_data_ok    (mem_to_id_data_ok),
-        .wb_exc_valid         (wb_exc_valid),
-        .wb_ertn_flush        (wb_ertn_flush),
-        .mem_exc_valid        (mem_exc_valid),
-        .mem_ertn_flush       (mem_ertn_flush),
-        .mem_csr_we           (mem_csr_we),
-        .mem_csr_num          (mem_csr_num),
-        .dcache_cpu_accept    (dcache_cpu_accept)
+        .clk                 (clk),
+        .reset               (reset),
+        .pre_mem_to_mem_valid(pre_mem_to_mem_valid),
+        .pre_mem_to_mem_bus  (pre_mem_to_mem_bus),
+        .mem_to_wb_valid     (mem_to_wb_valid),
+        .mem_to_wb_bus       (mem_to_wb_bus),
+        .mem_to_wb_upd       (mem_to_wb_upd),
+        .mem_ready_go        (readygo_i[5]),
+        .dcache_cpu_rdata    (dcache_cpu_rdata),
+        .dcache_cpu_data_ok  (dcache_cpu_data_ok),
+        .mem_to_id_dest      (mem_to_id_dest),
+        .mem_to_id_result    (mem_to_id_result),
+        .mem_to_id_data_ok   (mem_to_id_data_ok),
+        .mem_csr_we          (mem_csr_we),
+        .mem_csr_num         (mem_csr_num),
+        .dcache_cpu_accept   (dcache_cpu_accept),
+        .ldata               (ldata[5]),
+        .lvalid              (lvalid[5]),
+        .lpower              (lpower[5]),
+        .lready              (lready[5]),
+        .upd                 (pre_mem_to_mem_upd),
+        .mem_valid_o         (valid_i[5]),
+        .mem_exc_o           (exc_i[5]),
+        .mem_ertn_o          (ertn_i[5])
     );
 
     // ================================================================
@@ -628,10 +653,8 @@ module core_top (
     wb_stage u_wb_stage (
         .clk               (clk),
         .reset             (reset),
-        .wb_allowin        (wb_allowin),
         .mem_to_wb_valid   (mem_to_wb_valid),
         .mem_to_wb_bus     (mem_to_wb_bus),
-        .mem_ready_go      (mem_ready_go),
         .wb_to_rf_bus      (wb_to_rf_bus),
         .debug_wb_pc       (debug0_wb_pc),
         .debug_wb_rf_we    (debug0_wb_rf_wen),
@@ -641,14 +664,20 @@ module core_top (
         .wb_to_id_dest     (wb_to_id_dest),
         .wb_to_id_result   (wb_to_id_result),
         .wb_ertn_flush     (wb_ertn_flush),
-        .wb_exc_valid      (wb_exc_valid),
         .wb_csr_we         (wb_csr_we),
         .wb_csr_num        (wb_csr_num),
         .wb_to_csr_bus     (wb_to_csr_bus),
         .exc_no_rf         (exc_not_rf),
         .rf_valid          (rf_valid),
         .wb_pc_back        (wb_pc_back),
-        .tlbrwf_valid      (tlbrwf_valid)
+        .tlbrwf_valid      (tlbrwf_valid),
+        .ldata              (ldata[6]),
+        .lvalid             (lvalid[6]),
+        .lpower             (lpower[6]),
+        .lready             (lready[6]),
+        .upd                (mem_to_wb_upd),
+        .wb_valid_o         (valid_i[6]),
+        .wb_ready_go        (readygo_i[6])
         `ifdef DIFFTEST_EN
         ,
         .ws_valid_diff      (ws_valid_diff),
@@ -724,42 +753,39 @@ module core_top (
     // MMU
     // ================================================================
     mmu u_mmu (
-        .clk           (clk),
-        .reset         (reset),
-
-        // if interact
-        .vaddr_from_if (if_to_mmu_vaddr),
-        .paddr_to_if   (paddr_to_if),
-        .if_tlb_exc    (if_tlb_exc),
-        .if_mat        (if_mat),
-        .if_cached     (if_cached),
-
-        // pre_mem interact
-        .vaddr_from_ex (pre_mem_to_mmu_vaddr),
-        .vtlb_enop     (vtlb_enop),
-        .ld_and_str    (ld_and_str),
-        .paddr_to_ex   (paddr_to_pre_mem),
-        .srch_value    (srch_value),
-        .ex_tlb_exc    (pre_mem_tlb_exc),
-        .ex_mat        (pre_mem_mat),
-        .ex_cached     (pre_mem_cached),
-
-        // wb interact
-        .tlbrwf_en     (tlbrwf_valid),
-
-        // csr interact
-        .plv_in        (plv_out),
-        .ecode_in      (ecode_out),
-        .dapg_in       (da_pg_out),
-        .datf_in       (datf_out),
-        .datm_in       (datm_out),
-        .dmw           (dmw_out),
-        .tlbcsr        (tlbcsr_bus),
-        .tlbrd_value         (tlbrd_value),
-        .tlbfill_rand_index  (tlbfill_rand_index),
-        .mem_tlb_req         (mem_tlb_req),
-        .utlb_hit      (utlb_hit),
-        .rubish        (rubish)
+        .clk                (clk),
+        .reset              (reset),
+        .vaddr_from_if      (if_to_mmu_vaddr),
+        .paddr_to_if        (paddr_to_if),
+        .if_tlb_exc         (if_tlb_exc),
+        .if_mat             (if_mat),
+        .if_cached          (if_cached),
+        .vaddr_from_ex      (pre_mem_to_mmu_vaddr),
+        .vtlb_enop          (vtlb_enop),
+        .ld_and_str         (ld_and_str),
+        .paddr_to_ex        (paddr_to_pre_mem),
+        .srch_value         (srch_value),
+        .ex_tlb_exc         (pre_mem_tlb_exc),
+        .ex_mat             (pre_mem_mat),
+        .ex_cached          (pre_mem_cached),
+        .tlbrwf_en          (tlbrwf_valid),
+        .plv_in             (plv_out),
+        .ecode_in           (ecode_out),
+        .dapg_in            (da_pg_out),
+        .datf_in            (datf_out),
+        .datm_in            (datm_out),
+        .dmw                (dmw_out),
+        .tlbcsr             (tlbcsr_bus),
+        .tlbrd_value        (tlbrd_value),
+        .tlbfill_rand_index (tlbfill_rand_index),
+        .s1_mem_tlb_req     (s1_mem_tlb_req),
+        .s1_utlb_hit        (s1_utlb_hit),
+        .s0_if_tlb_req      (s0_if_tlb_req),
+        .s0_utlb_hit        (s0_utlb_hit),
+        .need_mmu           (need_mmu),
+        .pre_if_can_req_pre (pre_if_can_req_pre),
+        .s0_flush           (s0_flush),
+        .s1_flush           (s1_flush)
     );
 
     // ================================================================
@@ -1021,7 +1047,7 @@ module core_top (
         .excp_valid         (cmt_excp_flush ),
         .eret               (cmt_ertn       ),
         .intrNo             (csr_estat_diff_0[12:2]     ),
-        .cause              (cmt_csr_ecode  ),
+        .cause              (ecode_out      ),
         .exceptionPC        (cmt_pc         ),
         .exceptionInst      (cmt_inst       )
     );

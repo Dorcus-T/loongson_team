@@ -16,17 +16,33 @@ module branch_predict (
 
     // ===== 更新接口（ID/EX 级使用，不在关键路径）=====
     input  wire                     update_en,           // 更新使能
-    input  wire [29:0]              update_pc,           // 更新的分支 PC[31:2]
-    input  wire                     update_is_branch,    // 是否是分支指令
-    input  wire [ 1:0]              update_br_type,      // 00=无条件 01=条件 10=call 11=ret
-    input  wire                     update_taken,        // 实际是否跳转
-    input  wire [29:0]              update_target,       // 实际跳转目标
-    input  wire [ 4:0]              update_btb_index,    // BTB 更新索引（命中时用）
-    input  wire                     update_push_ras,     // BL 指令 push RAS
-    input  wire [29:0]              update_ras_data,     // push 的返回地址（BL_PC+4 的 [31:2]）
-    input  wire                     update_pop_ras,      // JIRL ret 时 pop RAS
-    input  wire                     update_delete_entry  // 误预测非分支 → 删除 BTB 项
+    input  wire [`BP_BUS_WD-1:0]    update_bus           // 更新数据总线（EX 编码）
 );
+
+    // ── 解码 update_bus ──
+    wire [29:0] update_pc;
+    wire        update_is_branch;
+    wire [ 1:0] update_br_type;
+    wire        update_taken;
+    wire [29:0] update_target;
+    wire [ 4:0] update_btb_index;
+    wire        update_push_ras;
+    wire [29:0] update_ras_data;
+    wire        update_pop_ras;
+    wire        update_delete_entry;
+
+    assign {
+        update_pc,          // 103:74
+        update_is_branch,   // 73
+        update_br_type,     // 72:71
+        update_taken,       // 70
+        update_target,      // 69:40
+        update_btb_index,   // 39:35
+        update_push_ras,    // 34
+        update_ras_data,    // 33:4
+        update_pop_ras,     // 3
+        update_delete_entry // 2
+    } = update_bus;
 
     // ============================================================
     // BTB 表：32 项，每项 {tag[30], target[30], counter[2], valid[1]}

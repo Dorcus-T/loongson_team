@@ -4,58 +4,61 @@ module exe_stage (
     // 时钟与复位
     input  wire                     clk,                // 时钟信号
     input  wire                     reset,              // 复位信号（高有效）
-    // allowin
-    input  wire                     pre_mem_allowin,    // PRE_MEM阶段允许接收
-    output wire                     ex_allowin,         // EX阶段允许接收
     // 来自ID阶段
     input  wire                     id_to_ex_valid,     // ID到EX有效
     input  wire [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus,    // 来自ID的控制信号和操作数
-    input  wire                     id_ready_go,         // ID阶段就绪标志
     // 输出给PRE_MEM阶段
     output wire                     ex_to_pre_mem_valid, // EX到PRE_MEM有效
     output wire [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus, // EX到PRE_MEM总线
+    output wire                     ex_to_pre_mem_upd,  // EX→PRE_MEM 更新 data_n
     output wire                     ex_ready_go,         // EX阶段就绪标志
     // 前递控制
     output wire [ 4:0]              ex_to_id_dest,      // EX阶段写回寄存器号
     output wire [31:0]              ex_to_id_result,    // EX阶段计算结果
     output wire                     ex_to_id_load_op,   // EX阶段是否是加载指令
-    output wire                     ex_exc_valid,       // EX阶段存在异常（不含TLB）
-    // 异常冲刷
-    input  wire                     wb_exc_valid,       // WB阶段存在异常，冲刷流水线
-    input  wire                     wb_ertn_flush,      // WB阶段有ertn指令则冲刷流水线
-    input  wire                     mem_exc_valid,      // MEM阶段存在异常
-    input  wire                     mem_ertn_flush,     // MEM阶段有ertn指令
-    input  wire                     pre_mem_exc_valid,  // PRE_MEM阶段存在异常（用于除/乘法放行）
     // CSR与ERTN冒险
     output wire                     ex_csr_we,          // ex阶段确定要写csr
     output wire [13:0]              ex_csr_num,         // ex阶段写csr的号码
-    output wire                     ex_ertn_flush,      // ex阶段为ertn指令
     // 读取计数器
     input  wire [63:0]              timer_value,        // 计数器数值
-    // PRE_MEM 级 ertn（用于 div/mul 放行）
-    input  wire                     pre_mem_ertn_flush,  // PRE_MEM阶段有ertn指令
     // 预测器更新接口（输出 → branch_predict，由 EX 统一驱动）
     output wire                     bp_update_en,
-    output wire [29:0]              bp_update_pc,
-    output wire                     bp_update_is_branch,
-    output wire [ 1:0]              bp_update_br_type,
-    output wire                     bp_update_taken,
-    output wire [29:0]              bp_update_target,
-    output wire [ 4:0]              bp_update_btb_index,
-    output wire                     bp_update_push_ras,
-    output wire [29:0]              bp_update_ras_data,
-    output wire                     bp_update_pop_ras,
-    output wire                     bp_update_delete_entry,
+    output wire [`BP_BUS_WD-1:0]    bp_bus,            // 更新数据总线（branch_predict 解码）
     // 误预测输出
     output wire                     ex_mispredict,
     output wire [31:0]              ex_corr_target,
     // 性能计数
     output wire                     pred_event,         // 预测事件（一拍脉冲）
-    output wire                     mispred_event       // 预测错误事件（一拍脉冲）
+    output wire                     mispred_event,      // 预测错误事件（一拍脉冲）
+
+    // ── linectrl 接口 ──
+    input  wire                     ldata,              // 0=用旧寄存器, 1=用新寄存器
+    input  wire                     lvalid,             // 本拍可呈现数据
+    input  wire                     lpower,             // 本拍有权发请求
+    input  wire                     lready,             // 维持就绪
+    input  wire                     upd,                // 上级已准备且有权力 → 更新 data_n
+
+    output wire                     ex_valid_o,         // → linectrl valid_i
+    output wire                     ex_exc_o,           // → linectrl exc_i
+    output wire                     ex_ertn_o,          // → linectrl ertn_i
+    output wire                     ex_mispred_o,       // → linectrl mispred_i
+
+    // ── 分支预测器更新许可 ──
+    input  wire                     bp_valid,           // 上拍 ex 准备+有效+无冲刷+下级空 → 本拍可更新
+
+    // ── → ID：mul/div 未完成 ──
+    output wire                     calc_not_ready      // ex 有效且为乘除且结果未就绪
     );
 
-    reg  ex_valid;                               // EX阶段有效标志
-    reg  [`ID_TO_EX_BUS_WD-1:0] id_to_ex_bus_r;  // 锁存的译码级数据
+    wire ex_valid;                                  // 本拍有效 = (ldata? valid_n : valid_o) & lvalid
+    wire ex_exc_valid;                              // 异常有效
+    wire ex_ertn_flush;                             // ertn 冲刷
+
+    // ========== 双寄存器结构 ==========
+    reg  [`ID_TO_EX_BUS_WD-1:0] data_n;            // 新数据寄存器（upd 时捕获）
+    reg                      valid_n;               // 新 valid
+    reg  [`ID_TO_EX_BUS_WD-1:0] data_o;             // 旧数据寄存器
+    reg                      valid_o;               // 旧 valid
 
     // ========== 异常信号 ==========
     wire [12:0] ex_exc;
@@ -185,7 +188,53 @@ module exe_stage (
         ex_cond_cmp,        // 35:33   条件分支比较码
         ex_br_offs,         // 32:1    分支偏移量（已符号扩展+左移2位）
         ex_is_branch        // 0       是否为分支指令
-    } = id_to_ex_bus_r;
+    } = current_bus;
+
+    // ========== 双寄存器逻辑 ==========
+
+    // ── data_n: upd 时从上游捕获 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_n  <= `ID_TO_EX_BUS_WD'd0;
+            valid_n <= 1'b0;
+        end
+        else if (upd) begin
+            data_n  <= id_to_ex_bus;
+            valid_n <= id_to_ex_valid;
+        end
+    end
+
+    // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_o  <= `ID_TO_EX_BUS_WD'd0;
+            valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata)  data_o  <= data_n;
+            valid_o <= (ldata ? valid_n : valid_o) & lvalid;
+        end
+    end
+
+    // ── ldata 选通 ──
+    wire [`ID_TO_EX_BUS_WD-1:0] current_bus;
+    assign current_bus = ldata ? data_n : data_o;
+    assign ex_valid    = (ldata ? valid_n : valid_o) & lvalid;
+
+    wire can_req = ex_valid && lpower;
+
+    // ── ready_go = work_done || !valid || lready ──
+    wire work_done;
+
+    // ── → linectrl ──
+    assign ex_valid_o   = ex_valid;
+    assign ex_exc_o     = ex_exc_valid;
+    assign ex_ertn_o    = ex_ertn_flush;
+    assign ex_mispred_o = ex_mispredict;
+
+    // ── → PRE_MEM ──
+    assign ex_to_pre_mem_valid = ex_valid;
+    assign ex_to_pre_mem_upd   = (ex_ready_go && lpower) || !ex_valid;
 
     // ============================================================
     // EX 级统一分支验证与预测器训练
@@ -237,69 +286,72 @@ module exe_stage (
     // 有效预测 = pred_valid && pred_taken；无预测时视为"不跳"（顺序取指）
     // 方向错 = 实际方向 ≠ (预测有效且预测跳转)
     wire ex_mispredict_raw;
-    assign ex_mispredict_raw = ex_is_branch && ex_valid && (
+    assign ex_mispredict_raw = ex_is_branch&& (
         (ex_br_taken_actual != (ex_pred_valid && ex_pred_taken))           // 方向错（含冷启动：无预测→视为不跳）
         || (ex_br_taken_actual && ex_pred_valid
             && (ex_pred_target != ex_br_target_actual[31:2]))              // 目标错（仅预测为跳时才检查）
     );
 
-    // -------- 原始预测器训练使能 --------
-    wire bp_update_en_raw;
-    assign bp_update_en_raw = ex_is_branch && ex_valid;
-
-    // ============================================================
-    // One-shot：防止分支指令在 EX 停顿时重复发出 mispredict/update
-    //   类似原 ID 级 new_br：新指令进 EX 时清零，分支信号发出后置位
-    //   对外输出 = raw && !ex_branch_fired
-    //   内部保护门控（ex_valid / id_to_ex_bus_r）用 raw 信号
-    // ============================================================
-    reg ex_branch_fired;
-
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
-            ex_branch_fired <= 1'b0;
-        end
-        else if (ex_allowin) begin
-            // 新指令进入 EX → 复位 one-shot
-            ex_branch_fired <= 1'b0;
-        end
-        else if (ex_mispredict_raw) begin
-            // 误预测分支本拍发出了信号 → 置位，阻止后续重复
-            ex_branch_fired <= 1'b1;
-        end
-    end
-
-    // 对外输出（经过 one-shot 门控）
-    assign ex_mispredict  = ex_mispredict_raw && !ex_branch_fired;
+    // 对外输出（can_req 门控）
+    assign ex_mispredict  = ex_mispredict_raw && can_req;
     assign ex_corr_target = ex_br_taken_actual ? ex_br_target_actual
                                                : (ex_pc + 32'h4);
 
-    assign bp_update_en   = bp_update_en_raw && !ex_branch_fired;
+    // ========== 分支预测器更新数据（组合逻辑，保留不动） ==========
+    wire [29:0] bp_pc        = ex_pc[31:2];
+    wire        bp_is_branch = ex_is_branch;
+    wire [ 1:0] bp_br_type   = ex_br_type;
+    wire        bp_taken     = ex_br_taken_actual;
+    wire [29:0] bp_target    = ex_br_target_actual[31:2];
+    wire [ 4:0] bp_btb_idx   = ex_pred_valid ? ex_pred_btb_index : 5'd0;
+    wire        bp_push      = (ex_br_type == 2'b10) && ex_br_taken_actual;
+    wire [29:0] bp_ras       = (ex_pc[31:2] + 30'd1);
+    wire        bp_pop       = (ex_br_type == 2'b11);
+    wire        bp_del       = ex_pred_valid && ex_pred_taken && !ex_is_branch && ex_valid;
+    wire        bp_en_comb   = (ex_is_branch || bp_del) && can_req;
 
-    // 预测事件：无条件分支 + 预测有效（已通过 bp_update_en 的 one-shot 保证只计一次）
-    assign pred_event   = bp_update_en && ex_pred_valid;// && (ex_br_type != 2'b01);
-    // 预测错误事件：仅统计无条件分支中有预测的误预测，排除冷启动和条件分支
-    assign mispred_event = ex_mispredict && ex_pred_valid;// && (ex_br_type != 2'b01);
+    wire pred_comb    = bp_en_comb && ex_pred_valid;
+    wire mispred_comb = ex_mispredict && ex_pred_valid;
 
-    // 以下 bp_update 数据信号无需单独门控——bp_update_en=0 时 branch_predict 忽略全部
-    assign bp_update_pc      = ex_pc[31:2];
-    assign bp_update_is_branch = ex_is_branch;
-    assign bp_update_br_type = ex_br_type;
-    assign bp_update_taken   = ex_br_taken_actual;
-    assign bp_update_target  = ex_br_target_actual[31:2];
+    // ========== 性能计数（组合输出） ==========
+    assign pred_event    = pred_comb;
+    assign mispred_event = mispred_comb;
 
-    // BTB 更新索引：命中时用命中索引，miss 时由 branch_predict 内部 PLRU 决定
-    assign bp_update_btb_index = ex_pred_valid ? ex_pred_btb_index : 5'd0;
+    // ========== 分支预测器更新总线（寄存一拍，bp_valid 门控使能） ==========
+    wire [`BP_BUS_WD-1:0] bp_bus_next;
+    reg  [`BP_BUS_WD-1:0] bp_bus_r;
+    reg                    bp_en_r;
 
-    // RAS 操作
-    assign bp_update_push_ras    = (ex_br_type == 2'b10) && ex_br_taken_actual;  // BL 跳转时 push
-    assign bp_update_ras_data    = (ex_pc[31:2] + 30'd1);  // 返回地址 = BL_PC+4 的 [31:2]
-    assign bp_update_pop_ras     = (ex_br_type == 2'b11);  // JIRL ret 时 pop
+    assign bp_bus_next = {
+        bp_pc,          // 103:74
+        bp_is_branch,   // 73
+        bp_br_type,     // 72:71
+        bp_taken,       // 70
+        bp_target,      // 69:40
+        bp_btb_idx,     // 39:35
+        bp_push,        // 34
+        bp_ras,         // 33:4
+        bp_pop,         // 3
+        bp_del          // 2
+    };
 
-    // 预测跳转但实际不是分支 → 删除脏 BTB 项
-    wire ex_not_branch_mispredict;
-    assign ex_not_branch_mispredict = ex_pred_valid && ex_pred_taken && !ex_is_branch && ex_valid;
-    assign bp_update_delete_entry = ex_not_branch_mispredict;
+    always @(posedge clk) begin
+        if (reset) begin
+            bp_bus_r <= `BP_BUS_WD'd0;
+            bp_en_r  <= 1'b0;
+        end
+        else if (bp_en_comb) begin
+            bp_bus_r <= bp_bus_next;
+            bp_en_r  <= bp_en_comb;
+        end
+        else if (ldata) begin
+            bp_bus_r <= `BP_BUS_WD'd0;
+            bp_en_r  <= 1'b0;
+        end
+    end
+
+    assign bp_update_en = bp_en_r && bp_valid;
+    assign bp_bus       = bp_bus_r;
 
     `ifdef DIFFTEST_EN
     wire [31:0] diff_vaddr;         // load/store虚地址 for difftest
@@ -356,41 +408,17 @@ module exe_stage (
     };
 
     // ========== 流水线控制 ==========
-    assign is_div_inst   = |alu_op[18:15];                    // 判断是否是除法/取模指令（ALU操作码15-18位非零）
-    assign is_mul_inst   = |alu_op[14:12];                    // 判断是否是乘法指令（ALU操作码12-14位非零）
-    // 下游异常/flush 时放行 EX：否则 EX 等 div/mul 但 div/mul 已终止 → 死锁
-    wire ex_flush_pending;
-    assign ex_flush_pending = ex_exc_valid || pre_mem_exc_valid || pre_mem_ertn_flush || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || ex_rf_valid;
+    assign is_div_inst   = |alu_op[18:15];
+    assign is_mul_inst   = |alu_op[14:12];
 
-    // 仅 div/mul 需等待；其余指令一拍过（访存/CACOP 握手已移至 PRE_MEM）
-    assign ex_ready_go   = is_mul_inst ? mul_ready || mul_ready_r || !ex_valid || ex_flush_pending :
-                           is_div_inst ? div_ready || div_ready_r || !ex_valid || ex_flush_pending :
-                           1'b1;
-    assign ex_allowin    = id_ready_go && ex_ready_go && (pre_mem_allowin || !ex_valid);
-    assign ex_to_pre_mem_valid = ex_valid;
-
-    // 执行级有效标志更新
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
-            ex_valid <= 1'b0;
-        end
-        else if (ex_allowin) begin
-            ex_valid <= id_to_ex_valid && !ex_mispredict;
-        end
-        else if (ex_ready_go && pre_mem_allowin) begin
-            ex_valid <= 1'b0;
-        end
-    end
-    // 执行级数据传递
-    always @(posedge clk) begin
-        if (ex_allowin) begin
-            id_to_ex_bus_r <= id_to_ex_bus;
-        end
-    end
-
+    assign work_done       = ex_exc_valid ? 1'b1                       :
+                             is_mul_inst  ? (mul_ready || mul_already) :
+                             is_div_inst  ? (div_ready || div_already) :
+                             1'b1;
+    assign ex_ready_go     = work_done || !ex_valid || lready;
 
     // ========== csr写文件写回控制 ==========
-    assign ex_csr_we = csr_we && ex_valid && !ex_exc_valid; //用于csr_stall判断
+    assign ex_csr_we = csr_we && ex_valid;
 
     // ========== 计数器筛选数据生成 ==========
     assign timer_finalval = timer_high ? timer_value[63:32] : timer_value[31:0];
@@ -401,42 +429,36 @@ module exe_stage (
 
     // ALU实例化
     alu u_alu (
-        .alu_op         (alu_op),
-        .alu_src1       (alu_src1),
-        .alu_src2       (alu_src2),
-        .alu_result     (alu_result),
-        .clk            (clk),
-        .reset          (reset),
-        .div_ready      (div_ready),
-        .mul_ready      (mul_ready),
-        .ex_valid       (ex_valid),
-        .ex_exc         (ex_exc[12:3]),
-        .mem_exc_valid  (mem_exc_valid),
-        .mem_ertn_flush (mem_ertn_flush),
-        .wb_ertn_flush  (wb_ertn_flush),
-        .wb_exc_valid   (wb_exc_valid),
-        .ex_allowin     (ex_allowin)
+        .alu_op     (alu_op),
+        .alu_src1   (alu_src1),
+        .alu_src2   (alu_src2),
+        .alu_result (alu_result),
+        .clk        (clk),
+        .reset      (reset),
+        .div_ready_o(div_ready),
+        .mul_ready_o(mul_ready),
+        .can_req    (can_req),
+        .ldata      (ldata)
     );
 
     // 除法就绪信号需要寄存
     always @(posedge clk) begin
-        if (reset || ex_allowin || wb_ertn_flush || wb_exc_valid) begin
-            div_ready_r <= 1'b0;
-        end
-        else if (div_ready) begin
-            div_ready_r <= 1'b1;
-        end
+        if (reset || ldata)           div_ready_r <= 1'b0;
+        else if (div_ready)           div_ready_r <= 1'b1;
     end
 
-    // 乘法就绪信号需要寄存（复用除法器模式）
+    wire div_already = div_ready_r & !ldata;
+
+    // 乘法就绪信号需要寄存
     always @(posedge clk) begin
-        if (reset || ex_allowin || wb_ertn_flush || wb_exc_valid) begin
-            mul_ready_r <= 1'b0;
-        end
-        else if (mul_ready) begin
-            mul_ready_r <= 1'b1;
-        end
+        if (reset || ldata)           mul_ready_r <= 1'b0;
+        else if (mul_ready)           mul_ready_r <= 1'b1;
     end
+
+    wire mul_already = mul_ready_r & !ldata;
+
+    assign calc_not_ready = ex_valid && (is_mul_inst && !(mul_ready || mul_already) ||
+                            is_div_inst && !(div_ready || div_already));
 
     // ========== 前递输出 ==========
     assign ex_to_id_dest    = dest & {5{ex_valid}} & {5{gr_we}};

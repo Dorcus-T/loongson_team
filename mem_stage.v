@@ -3,16 +3,13 @@
 module mem_stage (
     input  wire                         clk,
     input  wire                         reset,
-    // allowin
-    input  wire                         wb_allowin,            // WB阶段允许接收
-    output wire                         mem_allowin,           // MEM阶段允许接收
     // 来自pre_mem阶段
     input  wire                         pre_mem_to_mem_valid,  // PRE_MEM到MEM有效
     input  wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus, // 来自PRE_MEM的总线
-    input  wire                         pre_mem_ready_go,     // PRE_MEM阶段就绪标志
     // 输出给wb阶段
-    output wire                         mem_to_wb_valid,       // MEM到WB有效
+    output wire                         mem_to_wb_valid,       // MEM到WB有效（= current_valid）
     output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
+    output wire                         mem_to_wb_upd,         // MEM→WB 更新 data_n
     output wire                         mem_ready_go,          // MEM阶段就绪标志
      // 来自 DCache
     input  wire [31:0]                  dcache_cpu_rdata,      // DCache 读数据
@@ -21,22 +18,79 @@ module mem_stage (
     output wire [ 4:0]                  mem_to_id_dest,        // MEM阶段写回寄存器号
     output wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
     output wire                         mem_to_id_data_ok,     // MEM前递给id的数据是否准备好
-    // 异常冲刷
-    input  wire                         wb_exc_valid,          // WB阶段异常冲刷流水线
-    input  wire                         wb_ertn_flush,         // WB阶段有ertn指令则冲刷流水线
-    output wire                         mem_exc_valid,         // 防止有异常时pre_mem阶段发出访存请求
-    output wire                         mem_ertn_flush,        // 防止ertn位于mem时,pre_mem发出访存请求
     // csr与ertn冒险
     output wire                         mem_csr_we,            // mem阶段确定要写csr
     output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
     // cpu可接受数据
-    output wire                         dcache_cpu_accept      // MEM可接受 cache 读数据
+    output wire                         dcache_cpu_accept,     // MEM可接受 cache 读数据
+
+    // ── linectrl 接口 ──
+    input  wire                         ldata,                 // 0=用旧寄存器, 1=用新寄存器
+    input  wire                         lvalid,                // 本拍可呈现数据
+    input  wire                         lpower,                // 本拍有权发请求
+    input  wire                         lready,                // 维持就绪
+    input  wire                         upd,                   // 上级已准备且有权力 → 更新 data_n
+
+    output wire                         mem_valid_o,           // → linectrl valid_i
+    output wire                         mem_exc_o,             // → linectrl exc_i
+    output wire                         mem_ertn_o             // → linectrl ertn_i
 );
 
-    reg  mem_valid;                                   // MEM阶段有效标志
-    reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus_r; // 锁存的PRE_MEM级数据
+    wire mem_valid;                                   // 本拍有效 = (ldata? valid_n : valid_o) & lvalid
+    wire mem_exc_valid;                               // 异常有效，内部使用
+    wire mem_ertn_flush;                              // ertn 冲刷，内部使用
+
+    // ========== 双寄存器结构 ==========
+    reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] data_n;         // 新数据寄存器（upd 时捕获）
+    reg                          valid_n;              // 新 valid
+    reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] data_o;          // 旧数据寄存器
+    reg                          valid_o;              // 旧 valid
+
     reg  [31:0] load_data_r;                          // 锁存 cache 返回的读数据（打断长组合路径）
-    reg         load_data_latched;                    // 数据已锁存，本拍正在处理
+    wire        load_data_latched;                    // 数据已锁存，本拍正在处理
+    reg         load_data_state;                      // 数据锁存状态
+
+    // ========== 双寄存器逻辑 ==========
+
+    // ── data_n: upd 时从上游捕获 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_n  <= `PRE_MEM_TO_MEM_BUS_WD'd0;
+            valid_n <= 1'b0;
+        end
+        else if (upd) begin
+            data_n  <= pre_mem_to_mem_bus;
+            valid_n <= pre_mem_to_mem_valid;
+        end
+    end
+
+    // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_o  <= `PRE_MEM_TO_MEM_BUS_WD'd0;
+            valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata)  data_o  <= data_n;
+            valid_o <= (ldata ? valid_n : valid_o) & lvalid;
+        end
+    end
+
+    // ── ldata 选通 ──
+    wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] current_bus;
+    assign current_bus = ldata ? data_n : data_o;
+    assign mem_valid   = (ldata ? valid_n : valid_o) & lvalid;
+
+    // ── ready_go = work_done || !valid || lready ──
+    wire work_done;
+
+    // ── → linectrl ──
+    assign mem_valid_o = mem_valid;
+    assign mem_exc_o   = mem_exc_valid;
+    assign mem_ertn_o  = mem_ertn_flush;
+
+    // ── → WB ──
+    assign mem_to_wb_upd   = (mem_ready_go && lpower) || !mem_valid;
 
     // ========== 异常信号 ==========
     wire [15:0] mem_exc;
@@ -128,7 +182,7 @@ module mem_stage (
         dest,                // 68:64   目标寄存器号
         alu_result,          // 63:32   ALU结果
         mem_pc               // 31:0    PC
-    } = pre_mem_to_mem_bus_r;
+    } = current_bus;
 
     `ifdef DIFFTEST_EN
     // dift_paddr 已由 PRE_MEM 通过总线传入（= padd）
@@ -177,39 +231,16 @@ module mem_stage (
     };
 
     // ========== 流水线控制 ==========
-    // load:  数据锁存到 load_data_r 后下一拍就绪（打断 cache→MEM→ID 长组合路径）
-    // store: 写请求已在 PRE_MEM 发出，MEM 恒就绪（避免错过 cache write_done 脉冲）
-    // 其他:  恒就绪
-    assign mem_ready_go    = mem_valid && (is_mem_inst && !mem_we && !mem_exc_valid) ? load_data_latched : 1'b1;
-    assign mem_allowin     = pre_mem_ready_go && mem_ready_go && (wb_allowin || !mem_valid);
+    assign work_done       = is_mem_inst && !mem_we && !mem_exc_valid ? load_data_latched : 1'b1;
+    assign mem_ready_go    = work_done || !mem_valid || lready;
     assign mem_to_wb_valid = mem_valid;
 
     // ========== DCache 数据接受 ==========
-    // load 等待数据时即拉高 accept，数据到达拍锁入 load_data_r
-    assign dcache_cpu_accept = mem_valid && is_mem_inst && !mem_we && !load_data_latched;
-
-    // 访存级有效标志更新
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
-            mem_valid <= 1'b0;
-        end
-        else if (mem_allowin) begin
-            mem_valid <= pre_mem_to_mem_valid;
-        end
-        else if (mem_ready_go && wb_allowin) begin
-            mem_valid <= 1'b0;
-        end
-    end
-    // 访存级数据传递
-    always @(posedge clk) begin
-        if (mem_allowin) begin
-            pre_mem_to_mem_bus_r <= pre_mem_to_mem_bus;
-        end
-    end
+    assign dcache_cpu_accept = mem_valid && lpower && is_mem_inst && !mem_we && !load_data_latched;
 
     // ========== load 数据锁存控制（打断 cache→MEM→ID 长组合路径） ==========
     wire latch_data;
-    assign latch_data = mem_valid && is_mem_inst && !mem_we && !load_data_latched && dcache_cpu_data_ok;
+    assign latch_data = mem_valid && lpower && is_mem_inst && !mem_we && !load_data_latched && dcache_cpu_data_ok;
 
     always @(posedge clk) begin
         if (latch_data) begin
@@ -218,19 +249,20 @@ module mem_stage (
     end
 
     always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
-            load_data_latched <= 1'b0;
+        if (reset) begin
+            load_data_state <= 1'b0;
         end
-        else if (mem_allowin) begin
-            load_data_latched <= 1'b0;
+        else if (ldata && !latch_data) begin
+            load_data_state <= 1'b0;
         end
         else if (latch_data) begin
-            load_data_latched <= 1'b1;
+            load_data_state <= 1'b1;
         end
     end
+    assign load_data_latched = load_data_state && !ldata;
 
     // ========== csr写文件写回控制 ==========
-    assign mem_csr_we = csr_we && mem_valid && !mem_exc_valid;
+    assign mem_csr_we = csr_we && mem_valid;
 
     // ========== 存储器读数据处理（字节/半字/字，支持符号扩展） ==========
     // 数据源：已锁存则用寄存器（打断长组合路径），否则直通 cache 输出

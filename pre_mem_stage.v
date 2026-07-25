@@ -4,16 +4,13 @@ module pre_mem_stage (
     // 时钟与复位
     input  wire                     clk,                // 时钟信号
     input  wire                     reset,              // 复位信号（高有效）
-    // allowin
-    input  wire                     mem_allowin,        // MEM阶段允许接收
-    output wire                     pre_mem_allowin,    // PRE_MEM阶段允许接收
     // 来自EX阶段
     input  wire                     ex_to_pre_mem_valid, // EX到PRE_MEM有效
     input  wire [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus, // 来自EX的总线
-    input  wire                     ex_ready_go,         // EX阶段就绪标志
     // 输出给MEM阶段
     output wire                     pre_mem_to_mem_valid, // PRE_MEM到MEM有效
     output wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus, // PRE_MEM到MEM总线
+    output wire                     pre_mem_to_mem_upd,  // PRE_MEM→MEM 更新 data_n
     output wire                     pre_mem_ready_go,     // PRE_MEM阶段就绪标志
     // 访问MMU信号
     output wire [31:0]              pre_mem_to_mmu_vaddr, // 虚地址输出
@@ -23,9 +20,9 @@ module pre_mem_stage (
     input  wire [ 5:0]              srch_value,         // {s1_found, index}
     input  wire [ 4:0]              mem_tlb_exc,        // MMU返回tlb异常
     input  wire                     pre_cached,         // MMU返回是否可缓存
-    input  wire                     mem_tlb_req,        // MMU 告知需要查 TLB
-    input  wire                     utlb_hit,           // μTLB 命中（跳过 tlb_wait）
-    output wire                     rubish,             // 此指令将被废弃，不访问mmu
+    input  wire                     s1_mem_tlb_req,        // MMU 告知需要查 TLB
+    input  wire                     s1_utlb_hit,           // μTLB 命中（跳过 tlb_wait）
+    output wire                     need_mmu,           // 本指令需要用 MMU
     // 与 DCache 的接口
     output wire                     dcache_cpu_req,     // DCache 请求有效
     output wire                     dcache_cpu_op,      // DCache 操作类型（1=写）
@@ -43,27 +40,39 @@ module pre_mem_stage (
     output wire [`TAG_WIDTH-1:0]    cacop_tag,          // cache操作tag
     input  wire                     icache_cacop_rdy,   // ICache CACOP 就绪
     input  wire                     dcache_cacop_rdy,   // DCache CACOP 就绪
-    // 异常冲刷
-    input  wire                     wb_exc_valid,       // WB阶段存在异常，冲刷流水线
-    input  wire                     wb_ertn_flush,      // WB阶段有ertn指令则冲刷流水线
-    input  wire                     mem_exc_valid,      // MEM阶段存在异常
-    input  wire                     mem_ertn_flush,     // MEM阶段有ertn指令
     // CSR与ERTN冒险（给ID做stall）
     output wire                     pre_mem_csr_we,     // pre_mem阶段确定要写csr
     output wire [13:0]              pre_mem_csr_num,    // pre_mem阶段写csr的号码
-    output wire                     pre_mem_ertn_flush, // pre_mem阶段为ertn指令
-    // 异常输出（给ID做brtaken抑制 + 给EX放行div/mul）
-    output wire                     pre_mem_exc_valid,  // PRE_MEM阶段存在异常（已合并TLB）
     // 前递控制（给ID做load-use / branch stall + 数据前递）
     output wire [ 4:0]              pre_mem_to_id_dest,     // PRE_MEM阶段写回寄存器号
     output wire [31:0]              pre_mem_to_id_result,   // PRE_MEM阶段前递数据
-    output wire                     pre_mem_to_id_load_op   // PRE_MEM阶段是否有load
+    output wire                     pre_mem_to_id_load_op,  // PRE_MEM阶段是否有load
+
+    // ── linectrl 接口 ──
+    input  wire                     ldata,              // 0=用旧寄存器, 1=用新寄存器
+    input  wire                     lvalid,             // 本拍可呈现数据
+    input  wire                     lpower,             // 本拍有权发请求
+    input  wire                     lready,             // 维持就绪
+    input  wire                     upd,                // 上级已准备且有权力 → 更新 data_n
+
+    output wire                     pre_mem_valid_o,    // → linectrl valid_i
+    output wire                     pre_mem_exc_o,      // → linectrl exc_i
+    output wire                     pre_mem_ertn_o      // → linectrl ertn_i
 );
 
-    reg  pre_mem_valid;                                  // PRE_MEM阶段有效标志
-    reg  [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus_r; // 锁存的执行级数据
+    wire pre_mem_valid;                                 // 本拍有效 = (ldata? valid_n : valid_o) & lvalid
+    wire can_req_pre;                                   // 本拍可访问mmu
+    wire can_req;                                       // 本拍可访存
 
-    // ========== 异常信号 ==========
+    // ========== 双寄存器结构 ==========
+    reg  [`EX_TO_PRE_MEM_BUS_WD-1:0] data_n;           // 新数据寄存器（upd 时捕获）
+    reg                          valid_n;               // 新 valid
+    reg  [`EX_TO_PRE_MEM_BUS_WD-1:0] data_o;            // 旧数据寄存器
+    reg                          valid_o;               // 旧 valid
+
+    // ========== 内部异常/ertn 信号 ==========
+    wire        pre_mem_exc_valid;                       // 后期异常有效
+    wire        pre_mem_ertn_flush;                      // ertn 冲刷
     wire [15:0] ex_exc;      // 来自EX的异常字段（16-bit: {3'b0, exc[12:0]}）
     wire [12:0] pre_exc;          // PRE_MEM 级前异常（+ALE，不含TLB）
     wire [15:0] pre_mem_exc;     // PRE_MEM 级后异常（+TLB合并，16-bit）
@@ -103,14 +112,20 @@ module pre_mem_stage (
     wire [31:0] timer_finalval;         // 筛选后的计数器读取数据
     // DCache 接口
     wire        is_mem_inst;            // 是访存指令
-    reg         req_already;            // 已经发送过访存请求
-    reg         tlb_return;             // TLB 查大表返回数据（已等 1 拍后置 1）
+    reg         req_state;              // dcache 请求状态
+    wire        tlb_return;             // TLB 查大表返回数据（已等 1 拍后置 1）
     // cacop 信号
     wire [4:0]  cacop_code_int;         // 来自EX bus的cache操作类型
     wire        cacop_en;               // 来自EX bus的cache操作使能
-    reg         i_cacop_req_already;    // ICache CACOP 请求已发
-    reg         d_cacop_req_already;    // DCache CACOP 请求已发
+    reg         icacop_state;           // ICache CACOP 请求状态
+    reg         dcacop_state;           // DCache CACOP 请求状态
     wire        cacop_hit_mode;         // cacop 命中模式
+
+    // ── 请求状态组合输出（ldata=1 当拍清零）──
+    wire req_already, i_cacop_req_already, d_cacop_req_already;
+    assign req_already          = req_state     && !ldata;
+    assign i_cacop_req_already  = icacop_state  && !ldata;
+    assign d_cacop_req_already  = dcacop_state  && !ldata;
     // result_or_badv
     wire [31:0] result_or_badv;         // 若为TLB相关异常，替换为pc
     // 异常
@@ -132,6 +147,52 @@ module pre_mem_stage (
     // 占位 dummy wire（保持总线位宽不变）
     wire [209:0] _unused_diff_pad;
     `endif
+
+    // ========== 双寄存器逻辑 ==========
+
+    // ── data_n: upd 时从上游捕获 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_n  <= `EX_TO_PRE_MEM_BUS_WD'd0;
+            valid_n <= 1'b0;
+        end
+        else if (upd) begin
+            data_n  <= ex_to_pre_mem_bus;
+            valid_n <= ex_to_pre_mem_valid;
+        end
+    end
+
+    // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_o  <= `EX_TO_PRE_MEM_BUS_WD'd0;
+            valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata)  data_o  <= data_n;
+            valid_o <= (ldata ? valid_n : valid_o) & lvalid;
+        end
+    end
+
+    // ── ldata 选通 ──
+    wire [`EX_TO_PRE_MEM_BUS_WD-1:0] current_bus;
+    assign current_bus    = ldata ? data_n : data_o;
+    assign pre_mem_valid  = (ldata ? valid_n : valid_o) & lvalid;
+
+    // ── ready_go = work_done || !valid || lready ──
+    wire work_done;
+
+    // ── → linectrl ──
+    assign pre_mem_valid_o = pre_mem_valid;
+    assign pre_mem_exc_o   = pre_mem_exc_valid;
+    assign pre_mem_ertn_o  = pre_mem_ertn_flush;
+
+    // ── → MEM ──
+    assign pre_mem_to_mem_valid = pre_mem_valid;
+    assign pre_mem_to_mem_upd   = (pre_mem_ready_go && lpower) || !pre_mem_valid;
+
+    assign can_req_pre = pre_mem_valid && !pre_exc_valid && lpower;
+    assign can_req     = pre_mem_valid && !pre_mem_exc_valid && lpower;
 
     // ========== 解析来自EX阶段的总线（多6bit cacop在MSB） ==========
     assign {
@@ -177,7 +238,7 @@ module pre_mem_stage (
         dest,              // 68:64   目标寄存器号
         alu_result,        // 63:32   ALU计算结果
         pre_mem_pc              // 31:0    PC
-    } = ex_to_pre_mem_bus_r;
+    } = current_bus;
 
     // ========== ALE 检测（PRE_MEM 负责，EX 不检测访存对齐） ==========
     wire ale;
@@ -230,82 +291,57 @@ module pre_mem_stage (
     // ========== 流水线控制 ==========
     assign is_mem_inst = (mem_we || res_from_mem);
     // TLB 握手控制
-    assign rubish = pre_exc_valid || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || !pre_mem_valid;
-    wire need_tlb_lookup = ((mem_we || res_from_mem) && !(cacop_en && cacop_code_int[4:3] != 2'b10) && mem_tlb_req) || tlbsrch_en;
-    wire tlb_ready       = !need_tlb_lookup || tlb_return || utlb_hit;
-    // 下游异常/flush 时放行 PRE_MEM：否则 PRE_MEM 等 cache 但 cache 请求被阻断 → 死锁
-    wire pre_mem_flush_pending;
-    assign pre_mem_flush_pending = pre_exc_valid || mem_exc_valid || mem_ertn_flush || wb_ertn_flush || wb_exc_valid || pre_mem_rf_valid;
+    assign need_mmu = (mem_we || res_from_mem || cacop_en && (cacop_code_int[4:3] == 2'b10)) && can_req_pre;
+    wire need_tlb_lookup = s1_mem_tlb_req || tlbsrch_en && can_req_pre;
+    wire tlb_ready       = !need_tlb_lookup || tlb_return || s1_utlb_hit;
+    // ========== ready_go = work_done || !valid || lready ==========
+    wire is_mem_tlb = mem_we || res_from_mem || tlbsrch_en;
+    wire is_cacop_i = cacop_en && (cacop_code_int[2:0] == 3'd0);
+    wire is_cacop_d = cacop_en && (cacop_code_int[2:0] == 3'd1);
+    wire cache_sent = (dcache_cpu_req && dcache_cpu_addr_ok) || req_already;
 
-    assign pre_mem_ready_go = pre_mem_valid && (mem_we || res_from_mem || tlbsrch_en) && !pre_exc_valid ? tlb_ready && ((dcache_cpu_req && dcache_cpu_addr_ok) || req_already || tlbsrch_en || pre_mem_flush_pending || pre_mem_exc_valid) :
-                              pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd0) ? (icache_cacop_rdy || i_cacop_req_already || pre_mem_flush_pending || pre_mem_exc_valid) :
-                              pre_mem_valid && cacop_en && (cacop_code_int[2:0] == 3'd1) ? (dcache_cacop_rdy || d_cacop_req_already || pre_mem_flush_pending || pre_mem_exc_valid) : 1'b1;
-    assign pre_mem_allowin    = ex_ready_go && pre_mem_ready_go && (mem_allowin || !pre_mem_valid);
-    assign pre_mem_to_mem_valid = pre_mem_valid;
+    wire mem_done  = tlb_ready && (cache_sent || tlbsrch_en);
+    wire caci_done = icache_cacop_rdy || i_cacop_req_already;
+    wire cadc_done = dcache_cacop_rdy || d_cacop_req_already;
 
-    // PRE_MEM级有效标志更新
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
-            pre_mem_valid <= 1'b0;
-        end
-        else if (pre_mem_allowin) begin
-            pre_mem_valid <= ex_to_pre_mem_valid;
-        end
-        else if (pre_mem_ready_go && mem_allowin) begin
-            pre_mem_valid <= 1'b0;
-        end
-    end
-    // PRE_MEM级数据传递
-    always @(posedge clk) begin
-        if (pre_mem_allowin) begin
-            ex_to_pre_mem_bus_r <= ex_to_pre_mem_bus;
-        end
-    end
+    assign work_done       = pre_mem_exc_valid ? 1'b1 :
+                             is_cacop_i       ? caci_done :
+                             is_cacop_d       ? cadc_done :
+                             is_mem_tlb       ? mem_done :
+                             1'b1;
+    assign pre_mem_ready_go = work_done || !pre_mem_valid || lready;
 
     // ========== DCache 请求控制 ==========
+    wire req_set = dcache_cpu_req && dcache_cpu_addr_ok;
     always @(posedge clk) begin
-        if (reset || pre_mem_allowin || wb_ertn_flush || wb_exc_valid) begin
-            req_already <= 1'b0;
-        end
-        else if ((dcache_cpu_req && dcache_cpu_addr_ok) && !pre_mem_allowin) begin
-            req_already <= 1'b1;
-        end
+        if (reset)                                           req_state <= 1'b0;
+        else if (ldata && !req_set)                          req_state <= 1'b0;
+        else if (req_set)                                    req_state <= 1'b1;
     end
+    wire icacop_set = cacop_en && (cacop_code_int[2:0] == 3'd0) && icache_cacop_rdy;
     always @(posedge clk) begin
-        if (reset || pre_mem_allowin || wb_ertn_flush || wb_exc_valid) begin
-            i_cacop_req_already <= 1'b0;
-        end
-        else if (cacop_en && (cacop_code_int[2:0] == 3'd0) && icache_cacop_rdy && !pre_mem_allowin) begin
-            i_cacop_req_already <= 1'b1;
-        end
+        if (reset)                                           icacop_state <= 1'b0;
+        else if (ldata && !icacop_set)                       icacop_state <= 1'b0;
+        else if (icacop_set)                                 icacop_state <= 1'b1;
     end
+    wire dcacop_set = cacop_en && (cacop_code_int[2:0] == 3'd1) && dcache_cacop_rdy;
     always @(posedge clk) begin
-        if (reset || pre_mem_allowin || wb_ertn_flush || wb_exc_valid) begin
-            d_cacop_req_already <= 1'b0;
-        end
-        else if (cacop_en && (cacop_code_int[2:0] == 3'd1) && dcache_cacop_rdy && !pre_mem_allowin) begin
-            d_cacop_req_already <= 1'b1;
-        end
+        if (reset)                                           dcacop_state <= 1'b0;
+        else if (ldata && !dcacop_set)                       dcacop_state <= 1'b0;
+        else if (dcacop_set)                                 dcacop_state <= 1'b1;
     end
 
     // ========== TLB 握手控制（TLB 输出寄存器多 1 拍延迟） ==========
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush)
-            tlb_return <= 1'b0;
-        else if (pre_mem_allowin)
-            tlb_return <= 1'b0;
-        else if (pre_mem_valid && need_tlb_lookup && !tlb_return)
-            tlb_return <= 1'b1;
-    end
+    assign tlb_return = !ldata;
 
     // ========== csr写文件写回控制 ==========
-    assign pre_mem_csr_we = csr_we && pre_mem_valid && !pre_mem_exc_valid;
+    assign pre_mem_csr_we = csr_we && pre_mem_valid;
 
     // ========== 访问MMU信号逻辑 ==========
     assign pre_mem_to_mmu_vaddr = alu_result;
     assign vtlb_enop = {
-        tlbsrch_en,
-        pre_mem_valid && !mem_exc_valid && !(|pre_exc) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid && !pre_mem_rf_valid ? invtlb_en : 1'b0,
+        tlbsrch_en && can_req_pre,
+        invtlb_en && can_req_pre,
         dest,
         rj_value[9:0],
         rkd_value[31:13]
@@ -319,16 +355,13 @@ module pre_mem_stage (
     assign cacop_va       = alu_result;
     assign cacop_tag      = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
     assign cacop_hit_mode = cacop_en && (cacop_code_int[4:3] == 2'b10);
-    assign cacop_en_final = cacop_en && pre_mem_valid
-                          && !pre_exc_valid && !mem_exc_valid
-                          && !(|pre_mem_exc) && !pre_mem_rf_valid
-                          && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid
-                          && !(cacop_hit_mode && |mem_tlb_exc && !tlb_ready)
+    assign cacop_en_final = cacop_en && can_req
+                          && !(cacop_hit_mode && !tlb_ready)
                           && !i_cacop_req_already && !d_cacop_req_already;
 
     // ========== DCache 输出信号 ==========
-    assign dcache_cpu_req   = pre_mem_valid && (!mem_exc_valid && !(|pre_mem_exc || pre_mem_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid) && !req_already && (mem_we || res_from_mem) && tlb_ready;
-    assign dcache_cpu_op    = mem_we && pre_mem_valid && (!mem_exc_valid && !(|pre_mem_exc || pre_mem_rf_valid) && !mem_ertn_flush && !wb_ertn_flush && !wb_exc_valid);
+    assign dcache_cpu_req   = can_req && !req_already && (mem_we || res_from_mem) && tlb_ready;
+    assign dcache_cpu_op    = mem_we;
     assign dcache_cpu_index = alu_result[`OFFSET_WIDTH +: `INDEX_WIDTH];
     assign dcache_cpu_tag   = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
     assign dcache_cpu_offset= alu_result[0 +: `OFFSET_WIDTH];
@@ -351,7 +384,7 @@ module pre_mem_stage (
     assign pre_exc_valid          = (|pre_exc || pre_mem_rf_valid) && pre_mem_valid;
 
     // ========== 检测异常与ertn（合并EX异常 + TLB异常） ==========
-    assign valid_mem_tlb_exc     = mem_tlb_exc & {5{!(|pre_exc) && pre_mem_valid && ld_and_str != 2'b0}};
+    assign valid_mem_tlb_exc     = mem_tlb_exc & {5{!(|pre_exc) && pre_mem_valid && ld_and_str != 2'b0 && tlb_ready}};
     assign pre_mem_exc           = {pre_exc[12:11], pre_exc[10] || valid_mem_tlb_exc[4], pre_exc[9], pre_exc[8] || valid_mem_tlb_exc[3], pre_exc[7:0], valid_mem_tlb_exc[2:0]};
     assign pre_mem_exc_valid  = (|pre_mem_exc || pre_mem_rf_valid) && pre_mem_valid;
     assign pre_mem_ertn_flush = ertn_flush && pre_mem_valid;

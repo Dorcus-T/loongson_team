@@ -24,6 +24,9 @@
 `define WB_TO_CSR_BUS_WD    160                           // WB到CSR总线
 `define TLBCSR_BUS_WD       160                           // tlb相关CSR数据总线
 `define TLBRD_BUS_WD        101                           // WB到CSR TLB读数据总线
+`define BP_BUS_WD           102                           // 分支预测器更新数据总线（不含使能和计数）
+`define PRE_IF_BUS_WD       74                            // pre_if 数据总线 {pc[32], pred[42]}
+`define IF_BUS_WD           78                            // IF 数据总线 {pc[32], pred[42], exc[4]}
 
 // ============================================================================
 // 分支预测器参数

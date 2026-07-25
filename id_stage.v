@@ -3,16 +3,13 @@
 module id_stage (
     input  wire                         clk,
     input  wire                         reset,
-    // allowin
-    input  wire                         ex_allowin,          // EX阶段允许接收信号（用于反压控制）
-    output wire                         id_allowin,          // ID阶段允许接收新指令
     // 来自IF阶段
     input  wire                         if_to_id_valid,      // IF到ID的有效标志
     input  wire [`IF_TO_ID_BUS_WD-1:0]  if_to_id_bus,        // IF传递的总线：{指令, PC}
-    input  wire                         if_ready_go,         // IF阶段就绪标志
     // 输出给ex阶段
     output wire                         id_to_ex_valid,      // ID到EX的有效标志
     output wire [`ID_TO_EX_BUS_WD-1:0]  id_to_ex_bus,        // ID到EX的控制总线
+    output wire                         id_to_ex_upd,         // ID→EX 更新 data_n
     output wire                         id_ready_go,         // ID阶段就绪标志
     // wb阶段输入的寄存器文件总线
     input  wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,        // WB阶段写回数据
@@ -28,11 +25,7 @@ module id_stage (
     input  wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
     input  wire [31:0]                  wb_to_id_result,       // WB阶段计算结果
     input  wire                         mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
-    input  wire                         ex_exc_valid,        // ex有冲刷就不发起brtaken
-    input  wire                         ex_mispredict,       // EX 误预测冲刷 ID
-    input  wire                         pre_mem_exc_valid,   // PRE_MEM阶段存在异常
-    input  wire                         mem_exc_valid,       // MEM有冲刷就不发起brtaken
-
+    input  wire                         calc_not_ready,      // EX 乘除结果未就绪
     // csr与ertn冒险
     input  wire                         ex_csr_we,           // EX阶段写CSR使能
     input  wire [13:0]                  ex_csr_num,          // EX阶段写CSR号码
@@ -45,15 +38,24 @@ module id_stage (
     input  wire                         mem_ertn_flush,      // MEM阶段有ertn指令
     input  wire                         wb_csr_we,           // WB阶段写CSR使能
     input  wire [13:0]                  wb_csr_num,          // WB阶段写CSR号码
-    // 异常冲刷
-    input  wire                         wb_exc_valid,        // WB阶段存在异常冲刷流水线
     input  wire                         wb_ertn_flush,       // WB阶段有ertn指令则冲刷流水线
     // 与csr寄存器堆的读交互
     input  wire [ 1:0]                  csr_da_pg,           // csr CRMD_DA_PG 即当前映射模式
     input  wire [31:0]                  csr_rvalue,          // csr访问指令读的数据
     output wire [13:0]                  csr_id_num,          // csr寄存器号码(id阶段用于读)
     // 来自csr的中断判断
-    input  wire                         has_int
+    input  wire                         has_int,
+
+    // ── linectrl 接口 ──
+    input  wire                         ldata,              // 0=用旧寄存器, 1=用新寄存器
+    input  wire                         lvalid,             // 本拍可呈现数据
+    input  wire                         lpower,             // 本拍有权发请求
+    input  wire                         lready,             // 维持就绪
+    input  wire                         upd,                // 上级已准备且有权力 → 更新 data_n
+
+    output wire                         id_valid_o,         // → linectrl valid_i
+    output wire                         id_exc_o,           // → linectrl exc_i
+    output wire                         id_ertn_o           // → linectrl ertn_i
     `ifdef DIFFTEST_EN
     ,
     // difftest
@@ -61,9 +63,61 @@ module id_stage (
     `endif
 );
 
-    reg  id_valid;                                   // ID阶段有效标志
-    reg  [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus_r;      // 锁存的取值级数据
-    reg  id_rf_valid;                                // 重取指标志
+    wire id_valid;                                  // 本拍有效 = (ldata? valid_n : valid_o) & lvalid
+    wire id_exc_valid;                              // 异常有效
+    wire id_ertn_flush;                             // ertn 冲刷
+    reg  rf_valid;                                  // 计算下拍是否应该有重取指标记
+    wire id_rf_valid;                               // 重取指标记
+
+    // ========== 双寄存器结构 ==========
+    reg  [`IF_TO_ID_BUS_WD-1:0] data_n;            // 新数据寄存器（upd 时捕获）
+    reg                      valid_n;               // 新 valid
+    reg  [`IF_TO_ID_BUS_WD-1:0] data_o;             // 旧数据寄存器
+    reg                      valid_o;               // 旧 valid
+
+    // ========== 双寄存器逻辑 ==========
+
+    // ── data_n: upd 时从上游捕获 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_n  <= `IF_TO_ID_BUS_WD'd0;
+            valid_n <= 1'b0;
+        end
+        else if (upd) begin
+            data_n  <= if_to_id_bus;
+            valid_n <= if_to_id_valid;
+        end
+    end
+
+    // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_o  <= `IF_TO_ID_BUS_WD'd0;
+            valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata)  data_o  <= data_n;
+            valid_o <= (ldata ? valid_n : valid_o) & lvalid;
+        end
+    end
+
+    // ── ldata 选通 ──
+    wire [`IF_TO_ID_BUS_WD-1:0] current_bus;
+    assign current_bus = ldata ? data_n : data_o;
+    assign id_valid    = (ldata ? valid_n : valid_o) & lvalid;
+
+    // ── ready_go = work_done || !valid || lready ──
+    wire work_done;
+    assign id_ready_go = work_done || !id_valid || lready;
+
+    // ── → linectrl ──
+    assign id_valid_o = id_valid;
+    assign id_exc_o   = id_exc_valid;
+    assign id_ertn_o  = id_ertn_flush;
+
+    // ── → EX ──
+    assign id_to_ex_valid = id_valid;
+    assign id_to_ex_upd   = (id_ready_go && lpower) || !id_valid;
 
     // ========== 异常信号 ==========
     wire ipe;
@@ -73,7 +127,6 @@ module id_stage (
     wire ine;
     wire intr;
     wire [9:0] id_exc;
-    wire id_exc_valid;
 
     // ========== 指令字段分割 ==========
     wire [5:0] op_31_26;                 // 操作码[31:26]
@@ -275,6 +328,7 @@ module id_stage (
     wire csr_stall;                      // csr与ertn有关冒险
     wire int_csr_stall;                  // 中断与csr有关冒险
     wire inst_csr_stall;                 // csr指令有关冒险
+    wire calc_stall;                     // 乘除法计算结果未就绪停顿
 
     // ========== 指令字段生成 ==========
     assign op_31_26 = id_inst[31:26];
@@ -570,7 +624,7 @@ module id_stage (
         id_pred_is_ras,
         id_pred_btb_index,
         id_pred_ras_index
-    } = if_to_id_bus_r;
+    } = current_bus;
 
     // 当前指令是否是分支
     wire id_is_branch;
@@ -652,40 +706,35 @@ module id_stage (
         id_is_branch          // 1   是否为分支指令
     };  // 总计 413 + 80 = 493
 
-    assign id_ready_go    = !load_use_stall && !csr_stall || id_exc_valid || !id_valid || wb_exc_valid || wb_ertn_flush || ex_mispredict;
-    // wb发来冲刷脉冲就阻塞，正常情况下，有阻塞但是id如果是异常指令就不应该阻，异常指令最好快点到wb发冲刷信号
-    assign id_allowin     = id_ready_go && (ex_allowin || !id_valid) && if_ready_go;
-    assign id_to_ex_valid = id_valid;
+    assign work_done = id_exc_valid || (!load_use_stall && !csr_stall && !calc_stall);
+    
+    wire rf_ctrl = ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
+                            || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
+                            || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && !id_exc_valid && id_valid;
+    reg rf_r;
+    // 重取指信号生成
+    always @(posedge clk) begin
+        if (reset) begin
+            rf_valid <= 1'b0;
+        end
+        else if (rf_r & ldata) begin
+            rf_valid <= 1'b0;
+        end
+        else if (rf_ctrl) begin
+            rf_valid <= 1'b1;
+        end
 
-    // 译码级有效标志更新
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush || ex_mispredict) begin
-            id_valid <= 1'b0;
+        if (reset) begin
+            rf_r <= 1'b0;
         end
-        else if (id_allowin) begin
-            id_valid <= if_to_id_valid;
+        else if (ldata & rf_valid & id_valid) begin
+            rf_r <= 1'b1;
         end
-        else if (id_ready_go && ex_allowin) begin
-            id_valid <= 1'b0;
+        else if (ldata) begin
+            rf_r <= 1'b0;
         end
     end
-    // 译码级数据传递
-    always @(posedge clk) begin
-        if (id_allowin) begin
-            if_to_id_bus_r <= if_to_id_bus;
-        end
-    end
-        // 重取指信号生成
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush || ex_mispredict) begin
-            id_rf_valid <= 1'b0;
-        end
-        else if (id_valid && id_allowin) begin
-            id_rf_valid <= ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
-                                   || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                   || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && id_valid;
-        end
-    end
+    assign id_rf_valid = rf_valid && ldata && id_valid || rf_r;
     // ========== 冒险检测、前递处理、阻塞处理 ==========
     // 指令类型分类
     assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr |
@@ -721,6 +770,11 @@ module id_stage (
                             (((rj_wait && (rj == mem_to_id_dest)) ||
                               (rk_wait && (rk == mem_to_id_dest)) ||
                               (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
+
+    // EX 乘除法未完成 → 阻塞（依赖其结果的指令需等待）
+    assign calc_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
+                          (rk_wait && (rk == ex_to_id_dest)) ||
+                          (rd_wait && (rd == ex_to_id_dest))) && calc_not_ready);
 
     // csr与ertn冒险
     // 中断判断发生csr冒险(只有确定中断的时候才发生，不确定中断指令继续走就行)

@@ -23,6 +23,10 @@ module mem_stage (
     output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
     // cpu可接受数据
     output wire                         dcache_cpu_accept,     // MEM可接受 cache 读数据
+    // 来自 MMU
+    input  wire [ 4:0]                  ex_tlb_exc,            // MMU TLB 异常（合并到 mem_exc）
+    input  wire [31:0]                  padd,                  // MMU 物理地址（用于 difftest）
+    input  wire                         s1_need_mmu_r,         // s1_need_mmu 寄存一拍 → 本拍 TLB 结果有效
 
     // ── linectrl 接口 ──
     input  wire                         ldata,                 // 0=用旧寄存器, 1=用新寄存器
@@ -62,6 +66,10 @@ module mem_stage (
             data_n  <= pre_mem_to_mem_bus;
             valid_n <= pre_mem_to_mem_valid;
         end
+        else if (s1_need_mmu_r) begin
+            data_n[90:75] <= mem_exc_with_tlb;
+            data_n[306:275] <= padd;
+        end
     end
 
     // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
@@ -71,14 +79,14 @@ module mem_stage (
             valid_o <= 1'b0;
         end
         else begin
-            if (ldata)  data_o  <= data_n;
+            if (ldata)  data_o  <= current_bus;
             valid_o <= (ldata ? valid_n : valid_o) & lvalid;
         end
     end
 
     // ── ldata 选通 ──
     wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] current_bus;
-    assign current_bus = ldata ? data_n : data_o;
+    assign current_bus = ldata ? s1_need_mmu_r ? {data_n[`PRE_MEM_TO_MEM_BUS_WD-1:307], padd, data_n[274:91], mem_exc_with_tlb, data_n[74:0]} : data_n : data_o;
     assign mem_valid   = (ldata ? valid_n : valid_o) & lvalid;
 
     // ── ready_go = work_done || !valid || lready ──
@@ -93,7 +101,9 @@ module mem_stage (
     assign mem_to_wb_upd   = (mem_ready_go && lpower) || !mem_valid;
 
     // ========== 异常信号 ==========
-    wire [15:0] mem_exc;
+    wire [15:0] mem_exc_raw;
+    wire [15:0] mem_exc_with_tlb;        
+    wire [15:0] mem_exc;                  // 合并 MMU TLB 异常后的异常
     wire        mem_rf_valid;             // mem阶段重取指标志
 
     // ========== 控制信号解析 ==========
@@ -229,6 +239,10 @@ module mem_stage (
         final_result,        // 63:32   最终结果
         mem_pc               // 31:0    PC
     };
+
+    assign mem_exc_raw = data_n[90:75];  // 来自 PRE_MEM 总线的异常（不含 TLB)
+    assign mem_exc_with_tlb = {mem_exc_raw[15:14], mem_exc_raw[13] || ex_tlb_exc[4], mem_exc_raw[12],
+                             mem_exc_raw[11] || ex_tlb_exc[3], mem_exc_raw[10:3], ex_tlb_exc[2:0]};  // 合并 MMU TLB 异常后的异常
 
     // ========== 流水线控制 ==========
     assign work_done       = is_mem_inst && !mem_we && !mem_exc_valid ? load_data_latched : 1'b1;

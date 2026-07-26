@@ -29,11 +29,10 @@ module linectrl (
     output wire [6:0]  lready,        // 维持就绪（下游阻塞时）
 
     // ── 分支预测器更新许可 ──
-    output wire         bp_valid,      // 上拍 ex 准备且有效且其后无冲刷且下级空 → 本拍可更新分支预测器
+    output wire         bp_valid,      // 上拍 pre_mem 准备+有效+无冲刷+下级空 → 本拍可更新分支预测器
 
     // ── μTLB refill 抑制 ──
-    output wire         s0_flush,      // pre_if 之后有冲刷（含分支）→ 抑制 s0 μTLB refill
-    output wire         s1_flush       // pre_mem 之后有冲刷 → 抑制 s1 μTLB refill
+    output wire         s0_flush       // pre_if 之后有冲刷（含分支）→ 抑制 s0 μTLB refill
 );
 
     // ================================================================
@@ -112,7 +111,7 @@ module linectrl (
     assign ldata[3] = (r[2] & r[3] & empty[4]) | (r[2] & !v[3]);
     assign ldata[4] = (r[3] & r[4] & empty[5]) | (r[3] & !v[4]);
     assign ldata[5] = (r[4] & r[5] & empty[6]) | (r[4] & !v[5]);
-    assign ldata[6] = (r[5] & r[6])              | (r[5] & !v[6]);
+    assign ldata[6] = (r[5] & r[6])            | (r[5] & !v[6]);
 
     // ================================================================
     // fs: 后缀冲刷（2 级 LUT）
@@ -202,15 +201,12 @@ module linectrl (
 
     // ================================================================
     // s0_flush: pre_if(0) 之后有冲刷（含分支）→ 抑制 s0 μTLB refill
-    // s1_flush: pre_mem(4) 之后有冲刷 → 抑制 s1 μTLB refill
     // ================================================================
     assign s0_flush = fs[0] | mispred[3];
-    assign s1_flush = fs[4];
 
     // ================================================================
-    // bp_valid: 分支预测器更新许可
-    //   = 上拍 ex(3) 准备 && 有效 && 其后无冲刷 && 下级空
+    // bp_valid: 分支预测器更新许可（PRE_MEM 级，4=pre_mem）
     // ================================================================
-    assign bp_valid = r[3] && v[3] && ~fs[3] && empty[4];
+    assign bp_valid = r[4] && v[4] && ~fs[4] && empty[5];
 
 endmodule

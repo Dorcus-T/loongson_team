@@ -10,21 +10,16 @@ module if_stage (
     // 与 ICache 的接口
     output wire                     icache_cpu_req,      // ICache 请求有效
     output wire [`INDEX_WIDTH-1:0]  icache_cpu_index,    // ICache 组索引
-    output wire [`TAG_WIDTH-1:0]    icache_cpu_tag,      // ICache 标签
     output wire [`OFFSET_WIDTH-1:0] icache_cpu_offset,   // ICache 块内偏移
     input  wire                     icache_cpu_addr_ok,  // ICache 地址就绪
     input  wire                     icache_cpu_data_ok,  // ICache 数据就绪
     input  wire [31:0]              icache_cpu_rdata,    // ICache 读数据
     output wire                     icache_cpu_accept,   // IF 可接受 cache 数据
-    output wire                     icache_cpu_cached,   // IF 访问可缓存
     // 与MMU交互
     output wire [31:0]              if_to_mmu_vaddr,     // IF发MMU虚地址
-    input  wire [31:0]              padd,                // MMU返回物理地址
-    input  wire [ 2:0]              if_tlb_exc,          // MMU返回TLB异常
-    input  wire                     if_cached,           // MMU返回是否可缓存
-    input  wire                     s0_if_tlb_req,       // IF 取指需要查 TLB 页表
-    input  wire                     s0_utlb_hit,         // s0 μTLB 命中（跳过 tlb_wait）
-    output wire                     pre_if_can_req_pre,  // IF 取指请求有效（发mmu清miss状态）
+    output wire                     s0_need_mmu,         // IF 需要 MMU 翻译
+    input  wire [ 2:0]              if_tlb_exc,          // MMU TLB 异常（合并到 if_exc）
+    input  wire                     s0_need_mmu_r,       // s0_need_mmu 寄存一拍 → 本拍 TLB 结果有效
     // 异常冲刷
     input  wire                     exc_no_rf,           // WB阶段有异常则冲刷流水线
     input  wire                     wb_ertn_flush,       // WB阶段有ertn指令则冲刷流水线
@@ -67,6 +62,10 @@ module if_stage (
 
     wire pre_if_upd = (pre_if_ready_go && lpower[0]) || !pre_if_valid;
 
+    // TLB 异常合并：if_data_n[3:0] = {ADEF, 3'b0}，OR 上 if_tlb_exc
+    wire [3:0] if_exc_raw       = if_data_n[3:0];
+    wire [3:0] if_exc_with_tlb  = {if_exc_raw[3], if_tlb_exc};
+
     always @(posedge clk) begin
         if (reset) begin
             if_data_n  <= `IF_BUS_WD'd0;
@@ -76,6 +75,9 @@ module if_stage (
             if_data_n  <= {pre_if_current, pre_if_exc};
             if_valid_n <= pre_if_valid;
         end
+        else if (s0_need_mmu_r) begin
+            if_data_n[3:0] <= if_exc_with_tlb;
+        end
     end
 
     always @(posedge clk) begin
@@ -84,13 +86,14 @@ module if_stage (
             if_valid_old <= 1'b0;
         end
         else begin
-            if (ldata[1])  if_data_o  <= if_data_n;
+            if (ldata[1])  if_data_o  <= if_current;
             if_valid_old <= (ldata[1] ? if_valid_n : if_valid_old) & lvalid[1];
         end
     end
 
     wire [`IF_BUS_WD-1:0] if_current;
-    assign if_current = ldata[1] ? if_data_n : if_data_o;
+    assign if_current = ldata[1] ? (s0_need_mmu_r ? {if_data_n[`IF_BUS_WD-1:4], if_exc_with_tlb} : if_data_n)
+                                  : if_data_o;
 
     wire [31:0] if_pc_r;
     wire        if_pred_valid, if_pred_taken, if_pred_is_ras;
@@ -176,22 +179,15 @@ module if_stage (
         pred_ras_index_r
     } = pre_if_current;
 
-    // ========== 异常信号（pre_if 仿 PRE_MEM 模式） ==========
+    // ========== 异常信号（仅 ADEF，TLB 异常由 IF 级合并） ==========
     wire        pre_if_adef;
-    wire [ 3:0] pre_exc;          // 前期异常 {if_tlb_exc, adef}
-    wire        pre_exc_valid;
-    wire [ 3:0] pre_if_exc;       // 后期异常 = pre_exc + TLB exc(tlb_ready门控)
+    wire [ 3:0] pre_if_exc;
     wire        pre_if_exc_valid;
     wire        if_exc_valid;
-    wire        pre_if_tlb_return;
 
-    wire can_req_pre = pre_if_valid && !pre_exc_valid && lpower[0];
-    wire pre_if_can_req     = pre_if_valid && !pre_if_exc_valid && lpower[0];
+    assign s0_need_mmu = can_req;
 
-    wire need_tlb    = s0_if_tlb_req && can_req_pre;
-    wire tlb_ready   = !need_tlb || pre_if_tlb_return || s0_utlb_hit;
-
-    assign pre_if_tlb_return = !ldata[0];
+    wire can_req = pre_if_valid && !pre_if_adef && lpower[0] && !reset;
 
     // ========== 指令信息 ==========
     wire [31:0] if_inst;
@@ -225,9 +221,8 @@ module if_stage (
 
     // ========== 流水线控制 ==========
     wire cache_sent     = (icache_cpu_req && icache_cpu_addr_ok) || req_already;
-    wire pre_if_work_done = pre_if_exc_valid ? 1'b1 : tlb_ready && cache_sent;
+    wire pre_if_work_done = pre_if_exc_valid ? 1'b1 : cache_sent;
     assign pre_if_ready_go = pre_if_work_done || !pre_if_valid || lready[0];
-    assign pre_if_can_req_pre = can_req_pre;
 
     // ========== pre_if 下一拍 PC ==========
     wire [31:0] pre_if_pc_next;
@@ -289,22 +284,16 @@ module if_stage (
 
     // ========== ICache 输出信号 ==========
     assign if_to_mmu_vaddr = pre_if_pc_r;
-    assign icache_cpu_req   = pre_if_can_req && !req_already && tlb_ready;
+    assign icache_cpu_req   = can_req && !req_already;
     assign icache_cpu_index  = pre_if_pc_r[`OFFSET_WIDTH +: `INDEX_WIDTH];
-    assign icache_cpu_tag    = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];
     assign icache_cpu_offset = pre_if_pc_r[0 +: `OFFSET_WIDTH];
-    assign icache_cpu_cached = if_cached;
     assign icache_cpu_accept = if_ready_go && lpower[1] || inst_dirty != 3'b0;
     assign if_inst           = icache_cpu_rdata;
 
-    // ========== 检测异常 ==========
-    assign pre_if_adef  = pre_if_pc_r[1:0] != 2'b00 && pre_if_valid;
-    assign pre_exc      = {if_tlb_exc, pre_if_adef};
-    assign pre_exc_valid = |pre_exc && pre_if_valid;
-
-    wire [2:0] valid_tlb_exc = if_tlb_exc & {3{tlb_ready}};
-    assign pre_if_exc       = {pre_if_adef, valid_tlb_exc};    // {ADEF, PPF, PIF, PPI} → id_exc[8:5] → wb {adef, tlbr, pif, ppi}
-    assign pre_if_exc_valid = |pre_if_exc && pre_if_valid;
+    // ========== 检测异常（pre_if 仅 ADEF，TLB 异常在 IF 级合并） ==========
+    assign pre_if_adef     = pre_if_pc_r[1:0] != 2'b00 && pre_if_valid;
+    assign pre_if_exc      = {pre_if_adef, 3'b0};
+    assign pre_if_exc_valid = pre_if_adef && pre_if_valid;
 
     assign if_exc_valid = |if_exc_r && if_valid;
 endmodule

@@ -80,7 +80,6 @@ module core_top (
     wire [6:0] mispred_i;                             // 各级 → linectrl mispred
     wire       bp_valid;                              // linectrl → EX
     wire       s0_flush;                              // linectrl → MMU/IF
-    wire       s1_flush;                              // linectrl → MMU
 
     // 各级间 upd（上级 ready && lpower → 更新下级 data_n）
     wire pre_if_to_if_upd;                            // pre_if → IF
@@ -190,23 +189,22 @@ module core_top (
     wire [35:0] vtlb_enop;          // 发mmu tlbsrch，invtlb使能即操作数
     wire [ 1:0] ld_and_str;         // 发mmu load和store信号
     wire [ 2:0] tlbrwf_valid;       // tlbrd tlbwr tlbfill使能
-    wire [31:0] paddr_to_if;        // 发if实地址
-    wire [ 2:0] if_tlb_exc;         // 发if tlb相关异常
-    wire [ 1:0] if_mat;             // if 访存方式
-    wire        if_cached;          // if 访问可缓存
-    wire [31:0] paddr_to_pre_mem;   // 发pre_mem实地址
+    wire [`TAG_WIDTH-1:0] if_tag;        // MMU → ICache 物理 tag
+    wire [`TAG_WIDTH-1:0] ex_tag;        // MMU → DCache 物理 tag
+    wire [31:0] pre_mem_paddr;      // MMU → mem_stage 物理地址
+    wire        if_s0_need_mmu;      // if_stage → MMU
+    wire        pre_mem_s1_need_mmu; // pre_mem → MMU
+    wire        mmu_if_cached;      // MMU → ICache
+    wire        mmu_ex_cached;      // MMU → DCache
+    wire [2:0]  if_tlb_exc;         // MMU → if_stage
+    wire [ 4:0] pre_mem_tlb_exc;    // MMU → mem_stage
     wire [ 5:0] srch_value;         // 发pre_mem tlbsrch查询结果
-    wire [ 4:0] pre_mem_tlb_exc;    // 发pre_mem tlb相关异常
-    wire [ 1:0] pre_mem_mat;        // pre_mem 访存方式
-    wire        pre_mem_cached;     // pre_mem 访问可缓存
-    wire        s1_mem_tlb_req;        // pre_mem 访存需要查 TLB（发 pre_mem_stage）
-    wire        s1_utlb_hit;           // μTLB 命中（发 pre_mem_stage，跳过 tlb_wait）
-    wire        s0_if_tlb_req;         // IF 取指需要查 TLB（发 if_stage）
-    wire        s0_utlb_hit;           // s0 μTLB 命中（发 if_stage）
-    wire        pre_if_can_req_pre;            // IF 取指请求有效（发 mmu，清 s0 miss）
-    wire        need_mmu;           // pre_mem → mmu 本次需要用 MMU
-    wire [`TLBRD_BUS_WD-1:0] tlbrd_value;        // 发csr tlbrd使能和数据
-    wire [ 4:0]               tlbfill_rand_index; // TLBFILL 随机替换 index（for difftest）
+    wire        s0_cancel;           // MMU → ICache
+    wire        s1_cancel;           // MMU → DCache
+    wire        s0_need_mmu_r;       // MMU → if_stage
+    wire        s1_need_mmu_r;       // MMU → mem_stage
+    wire [`TLBRD_BUS_WD-1:0] tlbrd_value;
+    wire [ 4:0]               tlbfill_rand_index;
 
     // ========== 计数器数值 ==========
     wire [63:0] timer_value;        // 计数器输出
@@ -216,9 +214,7 @@ module core_top (
     // ================================================================
     wire        icache_cpu_req;
     wire [ 7:0] icache_cpu_index;
-    wire [19:0] icache_cpu_tag;
     wire [ 3:0] icache_cpu_offset;
-    wire        icache_cpu_cached;
     wire        icache_cpu_addr_ok;
     wire        icache_cpu_data_ok;
     wire [31:0] icache_cpu_rdata;
@@ -230,11 +226,9 @@ module core_top (
     wire        dcache_cpu_req;
     wire        dcache_cpu_op;
     wire [ 7:0] dcache_cpu_index;
-    wire [19:0] dcache_cpu_tag;
     wire [ 3:0] dcache_cpu_offset;
     wire [ 3:0] dcache_cpu_wstrb;
     wire [31:0] dcache_cpu_wdata;
-    wire        dcache_cpu_cached;
     wire        dcache_cpu_addr_ok;
     wire        dcache_cpu_data_ok;
     wire [31:0] dcache_cpu_rdata;
@@ -246,7 +240,6 @@ module core_top (
     wire [4:0]  cacop_code;
     wire        cacop_en_final;
     wire [31:0] cacop_va;
-    wire [`TAG_WIDTH-1:0] cacop_tag;
     wire [`WAY_NUM-1:0] cacop_way;
     wire        icache_cacop_en;
     wire        dcache_cacop_en;
@@ -265,8 +258,6 @@ module core_top (
     wire        icache_return_valid;
     wire        icache_return_last;
     wire [31:0] icache_return_data;
-    wire        icache_bus_accept;
-
     // ================================================================
     // DCache — AXI 侧连线
     // ================================================================
@@ -284,7 +275,6 @@ module core_top (
     wire [127:0] dcache_wr_data;
     wire        dcache_wr_rdy;
     wire        dcache_wr_done;
-    wire        dcache_bus_accept;
 
     `ifdef DIFFTEST_EN
     // ================================================================
@@ -405,8 +395,7 @@ module core_top (
         .ldata        (ldata),
         .lready       (lready),
         .bp_valid     (bp_valid),
-        .s0_flush     (s0_flush),
-        .s1_flush     (s1_flush)
+        .s0_flush     (s0_flush)
     );
 
     // ========== 异常/ertn 直连 ID（csr_stall 使用） ==========
@@ -428,20 +417,15 @@ module core_top (
         .if_to_id_upd       (if_to_id_upd),
         .icache_cpu_req     (icache_cpu_req),
         .icache_cpu_index   (icache_cpu_index),
-        .icache_cpu_tag     (icache_cpu_tag),
         .icache_cpu_offset  (icache_cpu_offset),
-        .icache_cpu_cached  (icache_cpu_cached),
         .icache_cpu_addr_ok (icache_cpu_addr_ok),
         .icache_cpu_data_ok (icache_cpu_data_ok),
         .icache_cpu_rdata   (icache_cpu_rdata),
         .icache_cpu_accept  (icache_cpu_accept),
         .if_to_mmu_vaddr    (if_to_mmu_vaddr),
-        .padd               (paddr_to_if),
+        .s0_need_mmu         (if_s0_need_mmu),
         .if_tlb_exc         (if_tlb_exc),
-        .if_cached          (if_cached),
-        .s0_if_tlb_req      (s0_if_tlb_req),
-        .s0_utlb_hit        (s0_utlb_hit),
-        .pre_if_can_req_pre (pre_if_can_req_pre),
+        .s0_need_mmu_r       (s0_need_mmu_r),
         .exc_no_rf          (exc_not_rf),
         .wb_ertn_flush      (wb_ertn_flush),
         .exc_entry          (exc_entry),
@@ -540,8 +524,6 @@ module core_top (
         .ex_csr_we          (ex_csr_we),
         .ex_csr_num         (ex_csr_num),
         .timer_value        (timer_value),
-        .bp_update_en       (bp_update_en),
-        .bp_bus             (bp_bus),
         .ex_mispredict      (ex_mispredict),
         .ex_corr_target     (ex_corr_target),
         .calc_not_ready     (calc_not_ready),
@@ -555,8 +537,7 @@ module core_top (
         .ex_valid_o         (valid_i[3]),
         .ex_exc_o           (exc_i[3]),
         .ex_ertn_o          (ertn_i[3]),
-        .ex_mispred_o       (mispred_i[3]),
-        .bp_valid           (bp_valid)
+        .ex_mispred_o       (mispred_i[3])
     );
 
     // ================================================================
@@ -575,25 +556,17 @@ module core_top (
         .dcache_cpu_req      (dcache_cpu_req),
         .dcache_cpu_op       (dcache_cpu_op),
         .dcache_cpu_index    (dcache_cpu_index),
-        .dcache_cpu_tag      (dcache_cpu_tag),
         .dcache_cpu_offset   (dcache_cpu_offset),
         .dcache_cpu_wstrb    (dcache_cpu_wstrb),
         .dcache_cpu_wdata    (dcache_cpu_wdata),
-        .dcache_cpu_cached   (dcache_cpu_cached),
         .dcache_cpu_addr_ok  (dcache_cpu_addr_ok),
         .vtlb_enop           (vtlb_enop),
         .ld_and_str          (ld_and_str),
-        .padd                (paddr_to_pre_mem),
         .srch_value          (srch_value),
-        .mem_tlb_exc         (pre_mem_tlb_exc),
-        .pre_cached          (pre_mem_cached),
-        .s1_mem_tlb_req      (s1_mem_tlb_req),
-        .s1_utlb_hit         (s1_utlb_hit),
-        .need_mmu            (need_mmu),
+        .s1_need_mmu          (pre_mem_s1_need_mmu),
         .cacop_code          (cacop_code),
         .cacop_en_final      (cacop_en_final),
         .cacop_va            (cacop_va),
-        .cacop_tag           (cacop_tag),
         .icache_cacop_rdy    (icache_cacop_rdy),
         .dcache_cacop_rdy    (dcache_cacop_rdy),
         .pre_mem_csr_we      (pre_mem_csr_we),
@@ -608,7 +581,10 @@ module core_top (
         .upd                 (ex_to_pre_mem_upd),
         .pre_mem_valid_o     (valid_i[4]),
         .pre_mem_exc_o       (exc_i[4]),
-        .pre_mem_ertn_o      (ertn_i[4])
+        .pre_mem_ertn_o      (ertn_i[4]),
+        .bp_update_en        (bp_update_en),
+        .bp_bus              (bp_bus),
+        .bp_valid            (bp_valid)
     );
 
     // ================================================================
@@ -631,6 +607,9 @@ module core_top (
         .mem_csr_we          (mem_csr_we),
         .mem_csr_num         (mem_csr_num),
         .dcache_cpu_accept   (dcache_cpu_accept),
+        .ex_tlb_exc          (pre_mem_tlb_exc),
+        .padd                (pre_mem_paddr),
+        .s1_need_mmu_r        (s1_need_mmu_r),
         .ldata               (ldata[5]),
         .lvalid              (lvalid[5]),
         .lpower              (lpower[5]),
@@ -750,18 +729,18 @@ module core_top (
         .clk                (clk),
         .reset              (reset),
         .vaddr_from_if      (if_to_mmu_vaddr),
-        .paddr_to_if        (paddr_to_if),
+        .if_tag             (if_tag),
         .if_tlb_exc         (if_tlb_exc),
-        .if_mat             (if_mat),
-        .if_cached          (if_cached),
+        .if_cached          (mmu_if_cached),
+        .paddr_to_if        (),
         .vaddr_from_ex      (pre_mem_to_mmu_vaddr),
         .vtlb_enop          (vtlb_enop),
         .ld_and_str         (ld_and_str),
-        .paddr_to_ex        (paddr_to_pre_mem),
-        .srch_value         (srch_value),
+        .ex_tag             (ex_tag),
         .ex_tlb_exc         (pre_mem_tlb_exc),
-        .ex_mat             (pre_mem_mat),
-        .ex_cached          (pre_mem_cached),
+        .ex_cached          (mmu_ex_cached),
+        .paddr_to_ex        (pre_mem_paddr),
+        .srch_value         (srch_value),
         .tlbrwf_en          (tlbrwf_valid),
         .plv_in             (plv_out),
         .ecode_in           (ecode_out),
@@ -772,14 +751,12 @@ module core_top (
         .tlbcsr             (tlbcsr_bus),
         .tlbrd_value        (tlbrd_value),
         .tlbfill_rand_index (tlbfill_rand_index),
-        .s1_mem_tlb_req     (s1_mem_tlb_req),
-        .s1_utlb_hit        (s1_utlb_hit),
-        .s0_if_tlb_req      (s0_if_tlb_req),
-        .s0_utlb_hit        (s0_utlb_hit),
-        .need_mmu           (need_mmu),
-        .pre_if_can_req_pre (pre_if_can_req_pre),
-        .s0_flush           (s0_flush),
-        .s1_flush           (s1_flush)
+        .s0_cancel          (s0_cancel),
+        .s1_cancel          (s1_cancel),
+        .s0_need_mmu_r      (s0_need_mmu_r),
+        .s1_need_mmu_r      (s1_need_mmu_r),
+        .s0_need_mmu        (if_s0_need_mmu),
+        .s1_need_mmu        (pre_mem_s1_need_mmu)
     );
 
     // ================================================================
@@ -817,76 +794,76 @@ module core_top (
     // ICache
     // ================================================================
     icache u_icache (
-        .clk          (clk),
-        .resetn       (~reset),
+        .clk           (clk),
+        .resetn        (~reset),
         // CPU 接口
-        .cpu_req      (icache_cpu_req),
-        .cpu_index    (icache_cpu_index),
-        .cpu_tag      (icache_cpu_tag),
-        .cpu_offset   (icache_cpu_offset),
-        .cpu_cached   (icache_cpu_cached),
-        .cpu_addr_ok  (icache_cpu_addr_ok),
-        .cpu_data_ok  (icache_cpu_data_ok),
-        .cpu_rdata    (icache_cpu_rdata),
-        .cpu_accept   (icache_cpu_accept),
+        .cpu_req       (icache_cpu_req),
+        .cpu_index     (icache_cpu_index),
+        .mmu_tag       (if_tag),
+        .cpu_offset    (icache_cpu_offset),
+        .mmu_cache     (mmu_if_cached),
+        .mmu_cancel    (s0_cancel),
+        .cpu_addr_ok   (icache_cpu_addr_ok),
+        .cpu_data_ok   (icache_cpu_data_ok),
+        .cpu_rdata     (icache_cpu_rdata),
+        .cpu_accept    (icache_cpu_accept),
         // CACOP
-        .cacop_en     (icache_cacop_en),
-        .cacop_code   (cacop_code),
-        .cacop_va     (cacop_va),
-        .cacop_tag    (cacop_tag),
-        .cacop_rdy    (icache_cacop_rdy),
+        .cacop_en      (icache_cacop_en),
+        .cacop_code    (cacop_code),
+        .cacop_va      (cacop_va),
+        .mmu_cacop_tag (if_tag),
+        .cacop_rdy     (icache_cacop_rdy),
         // AXI 接口
-        .rd_req       (icache_rd_req),
-        .rd_type      (icache_rd_type),
-        .rd_addr      (icache_rd_addr),
-        .rd_rdy       (icache_rd_rdy),
-        .return_valid (icache_return_valid),
-        .return_last  (icache_return_last),
-        .return_data  (icache_return_data),
-        .bus_accept   (icache_bus_accept)
+        .rd_req        (icache_rd_req),
+        .rd_type       (icache_rd_type),
+        .rd_addr       (icache_rd_addr),
+        .rd_rdy        (icache_rd_rdy),
+        .return_valid  (icache_return_valid),
+        .return_last   (icache_return_last),
+        .return_data   (icache_return_data)
     );
 
     // ================================================================
     // DCache
     // ================================================================
     dcache u_dcache (
-        .clk          (clk),
-        .resetn       (~reset),
+        .clk           (clk),
+        .resetn        (~reset),
         // CPU 接口
-        .cpu_req      (dcache_cpu_req),
-        .cpu_op       (dcache_cpu_op),
-        .cpu_index    (dcache_cpu_index),
-        .cpu_tag      (dcache_cpu_tag),
-        .cpu_offset   (dcache_cpu_offset),
-        .cpu_wstrb    (dcache_cpu_wstrb),
-        .cpu_wdata    (dcache_cpu_wdata),
-        .cpu_cached   (dcache_cpu_cached),
-        .cpu_addr_ok  (dcache_cpu_addr_ok),
-        .cpu_data_ok  (dcache_cpu_data_ok),
-        .cpu_rdata    (dcache_cpu_rdata),
-        .cpu_accept   (dcache_cpu_accept),
+        .cpu_req       (dcache_cpu_req),
+        .cpu_op        (dcache_cpu_op),
+        .cpu_index     (dcache_cpu_index),
+        .mmu_tag       (ex_tag),
+        .cpu_offset    (dcache_cpu_offset),
+        .cpu_wstrb     (dcache_cpu_wstrb),
+        .cpu_wdata     (dcache_cpu_wdata),
+        .mmu_cache     (mmu_ex_cached),
+        .mmu_cancel    (s1_cancel),
+        .cpu_addr_ok   (dcache_cpu_addr_ok),
+        .cpu_data_ok   (dcache_cpu_data_ok),
+        .cpu_rdata     (dcache_cpu_rdata),
+        .cpu_accept    (dcache_cpu_accept),
         // CACOP
-        .cacop_en     (dcache_cacop_en),
-        .cacop_code   (cacop_code),
-        .cacop_va     (cacop_va),
-        .cacop_tag    (cacop_tag),
-        .cacop_rdy    (dcache_cacop_rdy),
+        .cacop_en      (dcache_cacop_en),
+        .cacop_code    (cacop_code),
+        .cacop_va      (cacop_va),
+        .mmu_cacop_tag (ex_tag),
+        .cacop_rdy     (dcache_cacop_rdy),
         // AXI 接口
-        .rd_req       (dcache_rd_req),
-        .rd_type      (dcache_rd_type),
-        .rd_addr      (dcache_rd_addr),
-        .rd_rdy       (dcache_rd_rdy),
-        .return_valid (dcache_return_valid),
-        .return_last  (dcache_return_last),
-        .return_data  (dcache_return_data),
-        .wr_req       (dcache_wr_req),
-        .wr_type      (dcache_wr_type),
-        .wr_addr      (dcache_wr_addr),
-        .wr_wstrb     (dcache_wr_wstrb),
-        .wr_data      (dcache_wr_data),
-        .wr_rdy       (dcache_wr_rdy),
-        .wr_done      (dcache_wr_done),
-        .bus_accept   (dcache_bus_accept)
+        .rd_req        (dcache_rd_req),
+        .rd_type       (dcache_rd_type),
+        .rd_addr       (dcache_rd_addr),
+        .rd_rdy        (dcache_rd_rdy),
+        .return_valid  (dcache_return_valid),
+        .return_last   (dcache_return_last),
+        .return_data   (dcache_return_data),
+        .wr_req        (dcache_wr_req),
+        .wr_type       (dcache_wr_type),
+        .wr_addr       (dcache_wr_addr),
+        .wr_wstrb      (dcache_wr_wstrb),
+        .wr_data       (dcache_wr_data),
+        .wr_rdy        (dcache_wr_rdy),
+        .wr_done       (dcache_wr_done)
     );
 
     // ================================================================
@@ -903,7 +880,7 @@ module core_top (
         .icache_return_valid  (icache_return_valid),
         .icache_return_last   (icache_return_last),
         .icache_return_data   (icache_return_data),
-        .icache_accept        (icache_bus_accept),
+        .icache_accept        (1'b1),
         .icache_wr_req        (1'b0),
         .icache_wr_type       (3'b0),
         .icache_wr_addr       (32'b0),
@@ -918,7 +895,7 @@ module core_top (
         .dcache_return_valid  (dcache_return_valid),
         .dcache_return_last   (dcache_return_last),
         .dcache_return_data   (dcache_return_data),
-        .dcache_accept        (dcache_bus_accept),
+        .dcache_accept        (1'b1),
         .dcache_wr_req        (dcache_wr_req),
         .dcache_wr_type       (dcache_wr_type),
         .dcache_wr_addr       (dcache_wr_addr),

@@ -21,9 +21,6 @@ module exe_stage (
     output wire [13:0]              ex_csr_num,         // ex阶段写csr的号码
     // 读取计数器
     input  wire [63:0]              timer_value,        // 计数器数值
-    // 预测器更新接口（输出 → branch_predict，由 EX 统一驱动）
-    output wire                     bp_update_en,
-    output wire [`BP_BUS_WD-1:0]    bp_bus,            // 更新数据总线（branch_predict 解码）
     // 误预测输出
     output wire                     ex_mispredict,
     output wire [31:0]              ex_corr_target,
@@ -42,9 +39,6 @@ module exe_stage (
     output wire                     ex_exc_o,           // → linectrl exc_i
     output wire                     ex_ertn_o,          // → linectrl ertn_i
     output wire                     ex_mispred_o,       // → linectrl mispred_i
-
-    // ── 分支预测器更新许可 ──
-    input  wire                     bp_valid,           // 上拍 ex 准备+有效+无冲刷+下级空 → 本拍可更新
 
     // ── → ID：mul/div 未完成 ──
     output wire                     calc_not_ready      // ex 有效且为乘除且结果未就绪
@@ -317,10 +311,7 @@ module exe_stage (
     assign pred_event    = pred_comb;
     assign mispred_event = mispred_comb;
 
-    // ========== 分支预测器更新总线（寄存一拍，bp_valid 门控使能） ==========
     wire [`BP_BUS_WD-1:0] bp_bus_next;
-    reg  [`BP_BUS_WD-1:0] bp_bus_r;
-    reg                    bp_en_r;
 
     assign bp_bus_next = {
         bp_pc,          // 103:74
@@ -335,24 +326,6 @@ module exe_stage (
         bp_del          // 2
     };
 
-    always @(posedge clk) begin
-        if (reset) begin
-            bp_bus_r <= `BP_BUS_WD'd0;
-            bp_en_r  <= 1'b0;
-        end
-        else if (bp_en_comb) begin
-            bp_bus_r <= bp_bus_next;
-            bp_en_r  <= bp_en_comb;
-        end
-        else if (ldata) begin
-            bp_bus_r <= `BP_BUS_WD'd0;
-            bp_en_r  <= 1'b0;
-        end
-    end
-
-    assign bp_update_en = bp_en_r && bp_valid;
-    assign bp_bus       = bp_bus_r;
-
     `ifdef DIFFTEST_EN
     wire [31:0] diff_vaddr;         // load/store虚地址 for difftest
     wire [31:0] diff_st_data;       // store数据 for difftest
@@ -361,10 +334,11 @@ module exe_stage (
     `endif
 
     // ========== 输出到PRE_MEM阶段的总线 ==========
-    // 比 EX→MEM 多 6 bit（cacop_code + cacop_en）；PRE_MEM 负责 TLB 异常合并 + CSR 字段最终化
     assign ex_to_pre_mem_bus = {
-        cacop_code,            // 489:485 cache操作类型（PRE_MEM 消费）
-        cacop_en,              // 484     cache操作使能（PRE_MEM 消费）
+        bp_en_comb,            // 627     分支预测更新使能（PRE_MEM 消费）
+        bp_bus_next,           // 626:525 分支预测更新数据（PRE_MEM 消费）
+        cacop_code,            // 524:520 cache操作类型（PRE_MEM 消费）
+        cacop_en,              // 519     cache操作使能（PRE_MEM 消费）
         rj_value,              // 521:490 源操作数1（PRE_MEM 用于 vtlb_enop ASID）
         rkd_value,             // 490:459 源操作数2（PRE_MEM 用于 dcache_wdata / vtlb_enop VPPN）
         ex_load_op,            // 458     加载指令标志（PRE_MEM 用于 ALE 检测 / ld_and_str）

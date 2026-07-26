@@ -10,7 +10,7 @@ module icache (
     input  wire [`INDEX_WIDTH-1:0]  cpu_index,
     input  wire [ `TAG_WIDTH-1:0]   mmu_tag,
     input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
-    input  wire                    cpu_cached,
+    input  wire                    mmu_cache,
     input  wire                    mmu_cancel,       // MMU 取消（第1拍有效，与 tag 同步到达）
     output wire                    cpu_addr_ok,
     output wire                    cpu_data_ok,
@@ -30,7 +30,7 @@ module icache (
     input  wire                    cacop_en,
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
-    input  wire [`TAG_WIDTH-1:0]   cacop_tag,
+    input  wire [`TAG_WIDTH-1:0]   mmu_cacop_tag,
     output wire                    cacop_rdy
 );
 
@@ -161,9 +161,9 @@ module icache (
     assign prefetch_match_after_shake = main_refill && refill_is_prefetch
                                       && (refill_index == cpu_index)
                                       && (refill_tag   == mmu_tag)
-                                      && !cacop_en && cpu_req && cpu_cached;
+                                      && !cacop_en && cpu_req && mmu_cache;
     assign prefetch_can_cancel = (main_lookup || main_waitrd) && req_is_prefetch
-                               && ((cpu_req && cpu_cached) || cacop_en);
+                               && ((cpu_req && mmu_cache) || cacop_en);
 
     // ============================================================
     // accept_new_req
@@ -180,7 +180,7 @@ module icache (
                                && !cacop_en_r
                                && !cacop_en
                                && cpu_req
-                               && cpu_cached;
+                               && mmu_cache;
 
     wire accept_new_req;
     assign accept_new_req = (idle_accept && accept_ok)
@@ -295,8 +295,8 @@ module icache (
     // ============================================================
     wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? cacop_tag : mmu_tag;
-    assign lookup_cached = cacop_en_r ? 1'b1 : cpu_cached;
+    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
+    assign lookup_cached = cacop_en_r ? 1'b1 : mmu_cache;
 
     // ============================================================
     // Tag 比较与命中判断
@@ -443,7 +443,7 @@ module icache (
             refill_index        <= req_index;
             refill_tag          <= mmu_tag;
             refill_offset       <= req_offset;
-            refill_cached       <= cpu_cached;
+            refill_cached       <= mmu_cache;
             refill_is_prefetch  <= req_is_prefetch;
             refill_was_cacop    <= cacop_en_r;
             refill_replace_way  <= victim_way;
@@ -690,7 +690,7 @@ module icache (
     wire [`TAG_WIDTH-1:0]  rd_addr_tag;
     wire                   rd_addr_cached;
     assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? cpu_cached : refill_cached;
+    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache : refill_cached;
 
     assign rd_type = rd_addr_cached ? 3'b100 : 3'b010;
     assign rd_addr = rd_addr_cached
@@ -714,7 +714,7 @@ module icache (
         else begin
             if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && cpu_cached && !cacop_en_r) begin
+            if (main_lookup && mmu_cache && !cacop_en_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_inst_hit) begin
                     perf_miss_cnt      <= perf_miss_cnt      + 32'd1;

@@ -13,7 +13,7 @@ module dcache (
     input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
     input  wire [ 3:0]             cpu_wstrb,
     input  wire [31:0]             cpu_wdata,
-    input  wire                    cpu_cached,
+    input  wire                    mmu_cache,
     input  wire                    mmu_cancel,       // MMU 取消（第1拍有效，与 tag 同步到达）
     output wire                    cpu_addr_ok,
     output wire                    cpu_data_ok,
@@ -40,7 +40,7 @@ module dcache (
     input  wire                    cacop_en,
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
-    input  wire [`TAG_WIDTH-1:0]   cacop_tag,
+    input  wire [`TAG_WIDTH-1:0]   mmu_cacop_tag,
     output wire                    cacop_rdy
 );
 
@@ -282,8 +282,8 @@ module dcache (
     // ============================================================
     wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? cacop_tag : mmu_tag;
-    assign lookup_cached = cacop_en_r ? 1'b1 : cpu_cached;
+    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
+    assign lookup_cached = cacop_en_r ? 1'b1 : mmu_cache;
 
     // ============================================================
     // Tag 比较与命中判断
@@ -375,7 +375,7 @@ module dcache (
     endgenerate
 
     wire vc_hit;
-    assign vc_hit = (|vc_match) && cpu_cached && !cacop_en_r && VC_EN;
+    assign vc_hit = (|vc_match) && mmu_cache && !cacop_en_r && VC_EN;
 
     reg  [VC_IDX_W-1:0] vc_hit_idx;
     integer vhi;
@@ -423,13 +423,13 @@ module dcache (
     assign lookup_store_hit = main_lookup && cache_hit && req_d;
 
     wire is_uncached_store;
-    assign is_uncached_store = !cpu_cached && req_d && !cacop_en_r;
+    assign is_uncached_store = !mmu_cache && req_d && !cacop_en_r;
 
     wire refill_is_uncached_store;
     assign refill_is_uncached_store = !refill_cached && refill_d && !refill_cacop;
 
     wire need_bus_rd;
-    assign need_bus_rd = (cpu_cached || !req_d) && !cacop_en_r;
+    assign need_bus_rd = (mmu_cache || !req_d) && !cacop_en_r;
 
     // ============================================================
     // 主状态机 — 时序
@@ -643,7 +643,7 @@ module dcache (
                 refill_index       <= req_index;
                 refill_tag         <= mmu_tag;
                 refill_offset      <= req_offset;
-                refill_cached      <= cpu_cached;
+                refill_cached      <= mmu_cache;
                 refill_d          <= req_d;
                 refill_wdata       <= req_wdata;
                 refill_wstrb_mask  <= req_wstrb_mask;
@@ -1070,7 +1070,7 @@ module dcache (
     wire [`TAG_WIDTH-1:0]  rd_addr_tag;
     wire                   rd_addr_cached;
     assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? cpu_cached : refill_cached;
+    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache : refill_cached;
 
     assign rd_type = rd_addr_cached ? 3'b100 : uncached_rd_type;
     assign rd_addr = rd_addr_cached
@@ -1103,7 +1103,7 @@ module dcache (
     wire miss_needs_write;
     assign miss_needs_write = !mmu_cancel && (
         cacop_en_r ? (cacop_wb && cacop_dirty)
-                   : ((cpu_cached && victim_dirty) || is_uncached_store)
+                   : ((mmu_cache && victim_dirty) || is_uncached_store)
     );
 
     // ============================================================
@@ -1132,7 +1132,7 @@ module dcache (
     assign wr_req = lookup_wr_req || (refill_needs_write && !refill_wr_handshaked);
 
     wire lookup_wr_is_burst;
-    assign lookup_wr_is_burst = cpu_cached || cacop_en_r;
+    assign lookup_wr_is_burst = mmu_cache || cacop_en_r;
 
     wire is_burst_wr;
     assign is_burst_wr = !refill_is_uncached_store;
@@ -1171,7 +1171,7 @@ module dcache (
     // 仿真断言
     // ============================================================
     always @(posedge clk) begin
-        if (resetn && main_lookup && cpu_cached && !cacop_en_r) begin
+        if (resetn && main_lookup && mmu_cache && !cacop_en_r) begin
             if (cache_hit && (|vc_match))
                 $display("[%m] ASSERT FAIL: line in both L1 and VC, tag=%h index=%h",
                          mmu_tag, req_index);
@@ -1205,7 +1205,7 @@ module dcache (
         else begin
             if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && cpu_cached && !cacop_en_r) begin
+            if (main_lookup && mmu_cache && !cacop_en_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_hit)
                     perf_miss_cnt <= perf_miss_cnt + 32'd1;

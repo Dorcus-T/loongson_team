@@ -202,7 +202,6 @@ module mycpu_top (
     wire        icache_return_valid;
     wire        icache_return_last;
     wire [31:0] icache_return_data;
-    wire        icache_bus_accept;
 
     // ================================================================
     // DCache — AXI 侧连线
@@ -221,7 +220,6 @@ module mycpu_top (
     wire [127:0] dcache_wr_data;
     wire        dcache_wr_rdy;
     wire        dcache_wr_done;
-    wire        dcache_bus_accept;
 
     // ================================================================
     // 第一阶段：取指阶段 (IF - Instruction Fetch)
@@ -500,8 +498,7 @@ module mycpu_top (
         .rd_rdy       (icache_rd_rdy),
         .return_valid (icache_return_valid),
         .return_last  (icache_return_last),
-        .return_data  (icache_return_data),
-        .bus_accept   (icache_bus_accept)
+        .return_data  (icache_return_data)
     );
 
     // ================================================================
@@ -543,8 +540,7 @@ module mycpu_top (
         .wr_wstrb     (dcache_wr_wstrb),
         .wr_data      (dcache_wr_data),
         .wr_rdy       (dcache_wr_rdy),
-        .wr_done      (dcache_wr_done),
-        .bus_accept   (dcache_bus_accept)
+        .wr_done      (dcache_wr_done)
     );
 
     // ================================================================
@@ -561,7 +557,6 @@ module mycpu_top (
         .icache_return_valid  (icache_return_valid),
         .icache_return_last   (icache_return_last),
         .icache_return_data   (icache_return_data),
-        .icache_accept        (icache_bus_accept),
         .icache_wr_req        (1'b0),
         .icache_wr_type       (3'b0),
         .icache_wr_addr       (32'b0),
@@ -576,7 +571,6 @@ module mycpu_top (
         .dcache_return_valid  (dcache_return_valid),
         .dcache_return_last   (dcache_return_last),
         .dcache_return_data   (dcache_return_data),
-        .dcache_accept        (dcache_bus_accept),
         .dcache_wr_req        (dcache_wr_req),
         .dcache_wr_type       (dcache_wr_type),
         .dcache_wr_addr       (dcache_wr_addr),

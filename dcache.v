@@ -35,7 +35,6 @@ module dcache (
     output wire [127:0]         wr_data,
     input  wire                 wr_rdy,
     input  wire                 wr_done,
-    output wire                 bus_accept,
 
     // CACOP 接口
     input  wire                    cacop_en,
@@ -1011,7 +1010,6 @@ module dcache (
 
     assign cpu_addr_ok = accept_new_req && !cacop_en;
     assign cacop_rdy   = accept_new_req && cacop_en;
-    assign bus_accept  = 1'b1;
     assign cpu_data_ok = read_result_ready || !cpu_fifo_empty || write_done;
     assign cpu_rdata   = cpu_fifo_empty ? live_rdata : cpu_fifo_mem[cpu_fifo_rptr];
 

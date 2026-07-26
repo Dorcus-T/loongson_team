@@ -11,7 +11,6 @@ module cache_axi_bridge (
     output wire         icache_return_valid,
     output wire         icache_return_last,
     output wire [31:0]  icache_return_data,
-    input  wire         icache_accept,
     input  wire         icache_wr_req,
     input  wire [ 2:0]  icache_wr_type,
     input  wire [31:0]  icache_wr_addr,
@@ -27,7 +26,6 @@ module cache_axi_bridge (
     output wire         dcache_return_valid,
     output wire         dcache_return_last,
     output wire [31:0]  dcache_return_data,
-    input  wire         dcache_accept,
     input  wire         dcache_wr_req,
     input  wire [ 2:0]  dcache_wr_type,
     input  wire [31:0]  dcache_wr_addr,
@@ -133,10 +131,9 @@ module cache_axi_bridge (
     assign dcache_conflict = addr_conflict(dcache_rd_addr, dcache_rd_bytes);
 
     // DCache 读优先级高于 ICache（load 比取指更紧急）
-    // FIFO 满时拒绝接受新读请求，防溢出
-    assign dcache_rd_rdy = (ar_state == AR_IDLE) && !dcache_fifo_full;
+    assign dcache_rd_rdy = (ar_state == AR_IDLE);
     assign icache_rd_rdy = (ar_state == AR_IDLE) && !icache_conflict
-                          && !(dcache_rd_req && !dcache_conflict) && !icache_fifo_full;
+                          && !(dcache_rd_req && !dcache_conflict);
 
     // ---------- 状态机 ----------
     localparam AR_IDLE = 2'd0;
@@ -213,116 +210,20 @@ module cache_axi_bridge (
     end
 
     // ================================================================
-    // 读响应处理 — ICache/DCache FIFO、rready、return 输出
+    // 读响应处理 — 直通，按 rid 分发
     // ================================================================
 
-    // ---------- ICache 读响应 FIFO ----------
-    reg  [32:0] icache_fifo_mem [0:3];
-    reg  [ 1:0] icache_fifo_wptr;
-    reg  [ 1:0] icache_fifo_rptr;
-    reg  [ 2:0] icache_fifo_cnt;
+    // ---------- 读响应直通 ----------
+    assign rready = 1'b1;
 
-    wire icache_fifo_full;
-    wire icache_fifo_empty;
-    wire icache_fifo_we;
-    wire icache_fifo_re;
-    assign icache_fifo_full  = (icache_fifo_cnt == 3'd4);
-    assign icache_fifo_empty = (icache_fifo_cnt == 3'd0);
-    assign icache_fifo_we    = rvalid && rready && (rid == 4'd0) && !icache_accept;
-    assign icache_fifo_re    = icache_accept && !icache_fifo_empty;
+    assign icache_return_valid = rvalid && (rid == 4'd0);
+    assign icache_return_data  = rdata;
+    assign icache_return_last  = rlast;
+    assign icache_wr_rdy = 1'b0;
 
-    integer ii;
-    always @(posedge clk) begin
-        if (reset) begin
-            icache_fifo_wptr <= 2'd0;
-            icache_fifo_rptr <= 2'd0;
-            icache_fifo_cnt  <= 3'd0;
-            for (ii = 0; ii < 4; ii = ii + 1)
-                icache_fifo_mem[ii] <= 33'b0;
-        end
-        else begin
-            case ({icache_fifo_we, icache_fifo_re})
-                2'b10: begin
-                    icache_fifo_mem[icache_fifo_wptr] <= {rlast, rdata};
-                    icache_fifo_wptr <= icache_fifo_wptr + 2'd1;
-                    icache_fifo_cnt  <= icache_fifo_cnt  + 3'd1;
-                end
-                2'b01: begin
-                    icache_fifo_rptr <= icache_fifo_rptr + 2'd1;
-                    icache_fifo_cnt  <= icache_fifo_cnt  - 3'd1;
-                end
-                2'b11: begin
-                    icache_fifo_mem[icache_fifo_wptr] <= {rlast, rdata};
-                    icache_fifo_wptr <= icache_fifo_wptr + 2'd1;
-                    icache_fifo_rptr <= icache_fifo_rptr + 2'd1;
-                end
-                default: ;
-            endcase
-        end
-    end
-
-    // ---------- DCache 读响应 FIFO ----------
-    reg  [32:0] dcache_fifo_mem [0:3];
-    reg  [ 1:0] dcache_fifo_wptr;
-    reg  [ 1:0] dcache_fifo_rptr;
-    reg  [ 2:0] dcache_fifo_cnt;
-
-    wire dcache_fifo_full;
-    wire dcache_fifo_empty;
-    wire dcache_fifo_we;
-    wire dcache_fifo_re;
-    assign dcache_fifo_full  = (dcache_fifo_cnt == 3'd4);
-    assign dcache_fifo_empty = (dcache_fifo_cnt == 3'd0);
-    assign dcache_fifo_we    = rvalid && rready && (rid == 4'd1) && !dcache_accept;
-    assign dcache_fifo_re    = dcache_accept && !dcache_fifo_empty;
-
-    integer jj;
-    always @(posedge clk) begin
-        if (reset) begin
-            dcache_fifo_wptr <= 2'd0;
-            dcache_fifo_rptr <= 2'd0;
-            dcache_fifo_cnt  <= 3'd0;
-            for (jj = 0; jj < 4; jj = jj + 1)
-                dcache_fifo_mem[jj] <= 33'b0;
-        end
-        else begin
-            case ({dcache_fifo_we, dcache_fifo_re})
-                2'b10: begin
-                    dcache_fifo_mem[dcache_fifo_wptr] <= {rlast, rdata};
-                    dcache_fifo_wptr <= dcache_fifo_wptr + 2'd1;
-                    dcache_fifo_cnt  <= dcache_fifo_cnt  + 3'd1;
-                end
-                2'b01: begin
-                    dcache_fifo_rptr <= dcache_fifo_rptr + 2'd1;
-                    dcache_fifo_cnt  <= dcache_fifo_cnt  - 3'd1;
-                end
-                2'b11: begin
-                    dcache_fifo_mem[dcache_fifo_wptr] <= {rlast, rdata};
-                    dcache_fifo_wptr <= dcache_fifo_wptr + 2'd1;
-                    dcache_fifo_rptr <= dcache_fifo_rptr + 2'd1;
-                end
-                default: ;
-            endcase
-        end
-    end
-
-    // ---------- rready ----------
-    wire icache_ready;
-    wire dcache_ready;
-    assign icache_ready = !icache_fifo_full || icache_accept;
-    assign dcache_ready = !dcache_fifo_full || dcache_accept;
-    assign rready = icache_ready && dcache_ready;
-
-    // ---------- 读响应输出 ----------
-    assign icache_return_valid = !icache_fifo_empty || (rvalid && rready && (rid == 4'd0));
-    assign icache_return_data  = icache_fifo_empty ? rdata : icache_fifo_mem[icache_fifo_rptr][31:0];
-    assign icache_return_last  = icache_fifo_empty ? rlast : icache_fifo_mem[icache_fifo_rptr][32];
-    assign icache_wr_rdy = 1'b0;  // 占位
-
-
-    assign dcache_return_valid = !dcache_fifo_empty || (rvalid && rready && (rid == 4'd1));
-    assign dcache_return_data  = dcache_fifo_empty ? rdata : dcache_fifo_mem[dcache_fifo_rptr][31:0];
-    assign dcache_return_last  = dcache_fifo_empty ? rlast : dcache_fifo_mem[dcache_fifo_rptr][32];
+    assign dcache_return_valid = rvalid && (rid == 4'd1);
+    assign dcache_return_data  = rdata;
+    assign dcache_return_last  = rlast;
     
     // ================================================================
     // 写请求处理 — 状态机、写数据分拍、写追踪器、写响应、AXI 写输出

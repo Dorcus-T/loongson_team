@@ -69,6 +69,16 @@ if {$run_status ne "synth_design Complete!"} {
 }
 open_run synth_1
 
+# Ignore DDR AXI CDC / JTAG AXI internal paths (not CPU-related)
+set_false_path -from [get_cells -hier -filter {NAME =~ "*Axi_CDC*" || NAME =~ "*jtag_axi*"}]
+set_false_path -to   [get_cells -hier -filter {NAME =~ "*Axi_CDC*" || NAME =~ "*jtag_axi*"}]
+
+# Apply async clock groups (PLL clocks now visible)
+set_clock_groups -asynchronous \
+    -group [get_clocks cpu_clk] \
+    -group [get_clocks sys_clk] \
+    -group [get_clocks ddr_clk]
+
 # ----- Post-synth reports -----
 puts "--- 3a. Post-synth reports ---"
 report_timing_summary -file "$outdir/timing_summary_synth.rpt"

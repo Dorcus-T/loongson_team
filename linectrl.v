@@ -23,10 +23,10 @@ module linectrl (
     input  wire [6:0]  mispred_i,     // 各级分支误预测（组合，仅 ex 级有效）
 
     // ── 输出给每级 ──
-    output wire [6:0]  lvalid,        // 本拍指令有效
-    output wire [6:0]  lpower,        // 本拍有权发请求
-    output wire [6:0]  ldata,         // 0=用旧寄存器, 1=用新寄存器
-    output wire [6:0]  lready,        // 维持就绪（下游阻塞时）
+    (* max_fanout = 64 *) output wire [6:0]  lvalid,        // 本拍指令有效
+    (* max_fanout = 64 *) output wire [6:0]  lpower,        // 本拍有权发请求
+    (* max_fanout = 64 *) output wire [6:0]  ldata,         // 0=用旧寄存器, 1=用新寄存器
+    (* max_fanout = 64 *) output wire [6:0]  lready,        // 维持就绪（下游阻塞时）
 
     // ── 分支预测器更新许可 ──
     output wire         bp_valid,      // 上拍 pre_mem 准备+有效+无冲刷+下级空 → 本拍可更新分支预测器

@@ -139,6 +139,15 @@ module dcache (
     reg  refill_already_accept_new_req; // REFILL 期间 accept 了一个新请求，待 REFILL 后进 LOOKUP
 
     // ============================================================
+    // MMU Buffer — REFILL 提前取时，锁存 MMU 输出的 tag/cache/cancel
+    // 提前 accept 的下一拍 MMU 数据有效，此时仍在 REFILL，锁存备用
+    // ============================================================
+    reg  [`TAG_WIDTH-1:0]  mmu_buf_tag;
+    reg                    mmu_buf_cached;
+    reg                    mmu_buf_cancel;
+    reg                    mmu_buf_valid;
+
+    // ============================================================
     // Write Buffer — 命中 store 的写缓冲，写入 bank RAM
     // ============================================================
     reg                  wb_valid;
@@ -278,12 +287,21 @@ module dcache (
     end
 
     // ============================================================
+    // MMU 信号来源选择 — 提前取 LOOKUP 用 MMU Buffer，常规 LOOKUP 用端口值
+    // ============================================================
+    wire use_mmu_buf;
+    assign use_mmu_buf = main_lookup && mmu_buf_valid;
+
+    wire effective_cancel;
+    assign effective_cancel = use_mmu_buf ? mmu_buf_cancel : mmu_cancel;
+
+    // ============================================================
     // Lookup Tag 选择（第1拍：MMU 送达的物理 tag / CACOP tag）
     // ============================================================
     wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
-    assign lookup_cached = cacop_en_r ? 1'b1 : mmu_cache;
+    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : (use_mmu_buf ? mmu_buf_tag    : mmu_tag);
+    assign lookup_cached = cacop_en_r ? 1'b1         : (use_mmu_buf ? mmu_buf_cached : mmu_cache);
 
     // ============================================================
     // Tag 比较与命中判断
@@ -299,7 +317,7 @@ module dcache (
     endgenerate
 
     wire cache_hit;
-    assign cache_hit = (|way_hit) && !cacop_en_r && !mmu_cancel;
+    assign cache_hit = (|way_hit) && !cacop_en_r && !effective_cancel;
 
     // ============================================================
     // 命中路号编码
@@ -370,12 +388,12 @@ module dcache (
     generate
         for (gv = 0; gv < VC_DEPTH; gv = gv + 1) begin : vc_match_gen
             assign vc_match[gv] = vc_valid[gv]
-                                && (vc_addr[gv] == {mmu_tag, req_index});
+                                && (vc_addr[gv] == {(use_mmu_buf ? mmu_buf_tag : mmu_tag), req_index});
         end
     endgenerate
 
     wire vc_hit;
-    assign vc_hit = (|vc_match) && mmu_cache && !cacop_en_r && VC_EN;
+    assign vc_hit = (|vc_match) && (use_mmu_buf ? mmu_buf_cached : mmu_cache) && !cacop_en_r && VC_EN;
 
     reg  [VC_IDX_W-1:0] vc_hit_idx;
     integer vhi;
@@ -402,7 +420,7 @@ module dcache (
     end
 
     wire vc_serve;
-    assign vc_serve = main_lookup && !cache_hit && vc_hit && !mmu_cancel;
+    assign vc_serve = main_lookup && !cache_hit && vc_hit && !effective_cancel;
 
     // VC serve + WB 忙 → 进 WAITWB 等 WB 写完后做 VC↔L1 交换
     wire vc_serve_wb_busy;
@@ -423,13 +441,13 @@ module dcache (
     assign lookup_store_hit = main_lookup && cache_hit && req_d;
 
     wire is_uncached_store;
-    assign is_uncached_store = !mmu_cache && req_d && !cacop_en_r;
+    assign is_uncached_store = !(use_mmu_buf ? mmu_buf_cached : mmu_cache) && req_d && !cacop_en_r;
 
     wire refill_is_uncached_store;
     assign refill_is_uncached_store = !refill_cached && refill_d && !refill_cacop;
 
     wire need_bus_rd;
-    assign need_bus_rd = (mmu_cache || !req_d) && !cacop_en_r;
+    assign need_bus_rd = ((use_mmu_buf ? mmu_buf_cached : mmu_cache) || !req_d) && !cacop_en_r;
 
     // ============================================================
     // 主状态机 — 时序
@@ -453,7 +471,7 @@ module dcache (
                     main_next = MAIN_IDLE;
             end
             MAIN_LOOKUP: begin
-                if (mmu_cancel)
+                if (effective_cancel)
                     main_next = MAIN_IDLE;
                 else if (vc_serve_wb_busy)
                     main_next = MAIN_WAITWB;
@@ -613,6 +631,31 @@ module dcache (
     end
 
     // ============================================================
+    // MMU Buffer — REFILL 提前 accept 的下一拍，MMU 输出有效但仍在 REFILL
+    // 锁存 tag/cache/cancel 供后续 LOOKUP 使用
+    // ============================================================
+    wire mmu_buf_capture;
+    assign mmu_buf_capture = main_refill && refill_already_accept_new_req && !mmu_buf_valid;
+
+    always @(posedge clk) begin
+        if (~resetn) begin
+            mmu_buf_tag    <= {`TAG_WIDTH{1'b0}};
+            mmu_buf_cached <= 1'b0;
+            mmu_buf_cancel <= 1'b0;
+            mmu_buf_valid  <= 1'b0;
+        end
+        else if (mmu_buf_capture) begin
+            mmu_buf_tag    <= mmu_tag;
+            mmu_buf_cached <= mmu_cache;
+            mmu_buf_cancel <= mmu_cancel;
+            mmu_buf_valid  <= 1'b1;
+        end
+        else if (main_lookup || main_idle) begin
+            mmu_buf_valid <= 1'b0;
+        end
+    end
+
+    // ============================================================
     // Write Buffer — 时序更新
     // ============================================================
     always @(posedge clk) begin
@@ -639,11 +682,11 @@ module dcache (
         end
         else begin
             // LOOKUP miss 拍加载
-            if (main_lookup && !cache_hit && !mmu_cancel) begin
+            if (main_lookup && !cache_hit && !effective_cancel) begin
                 refill_index       <= req_index;
-                refill_tag         <= mmu_tag;
+                refill_tag         <= use_mmu_buf ? mmu_buf_tag    : mmu_tag;
                 refill_offset      <= req_offset;
-                refill_cached      <= mmu_cache;
+                refill_cached      <= use_mmu_buf ? mmu_buf_cached : mmu_cache;
                 refill_d          <= req_d;
                 refill_wdata       <= req_wdata;
                 refill_wstrb_mask  <= req_wstrb_mask;
@@ -986,7 +1029,7 @@ module dcache (
     wire read_miss_done;
     assign read_hit_done  = main_lookup && cache_hit && !req_d;
     assign vc_read_done   = vc_serve && !req_d;
-    assign write_done     = main_lookup && req_d && !mmu_cancel;
+    assign write_done     = main_lookup && req_d && !effective_cancel;
     assign read_miss_done = main_refill && return_valid && !refill_d
                           && (refill_cnt == refill_offset[3:2] || !refill_cached);
 
@@ -1050,7 +1093,7 @@ module dcache (
     assign rd_req_lookup = main_lookup && !cache_hit
                          && need_bus_rd
                          && !vc_hit
-                         && !mmu_cancel;
+                         && !effective_cancel;
 
     assign rd_req = rd_req_lookup || main_waitrd;
 
@@ -1063,17 +1106,16 @@ module dcache (
                             : wstrb_hw            ? 3'b001
                                                   : 3'b000;
 
-    // rd 地址分两段：LOOKUP 用 Request Buffer，WAITRD 用 Refill Buffer 快照
+    // rd_addr — LOOKUP 用 Request Buffer，WAITRD/REFILL 用 Refill Buffer
     wire rd_addr_is_lookup;
     assign rd_addr_is_lookup = main_lookup;
 
     wire [`TAG_WIDTH-1:0]  rd_addr_tag;
     wire                   rd_addr_cached;
-    assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache : refill_cached;
-
     wire [`INDEX_WIDTH-1:0]  rd_addr_index;
     wire [`OFFSET_WIDTH-1:0] rd_addr_offset;
+    assign rd_addr_tag    = rd_addr_is_lookup ? (use_mmu_buf ? mmu_buf_tag    : mmu_tag   ) : refill_tag;
+    assign rd_addr_cached = rd_addr_is_lookup ? (use_mmu_buf ? mmu_buf_cached : mmu_cache) : refill_cached;
     assign rd_addr_index  = rd_addr_is_lookup ? req_index  : refill_index;
     assign rd_addr_offset = rd_addr_is_lookup ? req_offset : refill_offset;
 
@@ -1106,9 +1148,9 @@ module dcache (
                            && tagv_lookup[cacop_way_r][0]);
 
     wire miss_needs_write;
-    assign miss_needs_write = !mmu_cancel && (
+    assign miss_needs_write = !effective_cancel && (
         cacop_en_r ? (cacop_wb && cacop_dirty)
-                   : ((mmu_cache && victim_dirty) || is_uncached_store)
+                   : (((use_mmu_buf ? mmu_buf_cached : mmu_cache) && victim_dirty) || is_uncached_store)
     );
 
     // ============================================================
@@ -1137,7 +1179,7 @@ module dcache (
     assign wr_req = lookup_wr_req || (refill_needs_write && !refill_wr_handshaked);
 
     wire lookup_wr_is_burst;
-    assign lookup_wr_is_burst = mmu_cache || cacop_en_r;
+    assign lookup_wr_is_burst = (use_mmu_buf ? mmu_buf_cached : mmu_cache) || cacop_en_r;
 
     wire is_burst_wr;
     assign is_burst_wr = !refill_is_uncached_store;
@@ -1153,7 +1195,7 @@ module dcache (
     // wr_addr
     assign wr_addr = lookup_wr_req
         ? (lookup_wr_is_burst ? {tagv_lookup[replace_way][`TAG_WIDTH:1], req_index, 4'b0000}
-                              : {mmu_tag, req_index, req_offset})
+                              : {(use_mmu_buf ? mmu_buf_tag : mmu_tag), req_index, req_offset})
         : (is_burst_wr ? {refill_victim_tag, refill_index, 4'b0000}
                        : {refill_tag, refill_index, refill_offset});
 
@@ -1176,13 +1218,13 @@ module dcache (
     // 仿真断言
     // ============================================================
     always @(posedge clk) begin
-        if (resetn && main_lookup && mmu_cache && !cacop_en_r) begin
+        if (resetn && main_lookup && (use_mmu_buf ? mmu_buf_cached : mmu_cache) && !cacop_en_r) begin
             if (cache_hit && (|vc_match))
                 $display("[%m] ASSERT FAIL: line in both L1 and VC, tag=%h index=%h",
-                         mmu_tag, req_index);
+                         (use_mmu_buf ? mmu_buf_tag : mmu_tag), req_index);
             if ((|vc_match) && ((vc_match & (vc_match - 1)) != {VC_DEPTH{1'b0}}))
                 $display("[%m] ASSERT WARN: duplicate VC entries, tag=%h index=%h",
-                         mmu_tag, req_index);
+                         (use_mmu_buf ? mmu_buf_tag : mmu_tag), req_index);
         end
     end
 `endif
@@ -1210,7 +1252,7 @@ module dcache (
         else begin
             if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && mmu_cache && !cacop_en_r) begin
+            if (main_lookup && (use_mmu_buf ? mmu_buf_cached : mmu_cache) && !cacop_en_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_hit)
                     perf_miss_cnt <= perf_miss_cnt + 32'd1;

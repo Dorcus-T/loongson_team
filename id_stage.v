@@ -586,22 +586,20 @@ module id_stage (
                       : inst_tlbsrch ? 32'h80000000 : 32'b0;
 
     // ========== 操作数前递 ==========
-    // rj值前递：如果rj需要等待且与EX/MEM/WB阶段的目的寄存器匹配，则使用前递结果
     assign rj_value = rj_wait ?
-                      ((rj == ex_to_id_dest)      ? ex_to_id_result :
-                       (rj == pre_mem_to_id_dest) ? pre_mem_to_id_result :
-                       (rj == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result)
+                      (rj_eq_ex  ? ex_to_id_result :
+                       rj_eq_pre ? pre_mem_to_id_result :
+                       rj_eq_mem ? mem_to_id_result : wb_to_id_result)
                       : rf_rdata1;
 
-    // rkd值前递：类似地处理第二操作数
     assign rkd_value = rk_wait ?
-                       ((rk == ex_to_id_dest)      ? ex_to_id_result :
-                        (rk == pre_mem_to_id_dest) ? pre_mem_to_id_result :
-                        (rk == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result) :
+                       (rk_eq_ex  ? ex_to_id_result :
+                        rk_eq_pre ? pre_mem_to_id_result :
+                        rk_eq_mem ? mem_to_id_result : wb_to_id_result) :
                        rd_wait ?
-                       ((rd == ex_to_id_dest)      ? ex_to_id_result :
-                        (rd == pre_mem_to_id_dest) ? pre_mem_to_id_result :
-                        (rd == mem_to_id_dest)     ? mem_to_id_result : wb_to_id_result) :
+                       (rd_eq_ex  ? ex_to_id_result :
+                        rd_eq_pre ? pre_mem_to_id_result :
+                        rd_eq_mem ? mem_to_id_result : wb_to_id_result) :
                        rf_rdata2;
 
     // ============================================================
@@ -752,59 +750,59 @@ module id_stage (
                           inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;                                     // 需要读取rd的指令
 
 
-    assign rj_wait = ~src_no_rj && (rj != 5'b00000) &&
-                     ((rj == ex_to_id_dest) || (rj == pre_mem_to_id_dest) || (rj == mem_to_id_dest) || (rj == wb_to_id_dest));
-    assign rk_wait = ~src_no_rk && (rk != 5'b00000) &&
-                     ((rk == ex_to_id_dest) || (rk == pre_mem_to_id_dest) || (rk == mem_to_id_dest) || (rk == wb_to_id_dest));
-    assign rd_wait = src_has_rd && (rd != 5'b00000) &&
-                     ((rd == ex_to_id_dest) || (rd == pre_mem_to_id_dest) || (rd == mem_to_id_dest) || (rd == wb_to_id_dest));
+    // ── 预计算 5-bit 寄存器号比较（共享，减扇出）──
+    wire rj_valid  = (rj != 5'b00000);
+    wire rk_valid  = (rk != 5'b00000);
+    wire rd_valid  = (rd != 5'b00000);
+    wire rj_eq_ex  = (rj == ex_to_id_dest);
+    wire rj_eq_pre = (rj == pre_mem_to_id_dest);
+    wire rj_eq_mem = (rj == mem_to_id_dest);
+    wire rj_eq_wb  = (rj == wb_to_id_dest);
+    wire rk_eq_ex  = (rk == ex_to_id_dest);
+    wire rk_eq_pre = (rk == pre_mem_to_id_dest);
+    wire rk_eq_mem = (rk == mem_to_id_dest);
+    wire rk_eq_wb  = (rk == wb_to_id_dest);
+    wire rd_eq_ex  = (rd == ex_to_id_dest);
+    wire rd_eq_pre = (rd == pre_mem_to_id_dest);
+    wire rd_eq_mem = (rd == mem_to_id_dest);
+    wire rd_eq_wb  = (rd == wb_to_id_dest);
 
-    // 如果当前指令的源寄存器与ex阶段的目的寄存器匹配，且EX阶段是加载指令，则需要停顿
-    assign id_load_op = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
-    assign load_use_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
-                             (rk_wait && (rk == ex_to_id_dest)) ||
-                             (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op) ||
-                            (((rj_wait && (rj == pre_mem_to_id_dest)) ||
-                              (rk_wait && (rk == pre_mem_to_id_dest)) ||
-                              (rd_wait && (rd == pre_mem_to_id_dest))) && pre_mem_to_id_load_op) ||
-                            (((rj_wait && (rj == mem_to_id_dest)) ||
-                              (rk_wait && (rk == mem_to_id_dest)) ||
-                              (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
+    assign rj_wait = ~src_no_rj && rj_valid && (rj_eq_ex || rj_eq_pre || rj_eq_mem || rj_eq_wb);
+    assign rk_wait = ~src_no_rk && rk_valid && (rk_eq_ex || rk_eq_pre || rk_eq_mem || rk_eq_wb);
+    assign rd_wait =  src_has_rd && rd_valid && (rd_eq_ex || rd_eq_pre || rd_eq_mem || rd_eq_wb);
 
-    // EX 乘除法未完成 → 阻塞（依赖其结果的指令需等待）
-    assign calc_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
-                          (rk_wait && (rk == ex_to_id_dest)) ||
-                          (rd_wait && (rd == ex_to_id_dest))) && calc_not_ready);
+    // ── load-use stall / calc stall 复用预计算结果 ──
+    assign id_load_op    = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+    wire   rj_need_ex    = ~src_no_rj && rj_valid && rj_eq_ex;
+    wire   rk_need_ex    = ~src_no_rk && rk_valid && rk_eq_ex;
+    wire   rd_need_ex    =  src_has_rd && rd_valid && rd_eq_ex;
+    wire   rj_need_pre   = ~src_no_rj && rj_valid && rj_eq_pre;
+    wire   rk_need_pre   = ~src_no_rk && rk_valid && rk_eq_pre;
+    wire   rd_need_pre   =  src_has_rd && rd_valid && rd_eq_pre;
+    wire   rj_need_mem   = ~src_no_rj && rj_valid && rj_eq_mem;
+    wire   rk_need_mem   = ~src_no_rk && rk_valid && rk_eq_mem;
+    wire   rd_need_mem   =  src_has_rd && rd_valid && rd_eq_mem;
+
+    assign load_use_stall = ((rj_need_ex  || rk_need_ex  || rd_need_ex)  && ex_to_id_load_op)
+                         || ((rj_need_pre || rk_need_pre || rd_need_pre) && pre_mem_to_id_load_op)
+                         || ((rj_need_mem || rk_need_mem || rd_need_mem) && !mem_to_id_data_ok);
+
+    assign calc_stall = (rj_need_ex || rk_need_ex || rd_need_ex) && calc_not_ready;
 
     // csr与ertn冒险
-    // 中断判断发生csr冒险(只有确定中断的时候才发生，不确定中断指令继续走就行)
-    assign int_csr_stall = has_int &&
-                        ((ex_csr_we && (ex_csr_num == `CSR_CRMD || ex_csr_num == `CSR_ECFG ||
-                                        ex_csr_num == `CSR_ESTAT || ex_csr_num == `CSR_TCFG ||
-                                        ex_csr_num == `CSR_TICLR)) ||
-                         (ex_ertn_flush) ||  // ex阶段有ertn，即将写CRMD.IE
-                         (pre_mem_csr_we && (pre_mem_csr_num == `CSR_CRMD || pre_mem_csr_num == `CSR_ECFG ||
-                                             pre_mem_csr_num == `CSR_ESTAT || pre_mem_csr_num == `CSR_TCFG ||
-                                             pre_mem_csr_num == `CSR_TICLR)) ||
-                         (pre_mem_ertn_flush) ||  // pre_mem阶段有ertn，即将写CRMD.IE
-                         (mem_csr_we && (mem_csr_num == `CSR_CRMD || mem_csr_num == `CSR_ECFG ||
-                                         mem_csr_num == `CSR_ESTAT || mem_csr_num == `CSR_TCFG ||
-                                         mem_csr_num == `CSR_TICLR)) ||
-                         (mem_ertn_flush) ||  // mem阶段有ertn，即将写CRMD.IE
-                         (wb_csr_we && (wb_csr_num == `CSR_CRMD || wb_csr_num == `CSR_ECFG ||
-                                        wb_csr_num == `CSR_ESTAT || wb_csr_num == `CSR_TCFG ||
-                                        wb_csr_num == `CSR_TICLR)) ||
-                         (wb_ertn_flush));   // wb阶段有ertn，即将写CRMD.IE
+    // 简化：后面任意写csr就堵中断，任意ertn也堵
+    wire any_ertn_downstream = ex_ertn_flush || pre_mem_ertn_flush || mem_ertn_flush || wb_ertn_flush;
+    wire any_csr_we_downstream = ex_csr_we || pre_mem_csr_we || mem_csr_we || wb_csr_we;
+    assign int_csr_stall = has_int && (any_csr_we_downstream || any_ertn_downstream);
 
-    // 读csr指令与后面写同一个 CSR 冲突
-    assign inst_csr_stall = (inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch) &&
-                         ((ex_csr_we && (ex_csr_num == csr_id_num) || (ex_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
-                          (pre_mem_csr_we && (pre_mem_csr_num == csr_id_num) || (pre_mem_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
-                          (mem_csr_we && (mem_csr_num == csr_id_num) || (mem_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
-                          (wb_csr_we && (wb_csr_num == csr_id_num) || (wb_csr_num == `CSR_TICLR) && csr_id_num == `CSR_ESTAT) ||
-                          (ex_csr_we && inst_tlbsrch && ex_csr_num == `CSR_TLBEHI) ||
-                          (pre_mem_csr_we && inst_tlbsrch && pre_mem_csr_num == `CSR_TLBEHI) ||
-                          (mem_csr_we && inst_tlbsrch && mem_csr_num == `CSR_TLBEHI));
+    // 读csr指令与后面写同一个 CSR 冲突（简化：仅比较 csr 号相等）
+    // tlbsrch 额外检查 TLBEHI 冲突（tlbsrch 读 TLBIDX 但内部用 TLBEHI 搜索）
+    wire is_csr_reader = inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch;
+    assign inst_csr_stall = is_csr_reader &&
+                           ((ex_csr_we      && (ex_csr_num == csr_id_num || inst_tlbsrch && ex_csr_num == `CSR_TLBEHI))
+                         || (pre_mem_csr_we && (pre_mem_csr_num == csr_id_num || inst_tlbsrch && pre_mem_csr_num == `CSR_TLBEHI))
+                         || (mem_csr_we     && (mem_csr_num == csr_id_num || inst_tlbsrch && mem_csr_num == `CSR_TLBEHI))
+                         || (wb_csr_we      && wb_csr_num == csr_id_num));
     assign csr_stall = inst_csr_stall || int_csr_stall;
 
     // ========== 检测异常 ==========

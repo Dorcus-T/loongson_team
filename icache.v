@@ -73,7 +73,6 @@ module icache (
     // ============================================================
     reg  [`INDEX_WIDTH-1:0]  req_index;
     reg  [`OFFSET_WIDTH-1:0] req_offset;
-    reg                     req_is_prefetch;
     reg                     cacop_en_r;
     reg  [4:0]              cacop_code_r;
     reg  [WAY_IDX_W-1:0]    cacop_way_r;
@@ -88,8 +87,6 @@ module icache (
     reg  [`TAG_WIDTH-1:0]   refill_tag;
     reg  [`OFFSET_WIDTH-1:0] refill_offset;
     reg                     refill_cached;
-    reg                     refill_is_prefetch;
-    reg                     refill_was_cacop;
     reg  [WAY_IDX_W-1:0]    refill_replace_way;
     reg  [ 1:0]             refill_cnt;
     reg  [31:0]             refill_line [0:BANK_NUM-1];
@@ -98,6 +95,15 @@ module icache (
     // 顶层标志
     // ============================================================
     reg  refill_already_accept_new_req; // REFILL 期间 accept 了一个新请求，待 REFILL 后进 LOOKUP
+
+    // ============================================================
+    // MMU Buffer — REFILL 提前取时，锁存 MMU 输出的 tag/cache/cancel
+    // 提前 accept 的下一拍 MMU 数据有效，此时仍在 REFILL，锁存备用
+    // ============================================================
+    reg  [`TAG_WIDTH-1:0]  mmu_buf_tag;
+    reg                    mmu_buf_cached;
+    reg                    mmu_buf_cancel;
+    reg                    mmu_buf_valid;
 
     // ============================================================
     // 树状伪 LRU
@@ -123,49 +129,6 @@ module icache (
     assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
 
     // ============================================================
-    // prefetch 预取
-    // ============================================================
-    wire prefetch_idle;
-    wire prefetch_lookup;
-    assign prefetch_idle   = main_idle && !cpu_req && !cacop_en && !refill_is_prefetch
-                           && refill_cached && !refill_was_cacop;
-    assign prefetch_lookup = main_lookup && cache_inst_hit && !cpu_req && !cacop_en && !req_is_prefetch;
-
-    wire last_offset;
-    assign last_offset = prefetch_lookup ? (req_offset[3:2] == 2'b11)
-                                         : (refill_offset[3:2] == 2'b11);
-    wire launch_prefetch_idle;
-    wire launch_prefetch_lookup;
-    wire launch_prefetch;
-    assign launch_prefetch_idle   = prefetch_idle && last_offset;
-    assign launch_prefetch_lookup = prefetch_lookup && last_offset;
-    assign launch_prefetch        = launch_prefetch_idle || launch_prefetch_lookup;
-
-    // 下一行地址 = {tag, index, 4'b0} + 16
-    wire [31:0] prefetch_base_addr;
-    wire [31:0] prefetch_next_addr;
-    assign prefetch_base_addr = prefetch_lookup
-                              ? {mmu_tag, req_index, {`OFFSET_WIDTH{1'b0}}}
-                              : {refill_tag, refill_index, {`OFFSET_WIDTH{1'b0}}};
-    assign prefetch_next_addr = prefetch_base_addr + 32'd16;
-
-    wire [`INDEX_WIDTH-1:0]  prefetch_index;
-    wire [`TAG_WIDTH-1:0]    prefetch_tag;
-    wire [`OFFSET_WIDTH-1:0] prefetch_offset;
-    assign prefetch_index  = prefetch_next_addr[`OFFSET_WIDTH +: `INDEX_WIDTH];
-    assign prefetch_tag    = prefetch_next_addr[`INDEX_WIDTH + `OFFSET_WIDTH +: `TAG_WIDTH];
-    assign prefetch_offset = {`OFFSET_WIDTH{1'b0}};
-
-    wire prefetch_match_after_shake;
-    wire prefetch_can_cancel;
-    assign prefetch_match_after_shake = main_refill && refill_is_prefetch
-                                      && (refill_index == cpu_index)
-                                      && (refill_tag   == mmu_tag)
-                                      && !cacop_en && cpu_req && mmu_cache;
-    assign prefetch_can_cancel = (main_lookup || main_waitrd) && req_is_prefetch
-                               && ((cpu_req && mmu_cache) || cacop_en);
-
-    // ============================================================
     // accept_new_req
     // ============================================================
     wire idle_accept;
@@ -175,7 +138,6 @@ module icache (
     assign idle_accept   = main_idle && (cpu_req || cacop_en);
     assign hit_accept    = main_lookup && cache_inst_hit && (cpu_req || cacop_en);
     assign refill_early_accept = main_refill && !refill_last
-                               && !refill_is_prefetch
                                && !refill_already_accept_new_req
                                && !cacop_en_r
                                && !cacop_en
@@ -185,9 +147,7 @@ module icache (
     wire accept_new_req;
     assign accept_new_req = (idle_accept && accept_ok)
                          || (hit_accept && accept_ok)
-                         || (refill_early_accept && accept_ok)
-                         || (launch_prefetch && accept_ok)
-                         || (prefetch_can_cancel && accept_ok);
+                         || (refill_early_accept && accept_ok);
 
     // ============================================================
     // RAM 读控制
@@ -196,7 +156,7 @@ module icache (
     assign ram_read_en = accept_new_req;
 
     wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = launch_prefetch ? prefetch_index : ram_raddr_req;
+    assign ram_raddr = ram_raddr_req;
 
     // ============================================================
     // REFILL 节拍
@@ -234,12 +194,10 @@ module icache (
                     main_next = MAIN_IDLE;
             end
             MAIN_LOOKUP: begin
-                if (mmu_cancel)
+                if (effective_cancel)
                     main_next = MAIN_IDLE;
                 else if (cacop_en_r)
                     main_next = MAIN_REFILL;
-                else if (prefetch_can_cancel)
-                    main_next = MAIN_LOOKUP;
                 else if (!cache_inst_hit && rd_rdy)
                     main_next = MAIN_REFILL;
                 else if (!cache_inst_hit)
@@ -250,9 +208,7 @@ module icache (
                     main_next = MAIN_IDLE;
             end
             MAIN_WAITRD: begin
-                if (prefetch_can_cancel)
-                    main_next = MAIN_LOOKUP;
-                else if (rd_rdy)
+                if (rd_rdy)
                     main_next = MAIN_REFILL;
                 else
                     main_next = MAIN_WAITRD;
@@ -291,12 +247,21 @@ module icache (
     endgenerate
 
     // ============================================================
+    // MMU 信号来源选择 — 提前取 LOOKUP 用 MMU Buffer，常规 LOOKUP 用端口值
+    // ============================================================
+    wire use_mmu_buf;
+    assign use_mmu_buf = main_lookup && mmu_buf_valid;
+
+    wire effective_cancel;
+    assign effective_cancel = use_mmu_buf ? mmu_buf_cancel : mmu_cancel;
+
+    // ============================================================
     // Lookup Tag 选择（第1拍：MMU 送达的物理 tag / CACOP tag）
     // ============================================================
     wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
-    assign lookup_cached = cacop_en_r ? 1'b1 : mmu_cache;
+    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : (use_mmu_buf ? mmu_buf_tag    : mmu_tag);
+    assign lookup_cached = cacop_en_r ? 1'b1         : (use_mmu_buf ? mmu_buf_cached : mmu_cache);
 
     // ============================================================
     // Tag 比较与命中判断
@@ -312,7 +277,7 @@ module icache (
     endgenerate
 
     wire cache_inst_hit;
-    assign cache_inst_hit = (|way_hit) && !cacop_en_r && !mmu_cancel;
+    assign cache_inst_hit = (|way_hit) && !cacop_en_r && !effective_cancel;
 
     // ============================================================
     // 命中路号编码
@@ -356,7 +321,7 @@ module icache (
     wire                 pre_plru_en;
     wire [`INDEX_WIDTH-1:0] pre_plru_index;
     assign pre_plru_en    = accept_new_req;
-    assign pre_plru_index = launch_prefetch ? prefetch_index : ram_raddr_req;
+    assign pre_plru_index = ram_raddr_req;
 
     reg  [WAY_IDX_W:0]   plru_node_pre;
     integer plv_pre;
@@ -382,7 +347,7 @@ module icache (
     wire                 plru_upd_en;
     wire [WAY_IDX_W-1:0] plru_upd_way;
     wire [`INDEX_WIDTH-1:0] plru_upd_index;
-    assign plru_upd_en    = (main_lookup && cache_inst_hit && !req_is_prefetch)
+    assign plru_upd_en    = (main_lookup && cache_inst_hit)
                           || refill_tagv_we;
     assign plru_upd_way   = (main_lookup && cache_inst_hit) ? hit_way_idx
                                                        : refill_replace_way;
@@ -411,7 +376,6 @@ module icache (
         if (~resetn) begin
             req_index        <= {`INDEX_WIDTH{1'b0}};
             req_offset       <= {`OFFSET_WIDTH{1'b0}};
-            req_is_prefetch  <= 1'b0;
             cacop_en_r       <= 1'b0;
             cacop_code_r     <= 5'b0;
             cacop_way_r      <= {WAY_IDX_W{1'b0}};
@@ -420,10 +384,9 @@ module icache (
             cacop_is_hit_r   <= 1'b0;
         end
         else if (accept_new_req) begin
-            req_index        <= cacop_en ? cacop_index : (launch_prefetch ? prefetch_index : cpu_index);
-            req_offset       <= launch_prefetch ? prefetch_offset : cpu_offset;
-            req_is_prefetch  <= launch_prefetch;
-            cacop_en_r       <= launch_prefetch ? 1'b0 : cacop_en;
+            req_index        <= cacop_en ? cacop_index : cpu_index;
+            req_offset       <= cpu_offset;
+            cacop_en_r       <= cacop_en;
             cacop_code_r     <= cacop_code;
             cacop_way_r      <= cacop_way;
             cacop_index_r    <= cacop_index;
@@ -436,16 +399,41 @@ module icache (
     end
 
     // ============================================================
+    // MMU Buffer — REFILL 提前 accept 的下一拍，MMU 输出有效但仍在 REFILL
+    // 锁存 tag/cache/cancel 供后续 LOOKUP 使用
+    // 捕获条件：REFILL 中 && 刚发生过 early accept（refill_already_accept_new_req=1）
+    //           && 尚未捕获（!mmu_buf_valid）
+    // ============================================================
+    wire mmu_buf_capture;
+    assign mmu_buf_capture = main_refill && refill_already_accept_new_req && !mmu_buf_valid;
+
+    always @(posedge clk) begin
+        if (~resetn) begin
+            mmu_buf_tag    <= {`TAG_WIDTH{1'b0}};
+            mmu_buf_cached <= 1'b0;
+            mmu_buf_cancel <= 1'b0;
+            mmu_buf_valid  <= 1'b0;
+        end
+        else if (mmu_buf_capture) begin
+            mmu_buf_tag    <= mmu_tag;
+            mmu_buf_cached <= mmu_cache;
+            mmu_buf_cancel <= mmu_cancel;
+            mmu_buf_valid  <= 1'b1;
+        end
+        else if (main_lookup || main_idle) begin
+            mmu_buf_valid <= 1'b0;
+        end
+    end
+
+    // ============================================================
     // Refill Buffer — LOOKUP miss 拍一次性锁存，整个 REFILL 期间不变
     // ============================================================
     always @(posedge clk) begin
-        if (main_lookup && !cache_inst_hit && !mmu_cancel) begin
+        if (main_lookup && !cache_inst_hit && !effective_cancel) begin
             refill_index        <= req_index;
-            refill_tag          <= mmu_tag;
+            refill_tag          <= use_mmu_buf ? mmu_buf_tag    : mmu_tag;
             refill_offset       <= req_offset;
-            refill_cached       <= mmu_cache;
-            refill_is_prefetch  <= req_is_prefetch;
-            refill_was_cacop    <= cacop_en_r;
+            refill_cached       <= use_mmu_buf ? mmu_buf_cached : mmu_cache;
             refill_replace_way  <= victim_way;
             refill_cnt          <= 2'd0;
         end
@@ -453,9 +441,6 @@ module icache (
             refill_cnt <= refill_cnt + 2'd1;
             if (refill_cached)
                 refill_line[refill_cnt] <= return_data;
-        end
-        else if (main_idle) begin
-            refill_is_prefetch <= 1'b0;
         end
     end
 
@@ -484,27 +469,19 @@ module icache (
     // ============================================================
     wire read_hit_done;
     wire read_miss_done;
-    assign read_hit_done  = main_lookup && cache_inst_hit && !req_is_prefetch;
-    assign read_miss_done = main_refill && return_valid && !refill_is_prefetch
+    assign read_hit_done  = main_lookup && cache_inst_hit;
+    assign read_miss_done = main_refill && return_valid
                           && (refill_cnt == refill_offset[3:2] || !refill_cached);
 
-    wire prefetch_match_data_ready;
-    wire [31:0] prefetch_match_rdata;
-    assign prefetch_match_data_ready = main_refill && return_valid && return_last
-                                     && refill_is_prefetch && prefetch_match_after_shake;
-    assign prefetch_match_rdata = (cpu_offset[3:2] == refill_cnt) ? return_data
-                                                                  : refill_line[cpu_offset[3:2]];
-
     wire read_result_ready;
-    assign read_result_ready = read_hit_done || read_miss_done || prefetch_match_data_ready;
+    assign read_result_ready = read_hit_done || read_miss_done;
 
     // ============================================================
     // 实时数据通路
     // ============================================================
     wire [31:0] live_rdata;
-    assign live_rdata = read_hit_done              ? hit_word
-                      : read_miss_done             ? return_data
-                      : prefetch_match_data_ready  ? prefetch_match_rdata
+    assign live_rdata = read_hit_done  ? hit_word
+                      : read_miss_done ? return_data
                       : 32'd0;
 
     wire live_data_ready;
@@ -526,8 +503,7 @@ module icache (
     // ============================================================
     // CPU / CACOP 接口
     // ============================================================
-    assign cpu_addr_ok = (accept_new_req && !cacop_en)
-                        || (main_refill && return_last && prefetch_match_after_shake && accept_ok);
+    assign cpu_addr_ok = (accept_new_req && !cacop_en);
     assign cacop_rdy   = accept_new_req && cacop_en;
 
     wire cpu_data_ok_comb;
@@ -680,20 +656,19 @@ module icache (
     // ============================================================
     // AXI 读请求
     // ============================================================
-    assign rd_req = ((main_lookup && !cache_inst_hit && !cacop_en_r && !mmu_cancel)
-                  || main_waitrd) && !prefetch_can_cancel;
+    assign rd_req = (main_lookup && !cache_inst_hit && !cacop_en_r && !effective_cancel)
+                  || main_waitrd;
 
-    // rd_addr 分两段：LOOKUP 用 Request Buffer，WAITRD 用 Refill Buffer 快照
+    // rd_addr — LOOKUP 用 Request Buffer，WAITRD/REFILL 用 Refill Buffer
     wire rd_addr_is_lookup;
     assign rd_addr_is_lookup = main_lookup;
 
     wire [`TAG_WIDTH-1:0]  rd_addr_tag;
     wire                   rd_addr_cached;
-    assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache : refill_cached;
-
     wire [`INDEX_WIDTH-1:0]  rd_addr_index;
     wire [`OFFSET_WIDTH-1:0] rd_addr_offset;
+    assign rd_addr_tag    = rd_addr_is_lookup ? (use_mmu_buf ? mmu_buf_tag    : mmu_tag   ) : refill_tag;
+    assign rd_addr_cached = rd_addr_is_lookup ? (use_mmu_buf ? mmu_buf_cached : mmu_cache) : refill_cached;
     assign rd_addr_index  = rd_addr_is_lookup ? req_index  : refill_index;
     assign rd_addr_offset = rd_addr_is_lookup ? req_offset : refill_offset;
 
@@ -719,7 +694,7 @@ module icache (
         else begin
             if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && mmu_cache && !cacop_en_r) begin
+            if (main_lookup && (use_mmu_buf ? mmu_buf_cached : mmu_cache) && !cacop_en_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_inst_hit) begin
                     perf_miss_cnt      <= perf_miss_cnt      + 32'd1;

@@ -281,7 +281,7 @@ module mem_stage (
     // ========== 存储器读数据处理（字节/半字/字，支持符号扩展） ==========
     // 数据源：已锁存则用寄存器（打断长组合路径），否则直通 cache 输出
     wire [31:0] mem_rdata;
-    assign mem_rdata = load_data_latched ? load_data_r : dcache_cpu_rdata;
+    assign mem_rdata = load_data_r;
 
     assign offset = alu_result[1:0];
 

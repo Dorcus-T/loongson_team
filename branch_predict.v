@@ -45,6 +45,18 @@ module branch_predict (
     } = update_bus;
 
     // ============================================================
+    // 输入寄存器：切断 IF 级 MUX → 预测器 CAM 的长组合路径
+    // ============================================================
+    reg [29:0] lookup_pc_r;
+
+    always @(posedge clk) begin
+        if (reset)
+            lookup_pc_r <= 30'd0;
+        else
+            lookup_pc_r <= lookup_pc_i;
+    end
+
+    // ============================================================
     // BTB 表：32 项，每项 {tag[30], target[30], counter[2], valid[1]}
     // ============================================================
     reg  [29:0] btb_tag    [0:`BTB_ENTRIES-1];
@@ -57,7 +69,7 @@ module branch_predict (
     genvar i;
     generate
         for (i = 0; i < `BTB_ENTRIES; i = i + 1) begin : btb_cam
-            assign btb_match[i] = btb_valid[i] && (btb_tag[i] == lookup_pc_i);
+            assign btb_match[i] = btb_valid[i] && (btb_tag[i] == lookup_pc_r);
         end
     endgenerate
 
@@ -115,7 +127,7 @@ module branch_predict (
     wire [`RAS_CAM_ENTRIES-1:0] ras_match;
     generate
         for (i = 0; i < `RAS_CAM_ENTRIES; i = i + 1) begin : ras_cam_cmp
-            assign ras_match[i] = ras_cam_valid[i] && (ras_cam_tag[i] == lookup_pc_i);
+            assign ras_match[i] = ras_cam_valid[i] && (ras_cam_tag[i] == lookup_pc_r);
         end
     endgenerate
 

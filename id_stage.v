@@ -344,7 +344,8 @@ module id_stage (
     assign i20      = id_inst[24:5];
     assign i16      = id_inst[25:10];
     assign i26      = {id_inst[9:0], id_inst[25:10]};
-    assign csr_id_num = inst_cpucfg  ? (rj_value[13:0] + 14'h00b0)
+    // cpucfg: ID用固定常数避免14-bit加法器进关键路径, 实际CSR号由EX计算
+    assign csr_id_num = inst_cpucfg  ? 14'h00b1
                       : inst_rdcntid ? 14'h40
                       : inst_tlbsrch ? 14'h10 : id_inst[23:10];
     assign cacop_code = id_inst[4:0];

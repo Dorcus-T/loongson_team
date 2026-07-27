@@ -86,7 +86,7 @@ module wb_stage (
             valid_o <= 1'b0;
         end
         else begin
-            if (ldata)  data_o  <= data_n;
+            if (ldata)  data_o  <= current_bus;
             valid_o <= (ldata ? valid_n : valid_o) & lvalid;
         end
     end

@@ -1,4 +1,7 @@
 // ========== Cache-AXI 转接桥 ==========
+// 三组寄存器：ICache 读 Buffer、DCache 读 Buffer、DCache 写 Buffer
+//           写追踪 FIFO（4项）、Burst 写事务寄存器、单拍写分拆握手寄存器
+// 其余全部组合逻辑直通
 module cache_axi_bridge (
     input  wire         clk,
     input  wire         reset,
@@ -11,13 +14,6 @@ module cache_axi_bridge (
     output wire         icache_return_valid,
     output wire         icache_return_last,
     output wire [31:0]  icache_return_data,
-    input  wire         icache_accept,
-    input  wire         icache_wr_req,
-    input  wire [ 2:0]  icache_wr_type,
-    input  wire [31:0]  icache_wr_addr,
-    input  wire [ 3:0]  icache_wr_wstrb,
-    input  wire [127:0] icache_wr_data,
-    output wire         icache_wr_rdy,
 
     // DCache 读写接口
     input  wire         dcache_rd_req,
@@ -27,7 +23,6 @@ module cache_axi_bridge (
     output wire         dcache_return_valid,
     output wire         dcache_return_last,
     output wire [31:0]  dcache_return_data,
-    input  wire         dcache_accept,
     input  wire         dcache_wr_req,
     input  wire [ 2:0]  dcache_wr_type,
     input  wire [31:0]  dcache_wr_addr,
@@ -79,373 +74,53 @@ module cache_axi_bridge (
     output wire         bready
 );
 
-    // ========== Burst 检测 ==========
-    wire is_icache_burst;
-    wire is_dcache_rd_burst;
-    wire is_dcache_wr_burst;
-    assign is_icache_burst    = (icache_rd_type == 3'b100);
-    assign is_dcache_rd_burst = (dcache_rd_type == 3'b100);
-    assign is_dcache_wr_burst = (dcache_wr_type == 3'b100);
+    // ============================================================
+    // ICache 读 Buffer
+    // ============================================================
+    reg         ic_rd_buf_valid;
+    reg  [ 2:0] ic_rd_buf_type;
+    reg  [31:0] ic_rd_buf_addr;
 
-    // ================================================================
-    // 读请求处理 — 仲裁、冲突检测、状态机、AXI 读地址输出
-    // ================================================================
+    // ============================================================
+    // DCache 读 Buffer
+    // ============================================================
+    reg         dc_rd_buf_valid;
+    reg  [ 2:0] dc_rd_buf_type;
+    reg  [31:0] dc_rd_buf_addr;
 
-    // ---------- 传输字节数 ----------
-    wire [ 5:0] icache_rd_bytes;
-    wire [ 5:0] dcache_rd_bytes;
-    assign icache_rd_bytes = is_icache_burst    ? 6'd16 : 6'd4;
-    assign dcache_rd_bytes = is_dcache_rd_burst ? 6'd16 : 6'd4;
+    // ============================================================
+    // DCache 写 Buffer
+    // ============================================================
+    reg         dc_wr_buf_valid;
+    reg  [ 2:0] dc_wr_buf_type;
+    reg  [31:0] dc_wr_buf_addr;
+    reg  [ 3:0] dc_wr_buf_wstrb;
+    reg  [127:0] dc_wr_buf_data;
 
-    // ---------- 地址冲突检测 ----------
-    // 写追踪器寄存器（读路径也依赖，提前在这里声明）
+    // ========== Buffer Burst 检测 ==========
+    wire is_ic_rd_burst_buf;
+    wire is_dc_rd_burst_buf;
+    wire is_dc_wr_burst_buf;
+    assign is_ic_rd_burst_buf  = (ic_rd_buf_type  == 3'b100);
+    assign is_dc_rd_burst_buf  = (dc_rd_buf_type  == 3'b100);
+    assign is_dc_wr_burst_buf  = (dc_wr_buf_type  == 3'b100);
+
+
+    // ============================================================
+    // 写追踪 FIFO — 记录已发但 B 未回的写，供读冲突检测
+    // ============================================================
     reg  [31:0] wr_pend_addr  [0:3];
     reg  [ 5:0] wr_pend_bytes [0:3];
-    reg  [ 3:0] wr_pend_wstrb [0:3];
     reg  [ 1:0] wr_pend_wptr;
     reg  [ 1:0] wr_pend_rptr;
     reg  [ 2:0] wr_pend_cnt;
 
-    function addr_conflict;
-        input [31:0] rd_addr;
-        input [ 5:0] rd_total_bytes;
-        reg   [31:0] rd_end;
-        reg   [31:0] wr_end;
-        integer       k;
-        begin
-            addr_conflict = 1'b0;
-            rd_end = rd_addr + {27'd0, rd_total_bytes} - 32'd1;
-            for (k = 0; k < 4; k = k + 1) begin
-                if (((k[1:0] - wr_pend_rptr) & 2'd3) < wr_pend_cnt) begin
-                    wr_end = wr_pend_addr[k] + {27'd0, wr_pend_bytes[k]} - 32'd1;
-                    if (!(rd_end < wr_pend_addr[k] || rd_addr > wr_end)) begin
-                        addr_conflict = 1'b1;
-                    end
-                end
-            end
-        end
-    endfunction
+    wire wr_pend_full;
+    wire wr_pend_empty;
+    assign wr_pend_full  = (wr_pend_cnt == 3'd4);
+    assign wr_pend_empty = (wr_pend_cnt == 3'd0);
 
-    // ---------- 仲裁 + 冲突判断 ----------
-    wire icache_conflict;
-    wire dcache_conflict;
-    assign icache_conflict = addr_conflict(icache_rd_addr, icache_rd_bytes);
-    assign dcache_conflict = addr_conflict(dcache_rd_addr, dcache_rd_bytes);
-
-    // DCache 读优先级高于 ICache（load 比取指更紧急）
-    // FIFO 满时拒绝接受新读请求，防溢出
-    assign dcache_rd_rdy = (ar_state == AR_IDLE) && !dcache_fifo_full;
-    assign icache_rd_rdy = (ar_state == AR_IDLE) && !icache_conflict
-                          && !(dcache_rd_req && !dcache_conflict) && !icache_fifo_full;
-
-    // ---------- 状态机 ----------
-    localparam AR_IDLE = 2'd0;
-    localparam AR_REQ  = 2'd1;
-
-    reg  [ 1:0] ar_state, ar_next;
-
-    always @(posedge clk) begin
-        if (reset) begin
-            ar_state <= AR_IDLE;
-        end
-        else begin
-            ar_state <= ar_next;
-        end
-    end
-
-    always @(*) begin
-        ar_next = ar_state;
-        case (ar_state)
-            AR_IDLE: begin
-                if ((dcache_rd_req && dcache_rd_rdy) || (icache_rd_req && icache_rd_rdy))
-                    ar_next = AR_REQ;
-            end
-            AR_REQ: begin
-                if (arvalid_r && arready)
-                    ar_next = AR_IDLE;
-            end
-            default: ar_next = AR_IDLE;
-        endcase
-    end
-
-    // ---------- 读地址通道寄存器 + AXI 输出 ----------
-    reg         arvalid_r;
-    reg  [ 3:0] arid_r;
-    reg  [31:0] araddr_r;
-    reg  [ 2:0] arsize_r;
-    reg  [ 7:0] arlen_r;
-
-    assign arvalid = arvalid_r;
-    assign arid    = arid_r;
-    assign araddr  = araddr_r;
-    assign arsize  = arsize_r;
-    assign arlen   = arlen_r;
-
-    always @(posedge clk) begin
-        if (reset) begin
-            arvalid_r <= 1'b0;
-            arid_r    <= 4'd0;
-            araddr_r  <= 32'b0;
-            arsize_r  <= 3'b010;
-            arlen_r   <= 8'h00;
-        end
-        else begin
-            if (ar_state == AR_IDLE) begin
-                if (dcache_rd_req && dcache_rd_rdy) begin
-                    arvalid_r <= 1'b1;
-                    arid_r    <= 4'd1;
-                    araddr_r  <= dcache_rd_addr;
-                    arsize_r  <= 3'b010;
-                    arlen_r   <= is_dcache_rd_burst ? 8'h03 : 8'h00;
-                end
-                else if (icache_rd_req && icache_rd_rdy) begin
-                    arvalid_r <= 1'b1;
-                    arid_r    <= 4'd0;
-                    araddr_r  <= icache_rd_addr;
-                    arsize_r  <= 3'b010;
-                    arlen_r   <= is_icache_burst ? 8'h03 : 8'h00;
-                end
-            end
-            else if (ar_state == AR_REQ && arvalid_r && arready) begin
-                arvalid_r <= 1'b0;
-            end
-        end
-    end
-
-    // ================================================================
-    // 读响应处理 — ICache/DCache FIFO、rready、return 输出
-    // ================================================================
-
-    // ---------- ICache 读响应 FIFO ----------
-    reg  [32:0] icache_fifo_mem [0:3];
-    reg  [ 1:0] icache_fifo_wptr;
-    reg  [ 1:0] icache_fifo_rptr;
-    reg  [ 2:0] icache_fifo_cnt;
-
-    wire icache_fifo_full;
-    wire icache_fifo_empty;
-    wire icache_fifo_we;
-    wire icache_fifo_re;
-    assign icache_fifo_full  = (icache_fifo_cnt == 3'd4);
-    assign icache_fifo_empty = (icache_fifo_cnt == 3'd0);
-    assign icache_fifo_we    = rvalid && rready && (rid == 4'd0) && !icache_accept;
-    assign icache_fifo_re    = icache_accept && !icache_fifo_empty;
-
-    integer ii;
-    always @(posedge clk) begin
-        if (reset) begin
-            icache_fifo_wptr <= 2'd0;
-            icache_fifo_rptr <= 2'd0;
-            icache_fifo_cnt  <= 3'd0;
-            for (ii = 0; ii < 4; ii = ii + 1)
-                icache_fifo_mem[ii] <= 33'b0;
-        end
-        else begin
-            case ({icache_fifo_we, icache_fifo_re})
-                2'b10: begin
-                    icache_fifo_mem[icache_fifo_wptr] <= {rlast, rdata};
-                    icache_fifo_wptr <= icache_fifo_wptr + 2'd1;
-                    icache_fifo_cnt  <= icache_fifo_cnt  + 3'd1;
-                end
-                2'b01: begin
-                    icache_fifo_rptr <= icache_fifo_rptr + 2'd1;
-                    icache_fifo_cnt  <= icache_fifo_cnt  - 3'd1;
-                end
-                2'b11: begin
-                    icache_fifo_mem[icache_fifo_wptr] <= {rlast, rdata};
-                    icache_fifo_wptr <= icache_fifo_wptr + 2'd1;
-                    icache_fifo_rptr <= icache_fifo_rptr + 2'd1;
-                end
-                default: ;
-            endcase
-        end
-    end
-
-    // ---------- DCache 读响应 FIFO ----------
-    reg  [32:0] dcache_fifo_mem [0:3];
-    reg  [ 1:0] dcache_fifo_wptr;
-    reg  [ 1:0] dcache_fifo_rptr;
-    reg  [ 2:0] dcache_fifo_cnt;
-
-    wire dcache_fifo_full;
-    wire dcache_fifo_empty;
-    wire dcache_fifo_we;
-    wire dcache_fifo_re;
-    assign dcache_fifo_full  = (dcache_fifo_cnt == 3'd4);
-    assign dcache_fifo_empty = (dcache_fifo_cnt == 3'd0);
-    assign dcache_fifo_we    = rvalid && rready && (rid == 4'd1) && !dcache_accept;
-    assign dcache_fifo_re    = dcache_accept && !dcache_fifo_empty;
-
-    integer jj;
-    always @(posedge clk) begin
-        if (reset) begin
-            dcache_fifo_wptr <= 2'd0;
-            dcache_fifo_rptr <= 2'd0;
-            dcache_fifo_cnt  <= 3'd0;
-            for (jj = 0; jj < 4; jj = jj + 1)
-                dcache_fifo_mem[jj] <= 33'b0;
-        end
-        else begin
-            case ({dcache_fifo_we, dcache_fifo_re})
-                2'b10: begin
-                    dcache_fifo_mem[dcache_fifo_wptr] <= {rlast, rdata};
-                    dcache_fifo_wptr <= dcache_fifo_wptr + 2'd1;
-                    dcache_fifo_cnt  <= dcache_fifo_cnt  + 3'd1;
-                end
-                2'b01: begin
-                    dcache_fifo_rptr <= dcache_fifo_rptr + 2'd1;
-                    dcache_fifo_cnt  <= dcache_fifo_cnt  - 3'd1;
-                end
-                2'b11: begin
-                    dcache_fifo_mem[dcache_fifo_wptr] <= {rlast, rdata};
-                    dcache_fifo_wptr <= dcache_fifo_wptr + 2'd1;
-                    dcache_fifo_rptr <= dcache_fifo_rptr + 2'd1;
-                end
-                default: ;
-            endcase
-        end
-    end
-
-    // ---------- rready ----------
-    wire icache_ready;
-    wire dcache_ready;
-    assign icache_ready = !icache_fifo_full || icache_accept;
-    assign dcache_ready = !dcache_fifo_full || dcache_accept;
-    assign rready = icache_ready && dcache_ready;
-
-    // ---------- 读响应输出 ----------
-    assign icache_return_valid = !icache_fifo_empty || (rvalid && rready && (rid == 4'd0));
-    assign icache_return_data  = icache_fifo_empty ? rdata : icache_fifo_mem[icache_fifo_rptr][31:0];
-    assign icache_return_last  = icache_fifo_empty ? rlast : icache_fifo_mem[icache_fifo_rptr][32];
-    assign icache_wr_rdy = 1'b0;  // 占位
-
-
-    assign dcache_return_valid = !dcache_fifo_empty || (rvalid && rready && (rid == 4'd1));
-    assign dcache_return_data  = dcache_fifo_empty ? rdata : dcache_fifo_mem[dcache_fifo_rptr][31:0];
-    assign dcache_return_last  = dcache_fifo_empty ? rlast : dcache_fifo_mem[dcache_fifo_rptr][32];
-    
-    // ================================================================
-    // 写请求处理 — 状态机、写数据分拍、写追踪器、写响应、AXI 写输出
-    // ================================================================
-
-    // ---------- 状态机 ----------
-    localparam AW_W_IDLE = 2'd0;
-    localparam AW_W_BUSY = 2'd1;
-
-    reg  [ 1:0] aw_w_state, aw_w_next;
-    reg         aw_done_r;
-    reg         w_done_r;
-
-    wire is_last_w_beat;
-    assign is_last_w_beat = (w_beat_cnt == awlen_r[1:0]);
-
-    assign dcache_wr_rdy = (aw_w_state == AW_W_IDLE) && !wr_pend_full;
-
-    always @(posedge clk) begin
-        if (reset) begin
-            aw_w_state <= AW_W_IDLE;
-        end
-        else begin
-            aw_w_state <= aw_w_next;
-        end
-    end
-
-    always @(*) begin
-        aw_w_next = aw_w_state;
-        case (aw_w_state)
-            AW_W_IDLE: begin
-                if (dcache_wr_req && dcache_wr_rdy)
-                    aw_w_next = AW_W_BUSY;
-            end
-            AW_W_BUSY: begin
-                if ((aw_done_r || (awvalid_r && awready)) &&
-                    (w_done_r  || (wvalid_r && wready && is_last_w_beat)))
-                    aw_w_next = AW_W_IDLE;
-            end
-            default: aw_w_next = AW_W_IDLE;
-        endcase
-    end
-
-    // ---------- 写地址/数据通道寄存器 + AXI 输出 ----------
-    reg         awvalid_r;
-    reg  [31:0] awaddr_r;
-    reg  [ 2:0] awsize_r;
-    reg  [ 7:0] awlen_r;
-    reg         wvalid_r;
-    reg  [31:0] wdata_r;
-    reg  [ 3:0] wstrb_r;
-    reg  [ 1:0] w_beat_cnt;
-    reg  [127:0] wr_data_latched;
-
-    assign awid    = 4'd1;
-    assign awvalid = awvalid_r;
-    assign awaddr  = awaddr_r;
-    assign awsize  = awsize_r;
-    assign awlen   = awlen_r;
-
-    assign wid     = 4'd1;
-    assign wvalid  = wvalid_r;
-    assign wdata   = wdata_r;
-    assign wstrb   = wstrb_r;
-    assign wlast   = (w_beat_cnt == awlen_r[1:0]);
-
-    always @(posedge clk) begin
-        if (reset) begin
-            awvalid_r       <= 1'b0;
-            awaddr_r        <= 32'b0;
-            awsize_r        <= 3'b010;
-            awlen_r         <= 8'h00;
-            wvalid_r        <= 1'b0;
-            wdata_r         <= 32'b0;
-            wstrb_r         <= 4'b0;
-            w_beat_cnt      <= 2'd0;
-            aw_done_r       <= 1'b0;
-            w_done_r        <= 1'b0;
-            wr_data_latched <= 128'b0;
-        end
-        else begin
-            if (aw_w_state == AW_W_IDLE && dcache_wr_req && dcache_wr_rdy) begin
-                awvalid_r       <= 1'b1;
-                awaddr_r        <= dcache_wr_addr;
-                awsize_r        <= is_dcache_wr_burst ? 3'b010 : dcache_wr_type;
-                awlen_r         <= is_dcache_wr_burst ? 8'h03 : 8'h00;
-                wvalid_r        <= 1'b1;
-                wdata_r         <= dcache_wr_data[31:0];
-                wstrb_r         <= dcache_wr_wstrb;
-                w_beat_cnt      <= 2'd0;
-                aw_done_r       <= 1'b0;
-                w_done_r        <= 1'b0;
-                wr_data_latched <= dcache_wr_data;
-            end
-            else if (aw_w_state == AW_W_BUSY) begin
-                if (awvalid_r && awready) begin
-                    awvalid_r <= 1'b0;
-                    aw_done_r <= 1'b1;
-                end
-                if (wvalid_r && wready) begin
-                    if (is_last_w_beat) begin
-                        wvalid_r  <= 1'b0;
-                        w_done_r  <= 1'b1;
-                    end
-                    else begin
-                        w_beat_cnt <= w_beat_cnt + 2'd1;
-                        case (w_beat_cnt)
-                            2'd0: wdata_r <= wr_data_latched[63:32];
-                            2'd1: wdata_r <= wr_data_latched[95:64];
-                            2'd2: wdata_r <= wr_data_latched[127:96];
-                        endcase
-                    end
-                end
-                if ((aw_done_r || (awvalid_r && awready)) &&
-                    (w_done_r  || (wvalid_r && wready && is_last_w_beat))) begin
-                    aw_done_r <= 1'b0;
-                    w_done_r  <= 1'b0;
-                end
-            end
-        end
-    end
-
-    // ---------- 写请求追踪器 ----------
+    // ========== 写总字节数 ==========
     function [5:0] wr_total_bytes;
         input [2:0] wr_type;
         case (wr_type)
@@ -457,19 +132,223 @@ module cache_axi_bridge (
         endcase
     endfunction
 
-    wire wr_pend_full;
-    wire wr_pend_empty;
-    wire wr_pend_push;
-    wire wr_pend_pop;
-    wire aw_w_done;
-    assign wr_pend_full  = (wr_pend_cnt == 3'd4);
-    assign wr_pend_empty = (wr_pend_cnt == 3'd0);
-    assign aw_w_done     = (aw_w_state == AW_W_BUSY) &&
-                           (aw_done_r || (awvalid_r && awready)) &&
-                           (w_done_r  || (wvalid_r && wready && is_last_w_beat));
-    assign wr_pend_push  = aw_w_done;
-    assign wr_pend_pop   = bvalid && bready;
+    // ============================================================
+    // 写→读冲突检测 — 全在 AR 输出侧，用 Buffer 地址
+    // 检测范围：FIFO + Write Buffer + Burst 数据传输中
+    // ============================================================
+    function rd_wr_conflict;
+        input [31:0] rd_addr;
+        input [ 5:0] rd_bytes;
+        reg   [31:0] rd_end;
+        reg   [31:0] wr_end;
+        reg   [31:0] same_wr_end;
+        integer      k;
+        begin
+            rd_end = rd_addr + {27'd0, rd_bytes} - 32'd1;
+            rd_wr_conflict = 1'b0;
 
+            // 检查写追踪 FIFO
+            for (k = 0; k < 4; k = k + 1) begin
+                if (((k[1:0] - wr_pend_rptr) & 2'd3) < wr_pend_cnt) begin
+                    wr_end = wr_pend_addr[k] + {27'd0, wr_pend_bytes[k]} - 32'd1;
+                    if (!(rd_end < wr_pend_addr[k] || rd_addr > wr_end)) begin
+                        rd_wr_conflict = 1'b1;
+                    end
+                end
+            end
+
+            // 检查 Buffer 内尚未入 FIFO 的写
+            if (dc_wr_buf_valid) begin
+                same_wr_end = dc_wr_buf_addr + {27'd0, wr_total_bytes(dc_wr_buf_type)} - 32'd1;
+                if (!(rd_end < dc_wr_buf_addr || rd_addr > same_wr_end))
+                    rd_wr_conflict = 1'b1;
+            end
+        end
+    endfunction
+
+    wire ic_rd_buf_conflict;
+    wire dc_rd_buf_conflict;
+    assign ic_rd_buf_conflict = rd_wr_conflict(ic_rd_buf_addr, is_ic_rd_burst_buf ? 6'd16 : 6'd4);
+    assign dc_rd_buf_conflict = rd_wr_conflict(dc_rd_buf_addr, is_dc_rd_burst_buf ? 6'd16 : 6'd4);
+
+    // ============================================================
+    // Cache 侧握手 — 纯解耦，仅看 buffer 是否空
+    // ============================================================
+    assign icache_rd_rdy = !ic_rd_buf_valid;
+    assign dcache_rd_rdy = !dc_rd_buf_valid;
+    assign dcache_wr_rdy  = !dc_wr_buf_valid && !wr_pend_full;
+
+
+    // ============================================================
+    // 读 Buffer — 时序
+    // ============================================================
+    always @(posedge clk) begin
+        if (reset) begin
+            ic_rd_buf_valid <= 1'b0;
+            ic_rd_buf_type  <= 3'b010;
+            ic_rd_buf_addr  <= 32'b0;
+        end
+        else if ((icache_rd_req && icache_rd_rdy)) begin
+            ic_rd_buf_valid <= 1'b1;
+            ic_rd_buf_type  <= icache_rd_type;
+            ic_rd_buf_addr  <= icache_rd_addr;
+        end
+        else if (ic_rd_buf_valid && arready && ic_rd_buf_win)
+            ic_rd_buf_valid <= 1'b0;
+    end
+
+    always @(posedge clk) begin
+        if (reset) begin
+            dc_rd_buf_valid <= 1'b0;
+            dc_rd_buf_type  <= 3'b010;
+            dc_rd_buf_addr  <= 32'b0;
+        end
+        else if ((dcache_rd_req && dcache_rd_rdy)) begin
+            dc_rd_buf_valid <= 1'b1;
+            dc_rd_buf_type  <= dcache_rd_type;
+            dc_rd_buf_addr  <= dcache_rd_addr;
+        end
+        else if (dc_rd_buf_valid && arready && dc_rd_buf_win)
+            dc_rd_buf_valid <= 1'b0;
+    end
+
+    // ============================================================
+    // 读路径 — 仲裁与 AR 通道（Buffer 输出侧，冲突检测在这里）
+    // ============================================================
+    // ar_pending 锁：arvalid 拉高后冻结仲裁，防止数据被其他请求夺走
+    // arready 握手完成后释放，允许下一笔仲裁
+    reg         ar_pending;
+    reg         ar_winner_is_dc;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            ar_pending      <= 1'b0;
+            ar_winner_is_dc <= 1'b0;
+        end
+        else if (arvalid && arready) begin
+            ar_pending <= 1'b0;
+        end
+        else if (arvalid && !ar_pending) begin
+            ar_pending      <= 1'b1;
+            ar_winner_is_dc <= dc_rd_buf_win;
+        end
+    end
+
+    wire dc_rd_buf_win;
+    wire ic_rd_buf_win;
+    assign dc_rd_buf_win = ar_pending ? ar_winner_is_dc
+                                      : (dc_rd_buf_valid && !dc_rd_buf_conflict);
+    assign ic_rd_buf_win = ar_pending ? !ar_winner_is_dc
+                                      : (ic_rd_buf_valid && !ic_rd_buf_conflict && !dc_rd_buf_win);
+
+    assign arvalid = dc_rd_buf_win || ic_rd_buf_win;
+    assign arid    = dc_rd_buf_win ? 4'd1 : 4'd0;
+    assign araddr  = dc_rd_buf_win ? dc_rd_buf_addr : ic_rd_buf_addr;
+    assign arsize  = 3'b010;
+    assign arlen   = dc_rd_buf_win ? (is_dc_rd_burst_buf ? 8'h03 : 8'h00)
+                                    : (is_ic_rd_burst_buf  ? 8'h03 : 8'h00);
+
+    // ============================================================
+    // 读响应 — 直通，按 rid 分发
+    // ============================================================
+    assign rready = 1'b1;
+
+    assign icache_return_valid = rvalid && (rid == 4'd0);
+    assign icache_return_data  = rdata;
+    assign icache_return_last  = rlast;
+
+    assign dcache_return_valid = rvalid && (rid == 4'd1);
+    assign dcache_return_data  = rdata;
+    assign dcache_return_last  = rlast;
+
+    // ========== 写握手寄存器 ==========
+    reg         wr_aw_done_r;  // AW 已握手
+    reg         wr_w_done_r;   // W  已完成（单拍=一拍/ Burst=最后一拍）
+    reg  [ 1:0] wr_beat;       // W beat 计数（0..3）
+
+    // ============================================================
+    // 写路径 — 握手（Buffer → 总线）
+    // ============================================================
+    wire aw_done;
+    assign aw_done = (dc_wr_buf_valid && awready && !wr_pend_full) || wr_aw_done_r;
+
+    wire w_done;
+    assign w_done = (dc_wr_buf_valid && wready && !wr_pend_full
+                     && (is_dc_wr_burst_buf ? (wr_beat == 2'd3) : 1'b1))
+                     || wr_w_done_r;
+
+    wire single_wr_done;
+    assign single_wr_done = aw_done && w_done && !is_dc_wr_burst_buf;
+
+    // ========== 握手寄存器 — 时序 ==========
+    always @(posedge clk) begin
+        if (reset) begin
+            wr_aw_done_r <= 1'b0;
+            wr_w_done_r  <= 1'b0;
+            wr_beat      <= 2'd0;
+        end
+        else begin
+            if (dc_wr_buf_valid && awready && !wr_pend_full && !wr_aw_done_r)
+                wr_aw_done_r <= 1'b1;
+            if (dc_wr_buf_valid && wready && !wr_pend_full
+                && (is_dc_wr_burst_buf ? (wr_beat == 2'd3) : 1'b1)
+                && !wr_w_done_r)
+                wr_w_done_r <= 1'b1;
+            if ((aw_done && w_done)) begin
+                wr_aw_done_r <= 1'b0;
+                wr_w_done_r  <= 1'b0;
+            end
+            if (dc_wr_buf_valid && wready && !wr_pend_full && is_dc_wr_burst_buf && wr_beat != 2'd3)
+                wr_beat <= wr_beat + 2'd1;
+            else if ((aw_done && w_done))
+                wr_beat <= 2'd0;
+        end
+    end
+
+    // ========== 写 Buffer — 时序 ==========
+    always @(posedge clk) begin
+        if (reset) begin
+            dc_wr_buf_valid <= 1'b0;
+            dc_wr_buf_type  <= 3'b010;
+            dc_wr_buf_addr  <= 32'b0;
+            dc_wr_buf_wstrb <= 4'b0;
+            dc_wr_buf_data  <= 128'b0;
+        end
+        else if ((dcache_wr_req && dcache_wr_rdy)) begin
+            dc_wr_buf_valid <= 1'b1;
+            dc_wr_buf_type  <= dcache_wr_type;
+            dc_wr_buf_addr  <= dcache_wr_addr;
+            dc_wr_buf_wstrb <= dcache_wr_wstrb;
+            dc_wr_buf_data  <= dcache_wr_data;
+        end
+        else if ((aw_done && w_done))
+            dc_wr_buf_valid <= 1'b0;
+    end
+
+    // ============================================================
+    // 写路径 — AW/W 通道（全部从 Buffer 驱动）
+    // ============================================================
+    assign awid    = 4'd1;
+    assign awvalid = dc_wr_buf_valid && !wr_aw_done_r && !wr_pend_full;
+    assign awaddr  = dc_wr_buf_valid ? dc_wr_buf_addr : 32'b0;
+    assign awsize  = dc_wr_buf_valid ? dc_wr_buf_type : 3'b010;
+    assign awlen   = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? 8'h03 : 8'h00) : 8'h00;
+
+    assign wid    = 4'd1;
+    assign wvalid = dc_wr_buf_valid && !wr_pend_full
+                  && (is_dc_wr_burst_buf || !wr_w_done_r);
+    assign wdata  = dc_wr_buf_valid ? dc_wr_buf_data[wr_beat * 32 +: 32] : 32'b0;
+    assign wstrb  = dc_wr_buf_valid ? dc_wr_buf_wstrb : 4'b0;
+    assign wlast  = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? (wr_beat == 2'd3) : 1'b1) : 1'b0;
+
+    // ========== 写完成检测 ==========
+    wire wr_complete;
+    assign wr_complete = single_wr_done
+                       || ((aw_done && w_done) && is_dc_wr_burst_buf);
+
+    // ============================================================
+    // 写追踪 FIFO — push / pop 时序
+    // ============================================================
     integer pp;
     always @(posedge clk) begin
         if (reset) begin
@@ -479,15 +358,15 @@ module cache_axi_bridge (
             for (pp = 0; pp < 4; pp = pp + 1) begin
                 wr_pend_addr[pp]  <= 32'b0;
                 wr_pend_bytes[pp] <= 6'd4;
-                wr_pend_wstrb[pp] <= 4'b0;
             end
         end
         else begin
-            case ({wr_pend_push, wr_pend_pop})
+            case ({wr_complete, (bvalid && bready)})
                 2'b10: begin
-                    wr_pend_addr[wr_pend_wptr]  <= awaddr_r;
-                    wr_pend_bytes[wr_pend_wptr] <= (awlen_r == 8'h03) ? 6'd16 : wr_total_bytes(awsize_r);
-                    wr_pend_wstrb[wr_pend_wptr] <= wstrb_r;
+                    wr_pend_addr[wr_pend_wptr]  <= dc_wr_buf_addr;
+                    wr_pend_bytes[wr_pend_wptr] <= single_wr_done
+                                                  ? wr_total_bytes(dc_wr_buf_type)
+                                                  : 6'd16;
                     wr_pend_wptr <= wr_pend_wptr + 2'd1;
                     wr_pend_cnt  <= wr_pend_cnt  + 3'd1;
                 end
@@ -496,9 +375,10 @@ module cache_axi_bridge (
                     wr_pend_cnt  <= wr_pend_cnt  - 3'd1;
                 end
                 2'b11: begin
-                    wr_pend_addr[wr_pend_wptr]  <= awaddr_r;
-                    wr_pend_bytes[wr_pend_wptr] <= (awlen_r == 8'h03) ? 6'd16 : wr_total_bytes(awsize_r);
-                    wr_pend_wstrb[wr_pend_wptr] <= wstrb_r;
+                    wr_pend_addr[wr_pend_wptr]  <= dc_wr_buf_addr;
+                    wr_pend_bytes[wr_pend_wptr] <= single_wr_done
+                                                  ? wr_total_bytes(dc_wr_buf_type)
+                                                  : 6'd16;
                     wr_pend_wptr <= wr_pend_wptr + 2'd1;
                     wr_pend_rptr <= wr_pend_rptr + 2'd1;
                 end
@@ -507,13 +387,15 @@ module cache_axi_bridge (
         end
     end
 
-    // ---------- 写响应 ----------
+    // ============================================================
+    // 写响应
+    // ============================================================
     assign bready = !wr_pend_empty;
     assign dcache_wr_done = bvalid && bready;
 
-    // ================================================================
+    // ============================================================
     // AXI 常量信号
-    // ================================================================
+    // ============================================================
     assign arburst = 2'b01;
     assign arlock  = 2'b00;
     assign arcache = 4'h0;

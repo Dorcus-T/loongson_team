@@ -124,6 +124,7 @@ module core_top (
     wire                  bp_update_en;
     wire                  ex_mispredict;
     wire [31:0] ex_corr_target;
+    wire [31:0] if_pre_if_pc_next;              // IF 级 pre_if_pc_next 给 branch_predict 做 lookup_pc_i
 
     assign mispred_bus = {ex_mispredict, ex_corr_target};
 
@@ -367,7 +368,7 @@ module core_top (
     branch_predict u_branch_predict (
         .clk         (clk),
         .reset       (reset),
-        .lookup_pc_i (if_to_mmu_vaddr[31:2]),
+        .lookup_pc_i (if_pre_if_pc_next[31:2]),
         .btb_hit_o   (bp_btb_hit),
         .btb_target_o(bp_btb_target),
         .btb_counter_o(bp_btb_counter),
@@ -448,7 +449,8 @@ module core_top (
         .if_ready_o         (readygo_i[1:0]),
         .if_exc_o           (exc_i[1:0]),
         .if_ertn_o          (ertn_i[1:0]),
-        .s0_flush           (s0_flush)
+        .s0_flush           (s0_flush),
+        .if_pre_if_pc_next  (if_pre_if_pc_next)
     );
 
     // ================================================================
@@ -880,13 +882,6 @@ module core_top (
         .icache_return_valid  (icache_return_valid),
         .icache_return_last   (icache_return_last),
         .icache_return_data   (icache_return_data),
-        .icache_accept        (1'b1),
-        .icache_wr_req        (1'b0),
-        .icache_wr_type       (3'b0),
-        .icache_wr_addr       (32'b0),
-        .icache_wr_wstrb      (4'b0),
-        .icache_wr_data       (128'b0),
-        .icache_wr_rdy        (),
         // DCache 接口
         .dcache_rd_req        (dcache_rd_req),
         .dcache_rd_type       (dcache_rd_type),
@@ -895,7 +890,6 @@ module core_top (
         .dcache_return_valid  (dcache_return_valid),
         .dcache_return_last   (dcache_return_last),
         .dcache_return_data   (dcache_return_data),
-        .dcache_accept        (1'b1),
         .dcache_wr_req        (dcache_wr_req),
         .dcache_wr_type       (dcache_wr_type),
         .dcache_wr_addr       (dcache_wr_addr),

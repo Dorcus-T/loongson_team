@@ -51,7 +51,9 @@ module if_stage (
     output wire [1:0]  if_ertn_o,       // → linectrl ertn_i
 
     // ── inst_dirty计算 ──
-    input  wire         s0_flush         // pre_if 之后有冲刷 → inst_dirty
+    input  wire         s0_flush,        // pre_if 之后有冲刷 → inst_dirty
+    // ── 分支预测器 lookup_pc_i ──
+    output wire [31:0]  if_pre_if_pc_next // pre_if_pc_next 给 branch_predict 做查表地址
 );
 
     reg  [`IF_BUS_WD-1:0] if_data_n;
@@ -226,10 +228,7 @@ module if_stage (
 
     // ========== pre_if 下一拍 PC ==========
     wire [31:0] pre_if_pc_next;
-    assign pre_if_pc_next = flush_active                   ? nextpc :
-                            ras_pred_taken                 ? {bp_ras_target, 2'b00} :
-                            btb_pred_taken                 ? {bp_btb_target, 2'b00} :
-                                                             nextpc;
+    assign pre_if_pc_next = nextpc;
 
     // ========== IF 级 ==========
     assign seq_pc  = pre_if_pc_r + 32'h4;
@@ -237,6 +236,7 @@ module if_stage (
                      rf_valid      ? rf_pc          :
                      wb_ertn_flush ? exc_back_pc    :
                      ex_mispredict ? ex_corr_target :
+                     pred_taken_r  ? {pred_target_r, 2'b00} :
                                      seq_pc      ;
     wire flush_active;
     assign flush_active = ex_mispredict || exc_no_rf || wb_ertn_flush || rf_valid;
@@ -296,4 +296,7 @@ module if_stage (
     assign pre_if_exc_valid = pre_if_adef && pre_if_valid;
 
     assign if_exc_valid = |if_exc_r && if_valid;
+
+    // ========== 输出给分支预测器 ==========
+    assign if_pre_if_pc_next = pre_if_pc_next;
 endmodule

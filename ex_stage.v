@@ -205,7 +205,7 @@ module exe_stage (
             valid_o <= 1'b0;
         end
         else begin
-            if (ldata)  data_o  <= data_n;
+            if (ldata)  data_o  <= current_bus;
             valid_o <= (ldata ? valid_n : valid_o) & lvalid;
         end
     end
@@ -366,7 +366,7 @@ module exe_stage (
         res_from_timer,        // 204     结果来自计数器
         res_from_csr,          // 203     结果来自csr寄存器堆
         ex_csr_num,            // 202:189 csr号码
-        csr_rvalue,            // 188:157 csr读数据
+        csr_rvalue_actual,     // 188:157 csr读数据（cpucfg用本地生成值）
         csr_we,                // 156     csr写使能
         csr_wmask,             // 155:124 csr写掩码（原值，PRE_MEM 负责 tlbsrch 改写）
         csr_wvalue,            // 123:92  csr写数据（原值，PRE_MEM 负责 tlbsrch 改写）
@@ -434,9 +434,25 @@ module exe_stage (
     assign calc_not_ready = ex_valid && (is_mul_inst && !(mul_ready || mul_already) ||
                             is_div_inst && !(div_ready || div_already));
 
+    // ========== cpucfg 数据通路（EX 本地计算，不走 CSR 模块） ==========
+    wire       is_cpucfg  = res_from_csr && (ex_csr_num == 14'h00b1);
+    wire [7:0] cfg_valen  = `VALEN - 1;
+    wire [7:0] cfg_palen  = `PALEN - 1;
+    wire [3:0] cfg_off    = `OFFSET_WIDTH;
+    wire [7:0] cfg_idx    = `INDEX_WIDTH;
+    wire [15:0] cfg_ways  = `WAY_NUM - 1;
+    wire [31:0] cpucfg_rvalue =
+        (rj_value[5:0] == 6'd1)  ? {12'd0, cfg_valen, cfg_palen, 1'b0, 1'b1, 2'd0} :
+        (rj_value[5:0] == 6'd2)  ? 32'h0 :
+        (rj_value[5:0] == 6'd16) ? {25'd0, 1'b0, 1'b0, 2'd0, 1'b1, 1'b0, 1'b1} :
+        (rj_value[5:0] == 6'd17) ? {1'b0, 3'd0, cfg_off, cfg_idx, cfg_ways} :
+        (rj_value[5:0] == 6'd18) ? {1'b0, 3'd0, cfg_off, cfg_idx, cfg_ways} :
+        (rj_value[5:0] == 6'd19) ? 32'h0 : 32'h0;
+    wire [31:0] csr_rvalue_actual = is_cpucfg ? cpucfg_rvalue : csr_rvalue;
+
     // ========== 前递输出 ==========
     assign ex_to_id_dest    = dest & {5{ex_valid}} & {5{gr_we}};
-    assign ex_to_id_result  = res_from_csr ? csr_rvalue :
+    assign ex_to_id_result  = res_from_csr ? csr_rvalue_actual :
                               res_from_timer ? timer_finalval :
                               alu_result;                  // 计算结果
     assign ex_to_id_load_op = ex_load_op & ex_valid;       // 加载指令标志

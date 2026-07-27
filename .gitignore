@@ -16,3 +16,6 @@ tool/*.log
 tool/*.jou
 tool/dfx_runtime.txt
 tool/clockInfo.txt
+
+# 波形文件
+*.fst

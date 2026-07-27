@@ -797,13 +797,19 @@ module id_stage (
     assign int_csr_stall = has_int && (any_csr_we_downstream || any_ertn_downstream);
 
     // 读csr指令与后面写同一个 CSR 冲突（简化：仅比较 csr 号相等）
-    // tlbsrch 额外检查 TLBEHI 冲突（tlbsrch 读 TLBIDX 但内部用 TLBEHI 搜索）
-    wire is_csr_reader = inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch;
+    // tlbsrch 额外检查 TLBEHI 冲突；ESTAT 额外检查 TICLR 冲突（TICLR 写会清 ESTAT）
+    wire is_csr_reader   = inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch;
+    wire read_estat       = (csr_id_num == `CSR_ESTAT);
+    wire any_ticlr_write  = (ex_csr_we      && ex_csr_num      == `CSR_TICLR)
+                         || (pre_mem_csr_we && pre_mem_csr_num == `CSR_TICLR)
+                         || (mem_csr_we     && mem_csr_num     == `CSR_TICLR)
+                         || (wb_csr_we      && wb_csr_num      == `CSR_TICLR);
     assign inst_csr_stall = is_csr_reader &&
                            ((ex_csr_we      && (ex_csr_num == csr_id_num || inst_tlbsrch && ex_csr_num == `CSR_TLBEHI))
                          || (pre_mem_csr_we && (pre_mem_csr_num == csr_id_num || inst_tlbsrch && pre_mem_csr_num == `CSR_TLBEHI))
                          || (mem_csr_we     && (mem_csr_num == csr_id_num || inst_tlbsrch && mem_csr_num == `CSR_TLBEHI))
-                         || (wb_csr_we      && wb_csr_num == csr_id_num));
+                         || (wb_csr_we      && wb_csr_num == csr_id_num)
+                         || (read_estat && any_ticlr_write));
     assign csr_stall = inst_csr_stall || int_csr_stall;
 
     // ========== 检测异常 ==========

@@ -4,7 +4,7 @@ setlocal
 
 set CHIPLAB_HOME=Z:\home\dorcus_t\chiplab
 set WSL_CHIPLAB=/home/dorcus_t/chiplab
-set TEST=nscscc_func
+set TEST=nscscc_func_verilator
 set PC_TRACE=
 set DUMP_WAVE=
 set DIFFTEST=--disable-trace-comp

@@ -5,7 +5,7 @@ setlocal
 if "%1"=="" goto usage
 
 set BENCH=%1
-set WSL_PERF=/home/dorcus_t/chiplab/software/examples/nscscc_perf
+set WSL_PERF=/home/dorcus_t/chiplab/software/examples/nscscc_perf_verilator
 set WSL_CHIPLAB=/home/dorcus_t/chiplab
 set PC_TRACE=
 set DUMP_WAVE=

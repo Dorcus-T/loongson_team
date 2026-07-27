@@ -21,6 +21,43 @@ LoongArch (LA) 5级顺序流水线 CPU
 - `decoder_*_*.v` — generate 实现译码器
 - `mycpu.h` — 总线位宽、CSR 地址、异常编码宏定义
 
+## Cache 架构
+
+icache 和 dcache 均为 2-way 组相联，Vivado BRAM 推断，PLRU 替换。
+
+### MMU 并行化接口
+
+MMU（虚实地址转换）与 cache 并行工作。CPU 请求到达时，cache 先拿到 `cpu_index` / `cpu_offset`，**下一拍** MMU 输出 `mmu_tag` / `mmu_cache` / `mmu_cancel` 到达，此时 cache 进入 LOOKUP 状态做 tag 比较。
+
+| 信号 | 方向 | 说明 |
+|------|------|------|
+| `mmu_tag` | input | MMU 转换的物理 tag，accept 后 1 拍有效 |
+| `mmu_cache` | input | 是否 cached，accept 后 1 拍有效 |
+| `mmu_cancel` | input | MMU 异常取消，accept 后 1 拍有效 |
+| `mmu_cacop_tag` | input | CACOP 操作的物理 tag |
+
+### MMU Buffer
+
+REFILL 期间提前 accept 新请求时，accept 的下一拍 MMU 输出有效但 cache 仍在 REFILL。MMU Buffer 捕获 `mmu_tag` / `mmu_cache` / `mmu_cancel`，供后续 LOOKUP 使用。
+
+- 捕获条件：`main_refill && refill_already_accept_new_req && !mmu_buf_valid`
+- 使用选择：`use_mmu_buf = main_lookup && mmu_buf_valid` → tag/cache/cancel 从 buffer 取
+- 清零：进入 LOOKUP 或 IDLE
+
+### icache 特点
+
+- 只读 cache，无写接口
+- **无硬件预取**：原预取指（prefetch）机制已移除，REFILL 中允许提前 accept 新请求（`refill_early_accept`）补偿
+- 输出 FIFO 深度 4
+
+### dcache 特点
+
+- 读分配 + 写回 + 写分配
+- Victim Cache 4 项（仅干净行），可配置开关
+- 双状态机：Main FSM（6 状态）+ WB FSM（2 状态）
+- 输出 FIFO 深度 4
+- `effective_cancel` 最高优先：LOOKUP 拍取消则直接回 IDLE，不触发任何总线事务
+
 ## 仿真命令
 
 - 综合工具：Verilator
@@ -32,6 +69,8 @@ LoongArch (LA) 5级顺序流水线 CPU
 - **TLB 可配置**：条目数由 parameter 控制，当前 32 项
 - **SRAM 协议两通道独立**：inst_sram（取指）和 data_sram（访存）各自握手
 - **CSR 写后读冒险**：跟踪 CSR 写所在的流水级来解决 RAW
+- **MMU-cache 时序**：MMU 输出（tag/cache/cancel）比 cache accept 晚 1 拍到达。cache 内部无 `req_tag`/`req_cached` 寄存器——LOOKUP 拍直接用 `mmu_tag`/`mmu_cache` 端口。REFILL 提前 accept 时由 MMU Buffer 桥接这段时间差
+- **`effective_cancel`**：LOOKUP 拍若 MMU 报告取消，cache 直接回 IDLE 不发起任何总线事务。该信号在 icache/dcache 内由 `use_mmu_buf ? mmu_buf_cancel : mmu_cancel` 推导
 
 # Verilog 代码格式规范
 

@@ -3,31 +3,23 @@
 module if_stage (
     input  wire                     clk,                 // 时钟信号
     input  wire                     reset,               // 复位信号（高有效）
-    // allowin
-    input  wire                     id_allowin,          // ID阶段允许接收数据
-    // 来自id阶段的分支总线
-    input  wire [`BR_BUS_WD-1:0]   br_bus,              // 分支总线：{br_taken, br_target}
     // 输出给id阶段
     output wire                     if_to_id_valid,      // IF到ID有效标志
     output wire [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus,     // IF到ID总线
+    output wire                     if_to_id_upd,         // IF→ID 更新 data_n
     // 与 ICache 的接口
     output wire                     icache_cpu_req,      // ICache 请求有效
-    output wire                     icache_cpu_op,       // ICache 操作类型（0读）
-    output wire [`INDEX_WIDTH-1:0]   icache_cpu_index,    // ICache 组索引
-    output wire [`TAG_WIDTH-1:0]     icache_cpu_tag,      // ICache 标签
-    output wire [`OFFSET_WIDTH-1:0]  icache_cpu_offset,   // ICache 块内偏移
-    output wire [ 3:0]              icache_cpu_wstrb,    // ICache 写掩码（未使用）
-    output wire [31:0]              icache_cpu_wdata,    // ICache 写数据（未使用）
+    output wire [`INDEX_WIDTH-1:0]  icache_cpu_index,    // ICache 组索引
+    output wire [`OFFSET_WIDTH-1:0] icache_cpu_offset,   // ICache 块内偏移
     input  wire                     icache_cpu_addr_ok,  // ICache 地址就绪
     input  wire                     icache_cpu_data_ok,  // ICache 数据就绪
     input  wire [31:0]              icache_cpu_rdata,    // ICache 读数据
     output wire                     icache_cpu_accept,   // IF 可接受 cache 数据
-    output wire                     icache_cpu_cached,   // IF 访问可缓存
     // 与MMU交互
     output wire [31:0]              if_to_mmu_vaddr,     // IF发MMU虚地址
-    input  wire [31:0]              padd,                // MMU返回物理地址
-    input  wire [ 2:0]              if_tlb_exc,          // MMU返回TLB异常
-    input  wire                     if_cached,           // MMU返回是否可缓存
+    output wire                     s0_need_mmu,         // IF 需要 MMU 翻译
+    input  wire [ 2:0]              if_tlb_exc,          // MMU TLB 异常（合并到 if_exc）
+    input  wire                     s0_need_mmu_r,       // s0_need_mmu 寄存一拍 → 本拍 TLB 结果有效
     // 异常冲刷
     input  wire                     exc_no_rf,           // WB阶段有异常则冲刷流水线
     input  wire                     wb_ertn_flush,       // WB阶段有ertn指令则冲刷流水线
@@ -36,176 +28,275 @@ module if_stage (
     input  wire [31:0]              exc_back_pc,         // 异常返回地址
     // 重取指相关
     input  wire                     rf_valid,            // 重取指信号
-    input  wire [31:0]              rf_pc                // 重取指地址
+    input  wire [31:0]              rf_pc,               // 重取指地址
+    // 来自分支预测器
+    input  wire                     bp_btb_hit,          // BTB 命中
+    input  wire [29:0]              bp_btb_target,       // BTB 目标
+    input  wire [ 1:0]              bp_btb_counter,      // BTB 计数器
+    input  wire [ 4:0]              bp_btb_index,        // BTB 索引
+    input  wire                     bp_ras_hit,          // RAS 命中
+    input  wire [29:0]              bp_ras_target,       // RAS 目标
+    input  wire [ 3:0]              bp_ras_index,        // RAS 索引
+    // 来自 EX 的误预测纠正总线
+    input  wire [`MISPRED_BUS_WD-1:0] mispred_bus,       // 误预测纠正总线
+
+    // ── linectrl 接口（pre_if = 0, if = 1）──
+    input  wire [1:0]  ldata,           // 0=用旧寄存器, 1=用新寄存器
+    input  wire [1:0]  lvalid,          // 本拍可呈现数据
+    input  wire [1:0]  lpower,          // 本拍有权发请求
+    input  wire [1:0]  lready,          // 维持就绪
+    output wire [1:0]  if_valid_o,      // → linectrl valid_i
+    output wire [1:0]  if_ready_o,      // → linectrl readygo_i
+    output wire [1:0]  if_exc_o,        // → linectrl exc_i
+    output wire [1:0]  if_ertn_o,       // → linectrl ertn_i
+
+    // ── inst_dirty计算 ──
+    input  wire         s0_flush,        // pre_if 之后有冲刷 → inst_dirty
+    // ── 分支预测器 lookup_pc_i ──
+    output wire [31:0]  if_pre_if_pc_next // pre_if_pc_next 给 branch_predict 做查表地址
 );
 
-    reg         if_valid;                    // IF阶段有效标志
-    wire        if_ready_go;                 // IF阶段就绪标志
-    wire        if_allowin;                  // IF阶段允许接收新指令
-    wire        pre_if_valid;                // 预取指阶段有效标志
+    reg  [`IF_BUS_WD-1:0] if_data_n;
+    reg                  if_valid_n;
+    reg  [`IF_BUS_WD-1:0] if_data_o;
+    reg                  if_valid_old;
+    wire                 if_valid = (ldata[1] ? if_valid_n : if_valid_old) & lvalid[1];
+
+    wire pre_if_upd = (pre_if_ready_go && lpower[0]) || !pre_if_valid;
+
+    // TLB 异常合并：if_data_n[3:0] = {ADEF, 3'b0}，OR 上 if_tlb_exc
+    wire [3:0] if_exc_raw       = if_data_n[3:0];
+    wire [3:0] if_exc_with_tlb  = {if_exc_raw[3], if_tlb_exc};
+
+    always @(posedge clk) begin
+        if (reset) begin
+            if_data_n  <= `IF_BUS_WD'd0;
+            if_valid_n <= 1'b0;
+        end
+        else if (pre_if_upd) begin
+            if_data_n  <= {pre_if_current, pre_if_exc};
+            if_valid_n <= pre_if_valid;
+        end
+        else if (s0_need_mmu_r) begin
+            if_data_n[3:0] <= if_exc_with_tlb;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (reset) begin
+            if_data_o  <= `IF_BUS_WD'd0;
+            if_valid_old <= 1'b0;
+        end
+        else begin
+            if (ldata[1])  if_data_o  <= if_current;
+            if_valid_old <= (ldata[1] ? if_valid_n : if_valid_old) & lvalid[1];
+        end
+    end
+
+    wire [`IF_BUS_WD-1:0] if_current;
+    assign if_current = ldata[1] ? (s0_need_mmu_r ? {if_data_n[`IF_BUS_WD-1:4], if_exc_with_tlb} : if_data_n)
+                                  : if_data_o;
+
+    wire [31:0] if_pc_r;
+    wire        if_pred_valid, if_pred_taken, if_pred_is_ras;
+    wire [29:0] if_pred_target;
+    wire [ 4:0] if_pred_btb_index;
+    wire [ 3:0] if_pred_ras_index;
+    wire [ 3:0] if_exc_r;
+    assign {
+        if_pc_r, 
+        if_pred_valid,
+        if_pred_taken, 
+        if_pred_target,
+        if_pred_is_ras, 
+        if_pred_btb_index, 
+        if_pred_ras_index,
+        if_exc_r
+    } = if_current;
+
     wire        pre_if_ready_go;             // 预取值阶段就绪标志
-    wire        pre_if_to_if_valid;          // 预取指到取值有效
-    reg         pre_if_ready_go_r;           // 预取值阶段上周期的指令是否发送过请求，用于脏指令判断
-    reg         pre_if_exc_r;                // 预取值阶段上周期的指令是否有异常，用于脏指令判断
+    wire        if_ready_go;                 // IF 阶段就绪标志
     // ========== 控制信号解析 ==========
     wire [31:0] seq_pc;                 // 顺序下一条PC（当前PC+4）
     wire [31:0] nextpc;                 // 下一周期PC（顺序或分支）
-    reg  [31:0] nextpc_r;               // nextpc的寄存，用于判断preif是否阻塞
-    wire        br_taken;               // 分支/跳转是否发生
-    reg         fork_r;                 // 分叉寄存
-    wire [31:0] br_target;              // 分支/跳转目标地址
-    // brtaken和冲刷信号的任务：让if中的错误指令不动，让preif输入特定的取值请求且preif可以前进
-    // 冲刷通过inst_dirty机制丢弃桥FIFO中的旧数据，确保新指令进入if时拿到的是新读出的数据
-    // brtaken_r和两个冲刷寄存信号会让nextpc一直指向跳转地址，且不会让if中的错误指令往前走，也会让preif可以前进
 
-    // ========== 异常信号 ==========
+    // ========== pre_if 双寄存器 ==========
+    reg  [31:0]               pre_if_pc_n;             // 新 PC（寄存器）
+    reg  [`PRE_IF_BUS_WD-1:0] pre_if_data_o;           // 旧数据（全寄存器）
+    reg                       pre_if_valid_o;           // 旧有效
+
+    always @(posedge clk) begin
+        if (reset) pre_if_pc_n <= 32'h1c000000;
+        else       pre_if_pc_n <= pre_if_pc_next;
+    end
+    always @(posedge clk) begin
+        if (reset) begin
+            pre_if_data_o  <= {32'h1c000000, {`PRE_IF_BUS_WD-32{1'b0}}};
+            pre_if_valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata[0])  pre_if_data_o  <= pre_if_new;
+            pre_if_valid_o <= (ldata[0] ? pre_if_valid_n : pre_if_valid_o) & lvalid[0];
+        end
+    end
+
+    wire [`PRE_IF_BUS_WD-1:0] pre_if_new;
+    assign pre_if_new = {pre_if_pc_n,
+                         bp_btb_hit || bp_ras_hit,
+                         btb_pred_taken || ras_pred_taken,
+                         ras_pred_taken ? bp_ras_target : bp_btb_target,
+                         bp_ras_hit,
+                         bp_btb_index,
+                         bp_ras_index};
+
+    wire [`PRE_IF_BUS_WD-1:0] pre_if_current;
+    assign pre_if_current  = ldata[0] ? pre_if_new : pre_if_data_o;
+    wire   pre_if_valid_n  = ~reset;
+    wire   pre_if_valid    = (ldata[0] ? pre_if_valid_n : pre_if_valid_o) & lvalid[0];
+
+    // ── → linectrl ──
+    assign if_valid_o[0] = pre_if_valid;
+    assign if_valid_o[1] = if_valid;
+    assign if_ready_o[0] = pre_if_ready_go;
+    assign if_ready_o[1] = if_ready_go;
+    assign if_exc_o[0]   = pre_if_exc_valid;
+    assign if_exc_o[1]   = if_exc_valid;
+    assign if_ertn_o[0]  = 1'b0;
+    assign if_ertn_o[1]  = 1'b0;
+
+    wire [31:0] pre_if_pc_r;
+    wire        pred_valid_r;
+    wire        pred_taken_r;
+    wire [29:0] pred_target_r;
+    wire        pred_is_ras_r;
+    wire [ 4:0] pred_btb_index_r;
+    wire [ 3:0] pred_ras_index_r;
+    assign {
+        pre_if_pc_r,
+        pred_valid_r,
+        pred_taken_r,
+        pred_target_r,
+        pred_is_ras_r,
+        pred_btb_index_r,
+        pred_ras_index_r
+    } = pre_if_current;
+
+    // ========== 异常信号（仅 ADEF，TLB 异常由 IF 级合并） ==========
     wire        pre_if_adef;
     wire [ 3:0] pre_if_exc;
     wire        pre_if_exc_valid;
-    reg  [ 3:0] if_exc;
+    wire        if_exc_valid;
+
+    assign s0_need_mmu = can_req;
+
+    wire can_req = pre_if_valid && !pre_if_adef && lpower[0] && !reset;
 
     // ========== 指令信息 ==========
-    wire [31:0] if_inst;                // 当前取到的指令（直连桥的数据）
-    reg  [31:0] if_pc;                  // 当前指令的PC
-    reg         new_in;                 // 表明if中是否是新进入的指令
-    reg         req_already;            // 表明preif的指令已经发出过访存请求
-    wire        req_already_final;      // 考虑冲刷和分支后，表明preif的指令已经发出过访存请求
-    reg  [ 1:0] inst_dirty;             // 不为0就代表下一次 cache 的 data_ok 数据无效
+    wire [31:0] if_inst;
+    reg         req_state;
+    wire        req_already;
+    assign req_already = req_state && !ldata[0];
 
-    // ========== 分支总线解析 ==========
-    assign {br_taken, br_target} = br_bus;
+    // ========== 误预测总线解析 ==========
+    wire        ex_mispredict;
+    wire [31:0] ex_corr_target;
+    assign {ex_mispredict, ex_corr_target} = mispred_bus;
+
+    // ========== 预测信号 ==========
+    wire btb_pred_taken;
+    wire ras_pred_taken;
+    assign btb_pred_taken = bp_btb_hit && bp_btb_counter[1] && !bp_ras_hit;
+    assign ras_pred_taken = bp_ras_hit;
 
     // ========== 输出到ID阶段的总线 ==========
-    assign if_to_id_bus = {if_exc, if_inst, if_pc};
+    assign if_to_id_bus = {
+        if_exc_r, 
+        if_inst, 
+        if_pc_r,
+        if_pred_valid, 
+        if_pred_taken, 
+        if_pred_target,
+        if_pred_is_ras, 
+        if_pred_btb_index, 
+        if_pred_ras_index
+    };
 
     // ========== 流水线控制 ==========
-    assign pre_if_to_if_valid = pre_if_ready_go && pre_if_valid;              // 预取指有效逻辑
-    assign pre_if_valid       = ~reset;                                       // 预取指阶段：只要不复位就一直有效
-    assign pre_if_ready_go    = (icache_cpu_req && icache_cpu_addr_ok) || req_already_final || (pre_if_exc_valid);
-    // 如果下一次上跳能够握手发请求或者已经发送过请求，那么下一次上跳就可以前进
-    assign seq_pc  = if_pc + 32'h4;                                            // 顺序PC = 当前PC + 4（指令长度4字节）
-    assign nextpc  = exc_no_rf     ? exc_entry   :                             // WB阶段有异常就进入异常处理地址，WB为ertn则返回原来地址，此两种之后再考虑跳转
-                     rf_valid      ? rf_pc       :                             // 重取指地址
-                     wb_ertn_flush ? exc_back_pc :
-                     br_taken      ? br_target   :
+    wire cache_sent     = (icache_cpu_req && icache_cpu_addr_ok) || req_already;
+    wire pre_if_work_done = pre_if_exc_valid ? 1'b1 : cache_sent;
+    assign pre_if_ready_go = pre_if_work_done || !pre_if_valid || lready[0];
+
+    // ========== pre_if 下一拍 PC ==========
+    wire [31:0] pre_if_pc_next;
+    assign pre_if_pc_next = nextpc;
+
+    // ========== IF 级 ==========
+    assign seq_pc  = pre_if_pc_r + 32'h4;
+    assign nextpc  = exc_no_rf     ? exc_entry      :
+                     rf_valid      ? rf_pc          :
+                     wb_ertn_flush ? exc_back_pc    :
+                     ex_mispredict ? ex_corr_target :
+                     pred_taken_r  ? {pred_target_r, 2'b00} :
                                      seq_pc      ;
-    // nextpc逻辑中异常和ertn的优先级高于brtaken，如果id和wb同时发来信号，优先处理wb的信号
-    assign if_ready_go    = !(br_taken || exc_no_rf || wb_ertn_flush || rf_valid || fork_r) && (icache_cpu_data_ok || (|if_exc)) && !inst_dirty;
-    // 分支/跳转会阻塞if指令前进；数据从桥直连进入if，不再经if_inst_r暂存
-    assign if_allowin     = !if_valid || (if_ready_go && id_allowin) || br_taken || wb_ertn_flush || rf_valid || exc_no_rf || fork_r;
-    // 分支让if不走但能进，让if被替换；冲刷则是让正确指令能进就行
-    assign if_to_id_valid = if_valid && if_ready_go;
+    wire flush_active;
+    assign flush_active = ex_mispredict || exc_no_rf || wb_ertn_flush || rf_valid;
 
-    // 取值阶段有效标志更新
-    // 只有if的valid不受wb冲刷信号影响，preif中的正确指令进入if不会失效
+    wire if_work_done = (icache_cpu_data_ok || if_exc_valid) && (inst_dirty == 3'b0);
+    assign if_ready_go    = if_work_done || !if_valid || lready[1];
+    assign if_to_id_valid = if_valid;
+    assign if_to_id_upd   = (if_ready_go && lpower[1]) || !if_valid;
+
+    // ========== ICache 请求控制（仿 MEM 模式） ==========
+    wire req_set = icache_cpu_req && icache_cpu_addr_ok;
+    always @(posedge clk) begin
+        if (reset)                              req_state <= 1'b0;
+        else if (ldata[0] && !req_set)          req_state <= 1'b0;
+        else if (req_set)                       req_state <= 1'b1;
+    end
+
+    // ========== 脏指令控制 ==========
+    wire [2:0] inst_dirty_control;
+    wire [2:0] inst_dirty;
+    reg  [2:0] inst_dirty_ctrl_r;
+    reg  [2:0] inst_dirty_r;
+    assign inst_dirty_control = ((!if_exc_valid && if_valid && !if_ready_go) && (req_already || req_set)) ? 3'b010 :
+                                ((!if_exc_valid && if_valid && !if_ready_go) || (req_already || req_set)) ? 3'b001 :
+                                                                                                            3'b000 ;
     always @(posedge clk) begin
         if (reset) begin
-            if_valid <= 1'b0;
+            inst_dirty_r <= 3'b0;
         end
-        else if (if_allowin) begin
-            if_valid <= pre_if_to_if_valid;
+        else if (icache_cpu_data_ok && (inst_dirty != 3'b0)) begin
+            inst_dirty_r <= inst_dirty - 1'b1;
         end
-    end
+        else 
+            inst_dirty_r <= inst_dirty;
 
-    // ========== PC更新 ==========
-    always @(posedge clk) begin
         if (reset) begin
-            // 复位时设置一个特殊值，使下一周期PC为0x1c000000（内存起始）
-            if_pc  <= 32'h1bfffffc;
-            if_exc <= 4'b0;
+            inst_dirty_ctrl_r <= 3'b0;
         end
-        else if (pre_if_to_if_valid && if_allowin) begin
-            // 当有分支跳转时，跳过延迟槽指令，直接跳转到目标
-            if_pc  <= fork_r ? nextpc_r : nextpc;
-            if_exc <= pre_if_exc;
+        else begin
+            inst_dirty_ctrl_r <= inst_dirty_control;
         end
     end
 
-    // ========== ICache 请求控制 ==========
-    always @(posedge clk) begin
-        if (reset || (pre_if_ready_go && if_allowin)) begin
-            req_already <= 1'b0;
-        end
-        else if ((icache_cpu_req && icache_cpu_addr_ok) && !(pre_if_ready_go && if_allowin)) begin
-            req_already <= 1'b1;
-        end
-    end
-    assign req_already_final = req_already && !(br_taken || (wb_ertn_flush || exc_no_rf || rf_valid));
-    // 表明preif指令是否发送过访存请求的逻辑生成
-    // 如果preif的指令进入if则preif一定维护新的指令，新指令没发送过访存请求
-    // 如果preif的访存请求为1但是不能往后走就说明发送过请求
-    // 如果有冲刷或者brtaken信号会瞬间改变nextpc让他变成新指令也就不算发出过请求
-    // 寄存的跳转或者冲刷信号不应该在此发挥作用，如果有寄存信号，其代表收到信号但是还没发出请求
-
-    // 表明if该阶段指令是否是新进入的逻辑实现
-    always @(posedge clk) begin
-        if (reset || !(if_allowin && pre_if_to_if_valid)) begin
-            new_in <= 1'b0;
-        end
-        else if (if_allowin && pre_if_to_if_valid) begin
-            new_in <= 1'b1;
-        end
-    end
-
-    // 如果收到跳转或者冲刷信号但是握手不成功，下一次访存依然需要访存这些特定指令的数据，所以需要寄存
-    // 如果有寄存信号，代表收到了跳转或者冲刷信号但是还没发出访存请求，需要持续更改访存地址
-    // 尤其是对于跳转信号，还需要一直保证if的指令不忘后面走
-    always @(posedge clk) begin
-        if (reset || (icache_cpu_req && icache_cpu_addr_ok)) begin
-            fork_r   <= 1'b0;
-            nextpc_r <= 32'b0;
-        end
-        else if (!(icache_cpu_req && icache_cpu_addr_ok) && !(pre_if_exc_valid)) begin
-            if (br_taken || exc_no_rf || wb_ertn_flush || rf_valid) begin
-                fork_r   <= 1'b1;
-                nextpc_r <= nextpc;
-            end
-        end
-    end
-
-    always @(posedge clk) pre_if_ready_go_r <= pre_if_ready_go; // 表明上周期preif维护的指令是否发送过访存请求
-    always @(posedge clk) pre_if_exc_r <= pre_if_exc_valid;     // 表明上周期preif是不是异常指令
-    // 冲刷和跳转会立马改变nextpc，假设第一到第二周期的上跳产生冲刷或者跳转信号，第三周期会得到脏数据信号
-    // 第一周期如果preif可以发请求但是不能进入if，那么一定是if中有一条有效指令但是不能往后走
-    // 所以pre_if_ready_go_r && !new_in的时候if第二周期中的一定是第一周期中的那一条指令
-    // 如果if中没有有效数据那么就要废2条，如果刚返回或者早就有数据存在if_inst_r中那么就只废一次
-    // 注意：现在指令数据存于桥的FIFO中，if_inst_r已移除。
-    // IF 数据是否已被消耗用 if_to_id_valid && id_allowin 判断，
-    // 同时覆盖 data_ok=0（未到）和 data_ok=1 但 IF 阻塞（到了未接）
-    always @(posedge clk) begin
-        if (reset) begin
-            inst_dirty <= 2'b0;
-        end
-        else if (wb_ertn_flush || exc_no_rf || br_taken || rf_valid) begin
-            if ((!if_exc && if_valid && !(if_to_id_valid && id_allowin))
-                && (!pre_if_exc_r && pre_if_ready_go_r) && !new_in)
-                inst_dirty <= 2'b10;
-            else if ((!if_exc && if_valid && !(if_to_id_valid && id_allowin))
-                  || (!pre_if_exc_r && pre_if_ready_go_r) && !new_in)
-                inst_dirty <= 2'b01;
-            else
-                inst_dirty <= 2'b00;
-        end
-        else if (icache_cpu_data_ok && (inst_dirty != 2'b00))
-            inst_dirty <= inst_dirty - 1'b1;
-    end
+    assign inst_dirty = s0_flush ? (inst_dirty_r + inst_dirty_ctrl_r) : inst_dirty_r;
 
     // ========== ICache 输出信号 ==========
-    assign if_to_mmu_vaddr = fork_r ? nextpc_r : nextpc;                                  // 发mmu虚地址
-    assign icache_cpu_req   = pre_if_valid && !req_already_final && !(pre_if_exc_valid);
-    // preif有效才能发请求；已经发过的话不能重复发请求；跳转指令遇上lduse冒险未取得正确数据时也不能访存
-    assign icache_cpu_op    = 1'b0;                                                       // ICache 只读
-    assign icache_cpu_index  = (fork_r ? nextpc_r[`OFFSET_WIDTH +: `INDEX_WIDTH] : nextpc[`OFFSET_WIDTH +: `INDEX_WIDTH]); // 虚地址中的index部分
-    assign icache_cpu_tag    = padd[`OFFSET_WIDTH + `INDEX_WIDTH +: `TAG_WIDTH];             // 实地址中的tag部分
-    assign icache_cpu_offset = (fork_r ? nextpc_r[0 +: `OFFSET_WIDTH] : nextpc[0 +: `OFFSET_WIDTH]);           // 虚地址中的offset部分
-    assign icache_cpu_wstrb  = 4'h0;                                                      // ICache 只读
-    assign icache_cpu_wdata  = 32'b0;                                                     // ICache 只读
-    assign icache_cpu_cached = if_cached;                                                 // 来自 MMU 的缓存判断
-    assign icache_cpu_accept = (if_to_id_valid && id_allowin) || (|inst_dirty);           // IF阶段能接受数据的条件：1. IF到ID的总线有效且ID允许接收；2. 当前指令是脏指令（需要被冲刷掉）
-    assign if_inst           = icache_cpu_rdata;                                          // 指令数据直连 cache 输出
+    assign if_to_mmu_vaddr = pre_if_pc_r;
+    assign icache_cpu_req   = can_req && !req_already;
+    assign icache_cpu_index  = pre_if_pc_r[`OFFSET_WIDTH +: `INDEX_WIDTH];
+    assign icache_cpu_offset = pre_if_pc_r[0 +: `OFFSET_WIDTH];
+    assign icache_cpu_accept = if_ready_go && lpower[1] || inst_dirty != 3'b0;
+    assign if_inst           = icache_cpu_rdata;
 
-    // ========== 检测异常 ==========
-    assign pre_if_adef = (fork_r ? nextpc_r[1:0] : nextpc[1:0]) != 2'b00 && pre_if_valid;
-    assign pre_if_exc = {pre_if_adef, if_tlb_exc};
-    assign pre_if_exc_valid = |pre_if_exc && pre_if_valid;
+    // ========== 检测异常（pre_if 仅 ADEF，TLB 异常在 IF 级合并） ==========
+    assign pre_if_adef     = pre_if_pc_r[1:0] != 2'b00 && pre_if_valid;
+    assign pre_if_exc      = {pre_if_adef, 3'b0};
+    assign pre_if_exc_valid = pre_if_adef && pre_if_valid;
+
+    assign if_exc_valid = |if_exc_r && if_valid;
+
+    // ========== 输出给分支预测器 ==========
+    assign if_pre_if_pc_next = pre_if_pc_next;
 endmodule

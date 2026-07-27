@@ -10,6 +10,10 @@ module regfile (
     input  wire        we,       // write enable, HIGH valid
     input  wire [ 4:0] waddr,
     input  wire [31:0] wdata
+     `ifdef DIFFTEST_EN
+    ,
+    output wire [31:0] rf_o [31:0]   // difftest
+    `endif
 );
     reg [31:0] rf[31:0];
 
@@ -23,5 +27,10 @@ module regfile (
 
     // READ OUT 2
     assign rdata2 = (raddr2 == 5'b0) ? 32'b0 : rf[raddr2];
+
+    // difftest
+    `ifdef DIFFTEST_EN
+    assign rf_o = rf;
+    `endif
 
 endmodule

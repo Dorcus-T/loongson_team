@@ -3,54 +3,121 @@
 module id_stage (
     input  wire                         clk,
     input  wire                         reset,
-    // allowin
-    input  wire                         ex_allowin,          // EX阶段允许接收信号（用于反压控制）
-    output wire                         id_allowin,          // ID阶段允许接收新指令
     // 来自IF阶段
     input  wire                         if_to_id_valid,      // IF到ID的有效标志
     input  wire [`IF_TO_ID_BUS_WD-1:0]  if_to_id_bus,        // IF传递的总线：{指令, PC}
     // 输出给ex阶段
     output wire                         id_to_ex_valid,      // ID到EX的有效标志
     output wire [`ID_TO_EX_BUS_WD-1:0]  id_to_ex_bus,        // ID到EX的控制总线
-    // 输出给if阶段的分支总线
-    output wire [`BR_BUS_WD-1:0]        br_bus,              // 分支总线：{跳转标志, 跳转目标}
+    output wire                         id_to_ex_upd,         // ID→EX 更新 data_n
+    output wire                         id_ready_go,         // ID阶段就绪标志
     // wb阶段输入的寄存器文件总线
     input  wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,        // WB阶段写回数据
     // 前递控制
     input  wire [ 4:0]                  ex_to_id_dest,       // EX阶段的目的寄存器号
+    input  wire [ 4:0]                  pre_mem_to_id_dest,  // PRE_MEM阶段写回寄存器号
     input  wire [ 4:0]                  mem_to_id_dest,      // MEM阶段的目的寄存器号
     input  wire [ 4:0]                  wb_to_id_dest,       // WB阶段的目的寄存器号
     input  wire                         ex_to_id_load_op,    // EX阶段是否为加载指令（用于检测load-use冒险）
-    input  wire [31:0]                  ex_to_id_result,     // EX阶段计算结果
-    input  wire [31:0]                  mem_to_id_result,    // MEM阶段计算结果
-    input  wire [31:0]                  wb_to_id_result,     // WB阶段计算结果
+    input  wire                         pre_mem_to_id_load_op,  // PRE_MEM阶段是否有load指令（用于检测load-use冒险）
+    input  wire [31:0]                  ex_to_id_result,       // EX阶段计算结果
+    input  wire [31:0]                  pre_mem_to_id_result,  // PRE_MEM阶段前递数据
+    input  wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
+    input  wire [31:0]                  wb_to_id_result,       // WB阶段计算结果
     input  wire                         mem_to_id_data_ok,   // MEM前递给ID的数据是否准备好
-    input  wire                         mem_exc_valid,       // MEM有冲刷就不发起brtaken
-    input  wire                         ex_mem_exc_valid,        // ex有冲刷就不发起brtaken
+    input  wire                         calc_not_ready,      // EX 乘除结果未就绪
     // csr与ertn冒险
     input  wire                         ex_csr_we,           // EX阶段写CSR使能
     input  wire [13:0]                  ex_csr_num,          // EX阶段写CSR号码
     input  wire                         ex_ertn_flush,       // EX阶段有ertn指令
+    input  wire                         pre_mem_csr_we,      // PRE_MEM阶段写CSR使能
+    input  wire [13:0]                  pre_mem_csr_num,     // PRE_MEM阶段写CSR号码
+    input  wire                         pre_mem_ertn_flush,  // PRE_MEM阶段有ertn指令
     input  wire                         mem_csr_we,          // MEM阶段写CSR使能
     input  wire [13:0]                  mem_csr_num,         // MEM阶段写CSR号码
     input  wire                         mem_ertn_flush,      // MEM阶段有ertn指令
     input  wire                         wb_csr_we,           // WB阶段写CSR使能
     input  wire [13:0]                  wb_csr_num,          // WB阶段写CSR号码
-    // 异常冲刷
-    input  wire                         wb_exc_valid,        // WB阶段存在异常冲刷流水线
     input  wire                         wb_ertn_flush,       // WB阶段有ertn指令则冲刷流水线
     // 与csr寄存器堆的读交互
     input  wire [ 1:0]                  csr_da_pg,           // csr CRMD_DA_PG 即当前映射模式
     input  wire [31:0]                  csr_rvalue,          // csr访问指令读的数据
     output wire [13:0]                  csr_id_num,          // csr寄存器号码(id阶段用于读)
     // 来自csr的中断判断
-    input  wire                         has_int
+    input  wire                         has_int,
+
+    // ── linectrl 接口 ──
+    input  wire                         ldata,              // 0=用旧寄存器, 1=用新寄存器
+    input  wire                         lvalid,             // 本拍可呈现数据
+    input  wire                         lpower,             // 本拍有权发请求
+    input  wire                         lready,             // 维持就绪
+    input  wire                         upd,                // 上级已准备且有权力 → 更新 data_n
+
+    output wire                         id_valid_o,         // → linectrl valid_i
+    output wire                         id_exc_o,           // → linectrl exc_i
+    output wire                         id_ertn_o           // → linectrl ertn_i
+    `ifdef DIFFTEST_EN
+    ,
+    // difftest
+    output wire [31:0]                  rf_to_diff [31:0]
+    `endif
 );
 
-    reg  id_valid;                                   // ID阶段有效标志
-    wire id_ready_go;                                // ID阶段是否准备好（无冒险）
-    reg  [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus_r;      // 锁存的取值级数据
-    reg  id_rf_valid;                                // 重取指标志
+    wire id_valid;                                  // 本拍有效 = (ldata? valid_n : valid_o) & lvalid
+    wire id_exc_valid;                              // 异常有效
+    wire id_ertn_flush;                             // ertn 冲刷
+    reg  rf_valid;                                  // 计算下拍是否应该有重取指标记
+    wire id_rf_valid;                               // 重取指标记
+
+    // ========== 双寄存器结构 ==========
+    reg  [`IF_TO_ID_BUS_WD-1:0] data_n;            // 新数据寄存器（upd 时捕获）
+    reg                      valid_n;               // 新 valid
+    reg  [`IF_TO_ID_BUS_WD-1:0] data_o;             // 旧数据寄存器
+    reg                      valid_o;               // 旧 valid
+
+    // ========== 双寄存器逻辑 ==========
+
+    // ── data_n: upd 时从上游捕获 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_n  <= `IF_TO_ID_BUS_WD'd0;
+            valid_n <= 1'b0;
+        end
+        else if (upd) begin
+            data_n  <= if_to_id_bus;
+            valid_n <= if_to_id_valid;
+        end
+    end
+
+    // ── data_o: ldata=1 且未准备时从 data_n 拷贝 ──
+    always @(posedge clk) begin
+        if (reset) begin
+            data_o  <= `IF_TO_ID_BUS_WD'd0;
+            valid_o <= 1'b0;
+        end
+        else begin
+            if (ldata)  data_o  <= data_n;
+            valid_o <= (ldata ? valid_n : valid_o) & lvalid;
+        end
+    end
+
+    // ── ldata 选通 ──
+    wire [`IF_TO_ID_BUS_WD-1:0] current_bus;
+    assign current_bus = ldata ? data_n : data_o;
+    assign id_valid    = (ldata ? valid_n : valid_o) & lvalid;
+
+    // ── ready_go = work_done || !valid || lready ──
+    wire work_done;
+    assign id_ready_go = work_done || !id_valid || lready;
+
+    // ── → linectrl ──
+    assign id_valid_o = id_valid;
+    assign id_exc_o   = id_exc_valid;
+    assign id_ertn_o  = id_ertn_flush;
+
+    // ── → EX ──
+    assign id_to_ex_valid = id_valid;
+    assign id_to_ex_upd   = (id_ready_go && lpower) || !id_valid;
 
     // ========== 异常信号 ==========
     wire ipe;
@@ -60,7 +127,6 @@ module id_stage (
     wire ine;
     wire intr;
     wire [9:0] id_exc;
-    wire id_exc_valid;
 
     // ========== 指令字段分割 ==========
     wire [5:0] op_31_26;                 // 操作码[31:26]
@@ -175,6 +241,8 @@ module id_stage (
     // TLB相关指令(写CSR)
     wire inst_tlbsrch;      // CSR写：exe阶段查找tlb，写TLBIDX
     wire inst_tlbrd;        // CSR写：读tlb，写TLBIDX,TLBEHI,TLBELO0,TLBELO1,ASID
+    // CPU配置读取指令
+    wire inst_cpucfg;       // CPUCFG：读配置信息字到rd（CSR地址 = rj + 0x00b0）
 
     // ========== 计时器访问指令 ==========
     wire inst_rdcntvl_w;    // 读取计数器低32位写入rd
@@ -198,9 +266,6 @@ module id_stage (
     wire src_reg_is_rd;                  // 源寄存器是否使用rd（用于条件分支）
     wire [4:0] dest;                     // 目的寄存器号
     wire ertn_flush;                     // 异常返回冲刷信号
-    wire br_taken;                       // 分支是否发生
-    reg  new_br;                         // 跳转指令只能发送一次跳转信号
-    wire [31:0] br_target;               // 分支目标地址
     wire [31:0] id_pc;                   // 当前指令的PC值
     wire [31:0] id_inst;                 // 当前指令的机器码
     wire [2:0] mem_size;                 // 访存大小：0=字节，1=半字，2=字
@@ -235,21 +300,19 @@ module id_stage (
     wire [31:0] csr_wvalue;
     wire [31:0] csr_wmask;
 
-    // ========== 操作数（支持前递） ==========
+    // ========== 操作数（支持前递，用于ALU/CSR/Store数据通路） ==========
     wire [31:0] rj_value;                // 源操作数1（经过前递）
     wire [31:0] rkd_value;               // 源操作数2（经过前递）
     wire [31:0] imm;                     // 立即数
     wire [31:0] br_offs;                 // 分支偏移量
-    wire [31:0] jirl_offs;               // JIRL指令偏移量
 
-    // ========== 比较结果（用于条件分支） ==========
-    wire rj_eq_rd;                       // rj == rkd
-    wire rj_lt_rd;                       // rj < rkd（有符号）
-    wire rj_lt_rd_u;                     // rj < rkd（无符号）
-    wire rj_ge_rd;                       // rj >= rkd（有符号）
-    wire rj_ge_rd_u;                     // rj >= rkd（无符号）
-    wire adder_cout;                     // 加法器进位输出
-    wire [31:0] adder_result;            // 加法器结果
+    `ifdef DIFFTEST_EN
+    // ========== difftest 信号 ==========
+    wire [ 7:0] inst_ld_en;
+    wire [ 7:0] inst_st_en;
+    wire        cnt_inst;
+    wire        csr_rstat_en;
+    `endif
 
     // ========== 数据冒险检测信号 ==========
     wire src_no_rj;                      // 指令不使用rj
@@ -262,10 +325,10 @@ module id_stage (
     // ========== 流水线停顿检测 ==========
     wire id_load_op;                     // ID阶段是否为加载指令
     wire load_use_stall;                 // load-use冒险需要停顿
-    wire branch_stall;                   // 分支指令数据冒险需要停顿
     wire csr_stall;                      // csr与ertn有关冒险
     wire int_csr_stall;                  // 中断与csr有关冒险
     wire inst_csr_stall;                 // csr指令有关冒险
+    wire calc_stall;                     // 乘除法计算结果未就绪停顿
 
     // ========== 指令字段生成 ==========
     assign op_31_26 = id_inst[31:26];
@@ -281,7 +344,9 @@ module id_stage (
     assign i20      = id_inst[24:5];
     assign i16      = id_inst[25:10];
     assign i26      = {id_inst[9:0], id_inst[25:10]};
-    assign csr_id_num = inst_rdcntid ? 14'h40
+    // cpucfg: ID用固定常数避免14-bit加法器进关键路径, 实际CSR号由EX计算
+    assign csr_id_num = inst_cpucfg  ? 14'h00b1
+                      : inst_rdcntid ? 14'h40
                       : inst_tlbsrch ? 14'h10 : id_inst[23:10];
     assign cacop_code = id_inst[4:0];
     // ========== 指令解码器实例化（将位向量转换为独热码） ==========
@@ -384,6 +449,7 @@ module id_stage (
     assign inst_csrrd    = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj == 5'b0);
     assign inst_csrwr    = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj == 5'b1);
     assign inst_csrxchg  = op_31_26_d[6'h01] & op_25_24_d[2'h0] & (rj != 5'b0) & (rj != 5'b1);
+    assign inst_cpucfg   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h1b];
     // 计数器指令
     assign inst_rdcntvl_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & (rj == 5'b0);
     assign inst_rdcntvh_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h19] & (rj == 5'b0);
@@ -440,9 +506,6 @@ module id_stage (
     assign br_offs = need_si26 ? { {4{i26[25]}}, i26[25:0], 2'b0 } :
                      { {14{i16[15]}}, i16[15:0], 2'b0 };
 
-    // JIRL指令的偏移量（同样左移2位）
-    assign jirl_offs = { {14{i16[15]}}, i16[15:0], 2'b0 };
-
     // ========== 控制信号生成 ==========
     assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_blt |
                            inst_bltu | inst_bge | inst_bgeu | inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;  // rkd数据源于rd寄存器
@@ -455,7 +518,7 @@ module id_stage (
                            inst_st_b | inst_st_h | inst_cacop;    // alu操作数2来自立即数
     assign res_from_mem  = inst_ld_w | inst_ld_b | inst_ld_h |
                            inst_ld_bu | inst_ld_hu;               // 结果来自存储器（加载指令）
-    assign res_from_csr  = inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid;// 结果来自csr寄存器堆
+    assign res_from_csr  = inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_cpucfg;// 结果来自csr寄存器堆
     assign res_from_timer = inst_rdcntvh_w | inst_rdcntvl_w;      // 结果来自计数器
     assign timer_high    = inst_rdcntvh_w;                        // 读取计数器高32位
     assign dst_is_r1     = inst_bl;                               // BL指令将返回地址写入R1
@@ -474,6 +537,19 @@ module id_stage (
     assign tlbwr_en      = inst_tlbwr;
     assign tlbfill_en    = inst_tlbfill;
     assign cacop_en      = inst_cacop;
+
+    `ifdef DIFFTEST_EN
+    // ========== difftest 信号生成 ==========
+    // load使能: ldw ldhu ldh ldbu ldb (无ll_w)
+    assign inst_ld_en = {2'b0, inst_ld_w, inst_ld_hu, inst_ld_h, inst_ld_bu, inst_ld_b};
+    // store使能: stw sth stb (无sc_w)
+    assign inst_st_en = {5'b0, inst_st_w, inst_st_h, inst_st_b};
+    // 计数器指令
+    assign cnt_inst = res_from_timer || inst_rdcntid;
+    // csr estat读使能
+    assign csr_rstat_en = (inst_csrrd || inst_csrwr || inst_csrxchg) && (csr_id_num == `CSR_ESTAT);
+    `endif
+
     // 访存大小编码
     assign mem_size[0]   = inst_ld_b | inst_ld_bu | inst_st_b;    // 字节访问
     assign mem_size[1]   = inst_ld_h | inst_ld_hu | inst_st_h;    // 半字访问
@@ -497,6 +573,10 @@ module id_stage (
         .we     (rf_we),
         .waddr  (rf_waddr),
         .wdata  (rf_wdata)
+        `ifdef DIFFTEST_EN
+        ,
+        .rf_o   (rf_to_diff)
+        `endif
     );
 
     // ========== csr文件写接口 ==========
@@ -507,74 +587,79 @@ module id_stage (
                       : inst_tlbsrch ? 32'h80000000 : 32'b0;
 
     // ========== 操作数前递 ==========
-    // rj值前递：如果rj需要等待且与EX/MEM/WB阶段的目的寄存器匹配，则使用前递结果
     assign rj_value = rj_wait ?
-                      ((rj == ex_to_id_dest) ? ex_to_id_result :
-                       (rj == mem_to_id_dest) ? mem_to_id_result : wb_to_id_result)
+                      (rj_eq_ex  ? ex_to_id_result :
+                       rj_eq_pre ? pre_mem_to_id_result :
+                       rj_eq_mem ? mem_to_id_result : wb_to_id_result)
                       : rf_rdata1;
 
-    // rkd值前递：类似地处理第二操作数
     assign rkd_value = rk_wait ?
-                       ((rk == ex_to_id_dest) ? ex_to_id_result :
-                        (rk == mem_to_id_dest) ? mem_to_id_result : wb_to_id_result) :
+                       (rk_eq_ex  ? ex_to_id_result :
+                        rk_eq_pre ? pre_mem_to_id_result :
+                        rk_eq_mem ? mem_to_id_result : wb_to_id_result) :
                        rd_wait ?
-                       ((rd == ex_to_id_dest) ? ex_to_id_result :
-                        (rd == mem_to_id_dest) ? mem_to_id_result : wb_to_id_result) :
+                       (rd_eq_ex  ? ex_to_id_result :
+                        rd_eq_pre ? pre_mem_to_id_result :
+                        rd_eq_mem ? mem_to_id_result : wb_to_id_result) :
                        rf_rdata2;
 
-    // ========== 条件分支比较逻辑 ===========
-    assign rj_eq_rd    = (rj_value == rkd_value);
-    // 有符号减法（用于比较大小）
-    assign {adder_cout, adder_result} = {1'b0, rj_value} + {1'b0, ~rkd_value} + 1'b1;
-    // 有符号小于比较
-    assign rj_lt_rd    = (rj_value[31] && ~rkd_value[31]) ||
-                         ((rj_value[31] ~^ rkd_value[31]) && adder_result[31]);
-    assign rj_ge_rd    = !rj_lt_rd;
-    // 无符号小于比较（利用加法器进位）
-    assign rj_lt_rd_u  = !adder_cout;
-    assign rj_ge_rd_u  = !rj_lt_rd_u;
-    // ========== 分支控制逻辑 ==========
-    always @(posedge clk) begin
-        if (reset) begin
-            new_br <= 1'b0;
-        end
-        else if (if_to_id_valid && id_allowin) begin
-            new_br <= 1'b1;
-        end
-        else if (br_taken) begin
-            new_br <= 1'b0;
-        end
-    end
+    // ============================================================
+    // 预测信息解析 + 分支辅助信号生成（仅透传给 EX，不做决策）
+    // ============================================================
+    // 解析来自if阶段的总线（含预测信息）
+    wire        id_pred_valid;
+    wire        id_pred_taken;
+    wire [29:0] id_pred_target;
+    wire        id_pred_is_ras;
+    wire [ 4:0] id_pred_btb_index;
+    wire [ 3:0] id_pred_ras_index;
+    assign {
+        id_exc[8:5],
+        id_inst,
+        id_pc,
+        id_pred_valid,
+        id_pred_taken,
+        id_pred_target,
+        id_pred_is_ras,
+        id_pred_btb_index,
+        id_pred_ras_index
+    } = current_bus;
 
-    assign br_taken = (   inst_beq  &&  rj_eq_rd
-                       || inst_bne  && !rj_eq_rd
-                       || inst_blt  &&  rj_lt_rd
-                       || inst_bge  &&  rj_ge_rd
-                       || inst_bltu &&  rj_lt_rd_u
-                       || inst_bgeu &&  rj_ge_rd_u
-                       || inst_jirl
-                       || inst_bl
-                       || inst_b
-                    ) && id_valid && !load_use_stall && !branch_stall && new_br
-                      && !(mem_ertn_flush || mem_exc_valid) && !(ex_ertn_flush || ex_mem_exc_valid) && !id_exc_valid;
-    // 冒险阻塞brtaken的意义，lduse：b指令无法取得正确的数据
-    // branch阻塞：ex阶段前递数据进行分支判断再给if用来转换地址逻辑太长
-    // csrstall：不需要阻塞，b类指令只有在标记中断且后面有csr写指令才会同时发生，如果真是中断，发不发brtaken都会冲刷，如果不是中断，能让正确指令提前一周期到if
+    // 当前指令是否是分支
+    wire id_is_branch;
+    assign id_is_branch = inst_beq | inst_bne | inst_bl | inst_b |
+                          inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_jirl;
 
-    // 分支目标地址计算
-    assign br_target = (inst_beq || inst_bne || inst_bl || inst_b ||
-                        inst_blt || inst_bge || inst_bltu || inst_bgeu) ?
-                       (id_pc + br_offs) : (rj_value + jirl_offs);
+    // 分支类型编码：00=无条件(B/JIRL call) 01=条件 10=call(BL) 11=ret(JIRL with rd=0,rj=1,offs=0)
+    wire [1:0] id_br_type;
+    assign id_br_type = inst_bl                                                 ? 2'b10 :  // call
+                        (inst_jirl && rd == 5'd0 && rj == 5'd1 && i16 == 16'd0) ? 2'b11 :  // ret
+                        (inst_beq | inst_bne | inst_blt
+                        | inst_bge | inst_bltu | inst_bgeu)                     ? 2'b01 :  // 条件分支
+                                                                                  2'b00 ;  // 无条件跳转(B/JIRL call)
 
-    // 分支总线输出（跳转标志 + 目标地址）
-    assign br_bus = {br_taken, br_target};
-
-    // ========== 解析来自if阶段的总线 ==========
-    assign {id_exc[8:5], id_inst, id_pc} = if_to_id_bus_r;
+    // 条件分支比较码（供 EX 用 ALU 操作数重算方向）
+    wire [2:0] cond_cmp;
+    assign cond_cmp = inst_beq  ? 3'b000 :
+                      inst_bne  ? 3'b001 :
+                      inst_blt  ? 3'b010 :
+                      inst_bge  ? 3'b011 :
+                      inst_bltu ? 3'b100 :
+                      inst_bgeu ? 3'b101 : 3'b110;
 
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装
     assign id_to_ex_bus = {
+        `ifdef DIFFTEST_EN
+        csr_rstat_en,   // 412     csr estat读使能 for difftest
+        inst_st_en,     // 411:404 store使能 for difftest
+        inst_ld_en,     // 403:396 load使能 for difftest
+        cnt_inst,       // 395     计数器指令 for difftest
+        64'd0,          // 394:331 定时器值 for difftest（由 EX 直接提供）
+        id_inst,        // 330:299 指令编码 for difftest
+        `else
+        114'd0,         // 占位：保持非difftest字段bit位置不变
+        `endif
         cacop_code,     // 298:294 cache操作类型
         cacop_en,       // 293     cache操作使能
         tlbsrch_en,     // 292     tlbsrch使能
@@ -606,39 +691,49 @@ module id_stage (
         src2_is_imm,    // 21     操作数2来源
         src1_is_pc,     // 20     操作数1来源
         id_load_op,     // 19     是否为加载指令（用于load-use检测）
-        alu_op          // 18:0   ALU操作码
-    };
+        alu_op,          // 18:0   ALU操作码
+        // 预测透传（42 bit）+ br_type（2 bit）+ cond_cmp（3 bit）+ br_offs（32 bit）
+        id_pred_valid,        // 1   预测有效
+        id_pred_taken,        // 1   预测方向
+        id_pred_target,       // 30  预测目标 PC[31:2]
+        id_pred_is_ras,       // 1   RAS 预测
+        id_pred_btb_index,    // 5   BTB 命中索引
+        id_pred_ras_index,    // 4   RAS 命中索引
+        id_br_type,           // 2   分支类型
+        cond_cmp,             // 3   条件分支比较码
+        br_offs,              // 32  分支偏移量（已符号扩展+左移2位，覆盖B/BL的26位和条件/JIRL的16位）
+        id_is_branch          // 1   是否为分支指令
+    };  // 总计 413 + 80 = 493
 
-    // ========== 流水线控制 ==========
-    assign id_ready_go    = (!load_use_stall && !branch_stall && !csr_stall || id_exc_valid);
-    // wb发来冲刷脉冲就阻塞，正常情况下，有阻塞但是id如果是异常指令就不应该阻，异常指令最好快点到wb发冲刷信号
-    assign id_allowin     = !id_valid || (id_ready_go && ex_allowin);
-    assign id_to_ex_valid = id_valid && id_ready_go;
-
-    // 译码级有效标志更新
-    always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) begin
-            id_valid <= 1'b0;
-        end
-        else if (id_allowin) begin
-            id_valid <= if_to_id_valid;
-        end
-    end
-    // 译码级数据传递
-    always @(posedge clk) begin
-        if (if_to_id_valid && id_allowin) begin
-            if_to_id_bus_r <= if_to_id_bus;
-        end
-    end
+    assign work_done = id_exc_valid || (!load_use_stall && !csr_stall && !calc_stall);
+    
+    wire rf_ctrl = ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
+                            || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
+                            || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && !id_exc_valid && id_valid;
+    reg rf_r;
     // 重取指信号生成
     always @(posedge clk) begin
-        if (reset || wb_exc_valid || wb_ertn_flush) id_rf_valid <= 1'b0;
-        else if (id_to_ex_valid && ex_allowin) begin
-            id_rf_valid <= ((csr_we && (csr_id_num == `CSR_ASID || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PG : `CSR_CRMD_DA] != 2'b0
-                                       || (csr_id_num == `CSR_DMW0 || csr_id_num == `CSR_DMW1 || csr_id_num == `CSR_CRMD && csr_wmask[`CSR_CRMD_PLV] != 2'b0) && csr_da_pg == 2'b01)
-                                       || inst_tlbrd || inst_invtlb || inst_tlbwr || inst_tlbfill) || (cacop_code[2:0] == 3'b000) && cacop_en) && id_valid;
+        if (reset) begin
+            rf_valid <= 1'b0;
+        end
+        else if (rf_r & ldata) begin
+            rf_valid <= 1'b0;
+        end
+        else if (rf_ctrl) begin
+            rf_valid <= 1'b1;
+        end
+
+        if (reset) begin
+            rf_r <= 1'b0;
+        end
+        else if (ldata & rf_valid & id_valid) begin
+            rf_r <= 1'b1;
+        end
+        else if (ldata) begin
+            rf_r <= 1'b0;
         end
     end
+    assign id_rf_valid = rf_valid && ldata && id_valid || rf_r;
     // ========== 冒险检测、前递处理、阻塞处理 ==========
     // 指令类型分类
     assign src_no_rj    = inst_b | inst_bl | inst_lu12i_w | inst_pcaddu12i | inst_csrrd | inst_csrwr |
@@ -650,57 +745,65 @@ module id_stage (
                           inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
                           inst_pcaddu12i | inst_st_b | inst_st_h |
                           inst_csrrd | inst_csrwr | inst_csrxchg | inst_rdcntid | inst_rdcntvl_w | inst_rdcntvh_w |
-                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop;            // 不读取rk的指令
+                          inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop | inst_cpucfg;            // 不读取rk的指令
     assign src_has_rd   = inst_st_w | inst_beq | inst_bne |
                           inst_blt | inst_bge | inst_bltu | inst_bgeu |
                           inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg;                                     // 需要读取rd的指令
 
 
-    assign rj_wait = ~src_no_rj && (rj != 5'b00000) &&
-                     ((rj == ex_to_id_dest) || (rj == mem_to_id_dest) || (rj == wb_to_id_dest));
-    assign rk_wait = ~src_no_rk && (rk != 5'b00000) &&
-                     ((rk == ex_to_id_dest) || (rk == mem_to_id_dest) || (rk == wb_to_id_dest));
-    assign rd_wait = src_has_rd && (rd != 5'b00000) &&
-                     ((rd == ex_to_id_dest) || (rd == mem_to_id_dest) || (rd == wb_to_id_dest));
+    // ── 预计算 5-bit 寄存器号比较（共享，减扇出）──
+    wire rj_valid  = (rj != 5'b00000);
+    wire rk_valid  = (rk != 5'b00000);
+    wire rd_valid  = (rd != 5'b00000);
+    wire rj_eq_ex  = (rj == ex_to_id_dest);
+    wire rj_eq_pre = (rj == pre_mem_to_id_dest);
+    wire rj_eq_mem = (rj == mem_to_id_dest);
+    wire rj_eq_wb  = (rj == wb_to_id_dest);
+    wire rk_eq_ex  = (rk == ex_to_id_dest);
+    wire rk_eq_pre = (rk == pre_mem_to_id_dest);
+    wire rk_eq_mem = (rk == mem_to_id_dest);
+    wire rk_eq_wb  = (rk == wb_to_id_dest);
+    wire rd_eq_ex  = (rd == ex_to_id_dest);
+    wire rd_eq_pre = (rd == pre_mem_to_id_dest);
+    wire rd_eq_mem = (rd == mem_to_id_dest);
+    wire rd_eq_wb  = (rd == wb_to_id_dest);
 
-    // 如果当前指令的源寄存器与ex阶段的目的寄存器匹配，且EX阶段是加载指令，则需要停顿
-    assign id_load_op = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
-    assign load_use_stall = (((rj_wait && (rj == ex_to_id_dest)) ||
-                             (rk_wait && (rk == ex_to_id_dest)) ||
-                             (rd_wait && (rd == ex_to_id_dest))) && ex_to_id_load_op) ||
-                            (((rj_wait && (rj == mem_to_id_dest)) ||
-                              (rk_wait && (rk == mem_to_id_dest)) ||
-                              (rd_wait && (rd == mem_to_id_dest))) && !mem_to_id_data_ok);
+    assign rj_wait = ~src_no_rj && rj_valid && (rj_eq_ex || rj_eq_pre || rj_eq_mem || rj_eq_wb);
+    assign rk_wait = ~src_no_rk && rk_valid && (rk_eq_ex || rk_eq_pre || rk_eq_mem || rk_eq_wb);
+    assign rd_wait =  src_has_rd && rd_valid && (rd_eq_ex || rd_eq_pre || rd_eq_mem || rd_eq_wb);
 
-    // 分支指令的阻塞检测（ex阶段的指令与id阶段的跳转指令发生冒险则需要阻塞，优化逻辑提高主频）
-    assign branch_stall = ((rj_wait && (rj == ex_to_id_dest)) ||
-                           (rk_wait && (rk == ex_to_id_dest)) ||
-                           (rd_wait && (rd == ex_to_id_dest))) &&
-                          (inst_beq || inst_bne || inst_jirl || inst_bl ||
-                           inst_b || inst_blt || inst_bltu || inst_bge || inst_bgeu);
+    // ── load-use stall / calc stall 复用预计算结果 ──
+    assign id_load_op    = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+    wire   rj_need_ex    = ~src_no_rj && rj_valid && rj_eq_ex;
+    wire   rk_need_ex    = ~src_no_rk && rk_valid && rk_eq_ex;
+    wire   rd_need_ex    =  src_has_rd && rd_valid && rd_eq_ex;
+    wire   rj_need_pre   = ~src_no_rj && rj_valid && rj_eq_pre;
+    wire   rk_need_pre   = ~src_no_rk && rk_valid && rk_eq_pre;
+    wire   rd_need_pre   =  src_has_rd && rd_valid && rd_eq_pre;
+    wire   rj_need_mem   = ~src_no_rj && rj_valid && rj_eq_mem;
+    wire   rk_need_mem   = ~src_no_rk && rk_valid && rk_eq_mem;
+    wire   rd_need_mem   =  src_has_rd && rd_valid && rd_eq_mem;
+
+    assign load_use_stall = ((rj_need_ex  || rk_need_ex  || rd_need_ex)  && ex_to_id_load_op)
+                         || ((rj_need_pre || rk_need_pre || rd_need_pre) && pre_mem_to_id_load_op)
+                         || ((rj_need_mem || rk_need_mem || rd_need_mem) && !mem_to_id_data_ok);
+
+    assign calc_stall = (rj_need_ex || rk_need_ex || rd_need_ex) && calc_not_ready;
+
     // csr与ertn冒险
-    // 中断判断发生csr冒险(只有确定中断的时候才发生，不确定中断指令继续走就行)
-    assign int_csr_stall = has_int &&
-                        ((ex_csr_we && (ex_csr_num == `CSR_CRMD || ex_csr_num == `CSR_ECFG ||
-                                        ex_csr_num == `CSR_ESTAT || ex_csr_num == `CSR_TCFG ||
-                                        ex_csr_num == `CSR_TICLR)) ||
-                         (ex_ertn_flush) ||  // ex阶段有ertn，即将写CRMD.IE
-                         (mem_csr_we && (mem_csr_num == `CSR_CRMD || mem_csr_num == `CSR_ECFG ||
-                                         mem_csr_num == `CSR_ESTAT || mem_csr_num == `CSR_TCFG ||
-                                         mem_csr_num == `CSR_TICLR)) ||
-                         (mem_ertn_flush) ||  // mem阶段有ertn，即将写CRMD.IE
-                         (wb_csr_we && (wb_csr_num == `CSR_CRMD || wb_csr_num == `CSR_ECFG ||
-                                        wb_csr_num == `CSR_ESTAT || wb_csr_num == `CSR_TCFG ||
-                                        wb_csr_num == `CSR_TICLR)) ||
-                         (wb_ertn_flush));   // wb阶段有ertn，即将写CRMD.IE
+    // 简化：后面任意写csr就堵中断，任意ertn也堵
+    wire any_ertn_downstream = ex_ertn_flush || pre_mem_ertn_flush || mem_ertn_flush || wb_ertn_flush;
+    wire any_csr_we_downstream = ex_csr_we || pre_mem_csr_we || mem_csr_we || wb_csr_we;
+    assign int_csr_stall = has_int && (any_csr_we_downstream || any_ertn_downstream);
 
-    // 读csr指令与后面写同一个 CSR 冲突
-    assign inst_csr_stall = (inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch) &&
-                         ((ex_csr_we && ex_csr_num == csr_id_num) ||
-                          (mem_csr_we && mem_csr_num == csr_id_num) ||
-                          (wb_csr_we && wb_csr_num == csr_id_num) ||
-                          (ex_csr_we && inst_tlbsrch && ex_csr_num == `CSR_TLBEHI) ||
-                          (mem_csr_we && inst_tlbsrch && mem_csr_num == `CSR_TLBEHI));
+    // 读csr指令与后面写同一个 CSR 冲突（简化：仅比较 csr 号相等）
+    // tlbsrch 额外检查 TLBEHI 冲突（tlbsrch 读 TLBIDX 但内部用 TLBEHI 搜索）
+    wire is_csr_reader = inst_csrrd || inst_csrxchg || inst_csrwr || inst_rdcntid || inst_tlbsrch;
+    assign inst_csr_stall = is_csr_reader &&
+                           ((ex_csr_we      && (ex_csr_num == csr_id_num || inst_tlbsrch && ex_csr_num == `CSR_TLBEHI))
+                         || (pre_mem_csr_we && (pre_mem_csr_num == csr_id_num || inst_tlbsrch && pre_mem_csr_num == `CSR_TLBEHI))
+                         || (mem_csr_we     && (mem_csr_num == csr_id_num || inst_tlbsrch && mem_csr_num == `CSR_TLBEHI))
+                         || (wb_csr_we      && wb_csr_num == csr_id_num));
     assign csr_stall = inst_csr_stall || int_csr_stall;
 
     // ========== 检测异常 ==========
@@ -721,7 +824,7 @@ module id_stage (
                inst_st_b | inst_st_h | inst_syscall | inst_break | inst_ertn |
                inst_csrrd | inst_csrwr | inst_csrxchg |
                inst_rdcntid | inst_rdcntvh_w | inst_rdcntvl_w |
-               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop |
+               inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_cacop | inst_cpucfg |
                (inst_invtlb & (rd == 5'd0 | rd == 5'd1 | rd == 5'd2 | rd == 5'd3 | rd == 5'd4 | rd == 5'd5 | rd == 5'd6)));
     assign {id_exc[9], id_exc[4:0]} = {intr, syscall, brk, ine, ipe, fpd};
     assign id_exc_valid = (|id_exc || id_rf_valid) && id_valid;

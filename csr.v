@@ -26,6 +26,36 @@ module csr_regfile (
     output wire [ 1:0]                  datm_out,       // CRMD.DATM — MEM 直接翻译 MAT
     input  wire [`TLBRD_BUS_WD-1:0]     tlbrd_bus,      // TLB数据传入（由MMU加工）
     output wire [`TLBCSR_BUS_WD-1:0]    tlbcsr_bus      // TLB相关CSR数据总线
+
+    `ifdef DIFFTEST_EN
+    ,
+    output wire [31:0]              csr_crmd_diff,
+    output wire [31:0]              csr_prmd_diff,
+    output wire [31:0]              csr_ectl_diff,
+    output wire [31:0]              csr_estat_diff,
+    output wire [31:0]              csr_era_diff,
+    output wire [31:0]              csr_badv_diff,
+    output wire [31:0]              csr_eentry_diff,
+    output wire [31:0]              csr_tlbidx_diff,
+    output wire [31:0]              csr_tlbehi_diff,
+    output wire [31:0]              csr_tlbelo0_diff,
+    output wire [31:0]              csr_tlbelo1_diff,
+    output wire [31:0]              csr_asid_diff,
+    output wire [31:0]              csr_save0_diff,
+    output wire [31:0]              csr_save1_diff,
+    output wire [31:0]              csr_save2_diff,
+    output wire [31:0]              csr_save3_diff,
+    output wire [31:0]              csr_tid_diff,
+    output wire [31:0]              csr_tcfg_diff,
+    output wire [31:0]              csr_tval_diff,
+    output wire [31:0]              csr_ticlr_diff,
+    output wire [31:0]              csr_llbctl_diff,
+    output wire [31:0]              csr_tlbrentry_diff,
+    output wire [31:0]              csr_dmw0_diff,
+    output wire [31:0]              csr_dmw1_diff,
+    output wire [31:0]              csr_pgdl_diff,
+    output wire [31:0]              csr_pgdh_diff
+`endif
 );
 
     // ========== CSR 值输出（供流水线使用） ==========
@@ -59,6 +89,12 @@ module csr_regfile (
     wire [31:0] csr_ctag_rvalue;
     wire [31:0] csr_dmw0_rvalue;
     wire [31:0] csr_dmw1_rvalue;
+    wire [31:0] csr_cpucfg1_rvalue;
+    wire [31:0] csr_cpucfg2_rvalue;
+    wire [31:0] csr_cpucfg10_rvalue;
+    wire [31:0] csr_cpucfg11_rvalue;
+    wire [31:0] csr_cpucfg12_rvalue;
+    wire [31:0] csr_cpucfg13_rvalue;
 
     // ========== 异常种类判断 ==========
     wire wb_exc_badv_err; // badv
@@ -195,6 +231,32 @@ module csr_regfile (
     assign csr_ctag_rvalue    = 32'b0;  // 占位
     assign csr_dmw0_rvalue    = {csr_dmw0[31:29], 1'b0, csr_dmw0[27:25], 19'b0, csr_dmw0[5:3], 2'b0, csr_dmw0[0]};
     assign csr_dmw1_rvalue    = {csr_dmw1[31:29], 1'b0, csr_dmw1[27:25], 19'b0, csr_dmw1[5:3], 2'b0, csr_dmw1[0]};
+    // ============================================================
+    // CPUCFG 配置信息字（只读，按硬件参数自动生成）
+    // ============================================================
+    wire [ 7:0] cpucfg_valen  = `VALEN - 1;
+    wire [ 7:0] cpucfg_palen  = `PALEN - 1;
+    wire [ 3:0] cpucfg_offset = `OFFSET_WIDTH;
+    wire [ 7:0] cpucfg_index  = `INDEX_WIDTH;
+    wire [15:0] cpucfg_way_m1 = `WAY_NUM - 1;
+    // CPUCFG.1：基本架构 LA32, PGMMU=1
+    assign csr_cpucfg1_rvalue  = {12'd0, cpucfg_valen, cpucfg_palen,
+                                  1'b0, 1'b1, 2'd0};
+    // CPUCFG.2：无浮点
+    assign csr_cpucfg2_rvalue  = 32'h0;
+    // CPUCFG.10：L1I_Present=1, L1D_Present=1, 无L2
+    assign csr_cpucfg10_rvalue = {25'd0,
+                                  1'b0, 1'b0, 2'd0,   // [6:3]
+                                  1'b1, 1'b0, 1'b1};  // [2:0]
+    // CPUCFG.11：L1 I-Cache 参数
+    assign csr_cpucfg11_rvalue = {1'b0, 3'd0,           // [31:28]
+                                  cpucfg_offset,         // [27:24]
+                                  cpucfg_index,          // [23:16]
+                                  cpucfg_way_m1};        // [15:0]
+    // CPUCFG.12：L1 D-Cache 参数（同 I-Cache）
+    assign csr_cpucfg12_rvalue = csr_cpucfg11_rvalue;
+    // CPUCFG.13：无L2 Cache
+    assign csr_cpucfg13_rvalue = 32'h0;
 
     // ========== CSR 读操作（按CSR号选择对应读值） ==========
     assign csr_rvalue = ({32{csr_id_num == `CSR_CRMD}}      & csr_crmd_rvalue)
@@ -226,7 +288,13 @@ module csr_regfile (
                       | ({32{csr_id_num == `CSR_TLBRENTRY}} & csr_tlbrentry_rvalue)
                       | ({32{csr_id_num == `CSR_CTAG}}      & csr_ctag_rvalue)
                       | ({32{csr_id_num == `CSR_DMW0}}      & csr_dmw0_rvalue)
-                      | ({32{csr_id_num == `CSR_DMW1}}      & csr_dmw1_rvalue);
+                      | ({32{csr_id_num == `CSR_DMW1}}      & csr_dmw1_rvalue)
+                      | ({32{csr_id_num == 14'h0b1}}        & csr_cpucfg1_rvalue)
+                      | ({32{csr_id_num == 14'h0b2}}        & csr_cpucfg2_rvalue)
+                      | ({32{csr_id_num == 14'h0c0}}        & csr_cpucfg10_rvalue)
+                      | ({32{csr_id_num == 14'h0c1}}        & csr_cpucfg11_rvalue)
+                      | ({32{csr_id_num == 14'h0c2}}        & csr_cpucfg12_rvalue)
+                      | ({32{csr_id_num == 14'h0c3}}        & csr_cpucfg13_rvalue);
 
     // ============================================================
     // CRMD 写操作（写 PLV、IE）
@@ -330,6 +398,7 @@ module csr_regfile (
             csr_estat[11] <= 1'b1;
 
         csr_estat[12] <= ipi_inter;
+
         // 例外发生时写入 Ecode 和 EsubCode
         if (wb_exc_valid) begin
             csr_estat[`CSR_ESTAT_ECODE]    <= wb_exc_ecode;
@@ -618,5 +687,35 @@ module csr_regfile (
     // ========== 异常入口地址输出 ==========
     assign exc_entry   = (wb_exc_ecode == `ECODE_TLBR) ? csr_tlbrentry_rvalue : csr_eentry_rvalue;
     assign exc_back_pc = csr_era;
+
+    `ifdef DIFFTEST_EN
+    // ========== difftest CSR 状态输出 ==========
+    assign csr_crmd_diff        = csr_crmd;
+    assign csr_prmd_diff        = csr_prmd;
+    assign csr_ectl_diff        = csr_ecfg;        // ECFG 寄存器对应 difftest 的 ectl 端口
+    assign csr_estat_diff       = csr_estat;
+    assign csr_era_diff         = csr_era;
+    assign csr_badv_diff        = csr_badv;
+    assign csr_eentry_diff      = csr_eentry;
+    assign csr_tlbidx_diff      = csr_tlbidx;
+    assign csr_tlbehi_diff      = csr_tlbehi;
+    assign csr_tlbelo0_diff     = csr_tlbelo0;
+    assign csr_tlbelo1_diff     = csr_tlbelo1;
+    assign csr_asid_diff        = csr_asid;
+    assign csr_save0_diff       = csr_save0;
+    assign csr_save1_diff       = csr_save1;
+    assign csr_save2_diff       = csr_save2;
+    assign csr_save3_diff       = csr_save3;
+    assign csr_tid_diff         = csr_tid;
+    assign csr_tcfg_diff        = csr_tcfg;
+    assign csr_tval_diff        = csr_tval;
+    assign csr_ticlr_diff       = csr_ticlr;
+    assign csr_llbctl_diff      = csr_llbctl;
+    assign csr_tlbrentry_diff   = csr_tlbrentry;
+    assign csr_dmw0_diff        = csr_dmw0;
+    assign csr_dmw1_diff        = csr_dmw1;
+    assign csr_pgdl_diff        = csr_pgdl;
+    assign csr_pgdh_diff        = csr_pgdh;
+    `endif
 
 endmodule

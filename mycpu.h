@@ -15,13 +15,56 @@
 // ============================================================================
 `define BR_BUS_WD           33                            // 分支总线宽度
 `define IF_TO_ID_BUS_WD     68                            // IF到ID总线
-`define ID_TO_EX_BUS_WD     299                           // ID到EX总线（+6: cacop）
-`define EX_TO_MEM_BUS_WD    243                           // EX到MEM总线
-`define MEM_TO_WB_BUS_WD    202                           // MEM到WB总线
+`define ID_TO_EX_BUS_WD        413                           // ID到EX总线（+6 cacop, +114 difftest）
+`define EX_TO_PRE_MEM_BUS_WD   628                           // EX到PRE_MEM总线（525 + 1 bp_en + 102 bp_bus）
+`define PRE_MEM_TO_MEM_BUS_WD  485                           // PRE_MEM到MEM总线（= EX_TO_MEM_BUS_WD +32 dift_paddr）
+`define EX_TO_MEM_BUS_WD       485                           // EX到MEM总线（保留兼容）
+`define MEM_TO_WB_BUS_WD    476                           // MEM到WB总线（+274 difftest）
 `define WB_TO_RF_BUS_WD     38                            // WB到寄存器文件
 `define WB_TO_CSR_BUS_WD    160                           // WB到CSR总线
 `define TLBCSR_BUS_WD       160                           // tlb相关CSR数据总线
 `define TLBRD_BUS_WD        101                           // WB到CSR TLB读数据总线
+`define BP_BUS_WD           102                           // 分支预测器更新数据总线（不含使能和计数）
+`define PRE_IF_BUS_WD       74                            // pre_if 数据总线 {pc[32], pred[42]}
+`define IF_BUS_WD           78                            // IF 数据总线 {pc[32], pred[42], exc[4]}
+
+// ============================================================================
+// 分支预测器参数
+// ============================================================================
+`define BTB_ENTRIES          32                            // BTB 表项数
+`define BTB_TAG_WD           30                            // BTB tag 位宽 (PC[31:2])
+`define RAS_CAM_ENTRIES      16                            // RAS CAM 表项数
+`define RAS_STACK_DEPTH      8                             // RAS 栈深度
+`define RAS_PTR_WD           4                             // RAS 栈指针位宽 (ceil(log2(8+1))=4)
+
+// ============================================================================
+// 分支预测器传递给流水线的预测信息位宽
+// ============================================================================
+`define PRED_INFO_WD         42                            // 预测信息总位宽
+// 字段分解：{pred_valid[1], pred_taken[1], pred_target[30], pred_is_ras[1], pred_btb_index[5], pred_ras_index[4]}
+// 总计 = 1+1+30+1+5+4 = 42
+
+// ============================================================================
+// 流水线总线宽度更新（扩展 IF→ID, ID→EX 以携带预测信息）
+// ============================================================================
+// IF→ID 总线：原 68 + 预测信息 42 = 110
+`undef  IF_TO_ID_BUS_WD
+`define IF_TO_ID_BUS_WD      110
+
+// ID→EX 总线：原 413 + 预测透传 42 + br_type 2 + cond_cmp 3 + br_offs 32 + is_branch 1 = 493
+`undef  ID_TO_EX_BUS_WD
+`define ID_TO_EX_BUS_WD      493
+
+// EX→PRE_MEM 总线：保持原 523（预测信息在 EX 消耗，不继续传）
+// PRE_MEM→MEM 总线：保持原 453
+// MEM→WB 总线：保持原 444
+
+// ============================================================================
+// 误预测纠正总线（EX → IF，仅 EX 级驱动）
+// ============================================================================
+`define MISPRED_BUS_WD       33                            // 误预测总线宽度
+// {ex_mispredict[1], ex_corr_target[32]} = 33
+// ID 不参与 mispredict，所有分支纠正统一由 EX 发出
 
 // ============================================================================
 // CSR 寄存器地址
@@ -161,7 +204,7 @@
 // ============================================================================
 // cache相关参数定义
 // ============================================================================
-`define WAY_NUM     2 
+`define WAY_NUM      2
 `define INDEX_WIDTH  8
 `define TAG_WIDTH    20
 `define OFFSET_WIDTH 4

@@ -5,16 +5,15 @@ module alu (
     input  wire [31:0] alu_src2,       // 源操作数2（来自寄存器或立即数）
     output wire [31:0] alu_result,     // ALU运算结果
     // 除法器流水线控制信号
-    output wire        div_ready,      // 除法器就绪信号（用于流水线停顿）
-    input  wire        mem_exc_valid,  // mem异常就不发起除法请求
-    input  wire        mem_ertn_flush, // mem为ertn就不发起除法请求
-    input  wire        wb_exc_valid,   // wb有异常冲刷就不发起除法请求
-    input  wire        wb_ertn_flush,  // wb有ertn指令就不发出除法请求
-    input  wire [ 9:0] ex_exc,         // 在ex阶段之前产生的异常类型
-    input  wire        ex_valid,       // 无效的ex指令就不发起除法请求
+    output wire        div_ready_o,    // 除法器就绪信号（用于流水线停顿）
     // 时钟与复位
     input  wire        clk,            // 时钟信号
-    input  wire        reset           // 复位信号（高有效）
+    input  wire        reset,          // 复位信号（高有效）
+    // 乘法器握手
+    output wire        mul_ready_o,      // 乘法器结果就绪（1拍脉冲，复用除法器停顿框架）
+    // 流水线控制（简化为 can_req + ldata）
+    input  wire        can_req,        // 本拍有权且有效，可发起乘除法请求
+    input  wire        ldata           // 新指令到达，复位单发锁
 );
 
     // ========== ALU 操作码定义（每位代表一种运算） ==========
@@ -71,8 +70,6 @@ module alu (
     wire [31:0] sll_result;         // 逻辑左移结果
     wire [63:0] sr64_result;        // 右移中间结果（64位，算术右移符号扩展用）
     wire [31:0] sr_result;          // 右移最终结果（逻辑或算术）
-    wire [63:0] mul64_result;       // 有符号乘法64位结果
-    wire [63:0] mulu64_result;      // 无符号乘法64位结果
     wire [31:0] mul_result;         // 乘法低32位
     wire [31:0] mulh_result;        // 有符号乘法高32位
     wire [31:0] mulhu_result;       // 无符号乘法高32位
@@ -117,28 +114,66 @@ module alu (
     assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4:0];
     assign sr_result   = sr64_result[31:0];
 
-    // ========== 乘法运算 ==========
-    assign mul64_result  = $signed(alu_src1) * $signed(alu_src2);
-    assign mulu64_result = alu_src1 * alu_src2;
-    assign mul_result    = mul64_result[31:0];
-    assign mulh_result   = mul64_result[63:32];
-    assign mulhu_result  = mulu64_result[63:32];
+    // ============================================================
+    // 乘法器流水线控制（2拍握手，复用除法器 AXI-stream 模式）
+    // ============================================================
+
+    wire is_mul_inst = op_mul | op_mulh | op_mulhu;
+
+    // 乘法器握手控制信号
+    wire s_axis_mul_tvalid;
+    wire s_axis_mul_tready;
+    reg  mul_ing; //   乘法器正在处理请求
+    wire mul_ready;           // 乘法器 IP 输出就绪
+
+    // 乘法握手
+    wire mul_handshake = s_axis_mul_tvalid && s_axis_mul_tready;
+    assign s_axis_mul_tvalid = is_mul_inst && can_req && !mul_ing;
+
+    // mul_ing 控制
+    always @(posedge clk) begin
+        if (reset) begin
+            mul_ing <= 1'b0;
+        end
+        else if (mul_handshake) begin
+            mul_ing <= 1'b1;
+        end
+        else if (ldata | mul_ready) begin
+            mul_ing <= 1'b0;
+        end
+    end
+
+    assign mul_ready_o = mul_ready & mul_ing & !ldata;
+
+    wire div_signed_ready   = div_ready_signed   & div_ing_signed   & !ldata;
+    wire div_unsigned_ready = div_ready_unsigned & div_ing_unsigned & !ldata;
+
+    // ========== 乘法器 IP 核实例化 ==========
+    mymul u_mul_inst (
+        .aclk               (clk),
+        .s_axis_mul_tvalid  (s_axis_mul_tvalid),
+        .s_axis_mul_tready  (s_axis_mul_tready),
+        .s_axis_mul_src1    (alu_src1),
+        .s_axis_mul_src2    (alu_src2),
+        .m_axis_dout_tvalid (mul_ready),
+        .m_axis_dout_tdata  ({mulhu_result, mulh_result, mul_result})
+    );
 
     // ============================================================
     // 除法器控制逻辑
     // ============================================================
 
     // 有符号除法器控制信号
-    reg  s_axis_divisor_tvalid_signed;   // 除数有效（有符号）
+    wire s_axis_divisor_tvalid_signed;   // 除数有效（有符号）
     wire s_axis_divisor_tready_signed;   // 除数准备就绪（IP核输出）
-    reg  s_axis_dividend_tvalid_signed;  // 被除数有效（有符号）
+    wire s_axis_dividend_tvalid_signed;  // 被除数有效（有符号）
     wire s_axis_dividend_tready_signed;  // 被除数准备就绪（IP核输出）
     wire div_ready_signed;               // 有符号除法结果有效
 
     // 无符号除法器控制信号
-    reg  s_axis_divisor_tvalid_unsigned;  // 除数有效（无符号）
+    wire s_axis_divisor_tvalid_unsigned;  // 除数有效（无符号）
     wire s_axis_divisor_tready_unsigned;  // 除数准备就绪
-    reg  s_axis_dividend_tvalid_unsigned; // 被除数有效（无符号）
+    wire s_axis_dividend_tvalid_unsigned; // 被除数有效（无符号）
     wire s_axis_dividend_tready_unsigned; // 被除数准备就绪
     wire div_ready_unsigned;              // 无符号除法结果有效
 
@@ -146,88 +181,27 @@ module alu (
     wire signed_div_inst   = op_div_w | op_mod_w;
     wire unsigned_div_inst = op_div_wu | op_mod_wu;
 
-    // 如果 mem 或 wb 阶段有异常/ertn，不发起除法握手（一条除法很占资源）
-    wire no_flush_or_exc = !(|ex_exc) && !mem_exc_valid && !mem_ertn_flush
-                         && ex_valid && !wb_ertn_flush && !wb_exc_valid;
+    // ── 除法握手（同 mul 模式）──
+    wire div_signed_handshake   = s_axis_divisor_tvalid_signed  && s_axis_divisor_tready_signed
+                               && s_axis_dividend_tvalid_signed && s_axis_dividend_tready_signed;
+    wire div_unsigned_handshake = s_axis_divisor_tvalid_unsigned  && s_axis_divisor_tready_unsigned
+                               && s_axis_dividend_tvalid_unsigned && s_axis_dividend_tready_unsigned;
 
-    wire signed_handshake = s_axis_divisor_tvalid_signed && s_axis_divisor_tready_signed
-                          && s_axis_dividend_tvalid_signed && s_axis_dividend_tready_signed
-                          && no_flush_or_exc;
+    assign s_axis_divisor_tvalid_signed   = signed_div_inst   && can_req && !div_ing_signed;
+    assign s_axis_dividend_tvalid_signed  = signed_div_inst   && can_req && !div_ing_signed;
+    assign s_axis_divisor_tvalid_unsigned = unsigned_div_inst && can_req && !div_ing_unsigned;
+    assign s_axis_dividend_tvalid_unsigned = unsigned_div_inst && can_req && !div_ing_unsigned;
 
-    wire unsigned_handshake = s_axis_divisor_tvalid_unsigned && s_axis_divisor_tready_unsigned
-                            && s_axis_dividend_tvalid_unsigned && s_axis_dividend_tready_unsigned
-                            && no_flush_or_exc;
-
-    // 除法指令是否已发送过请求（1: 空闲可接受新请求 / 0: 已发请求等待结果）
-    reg div_inst_new;
+    reg div_ing_signed, div_ing_unsigned;
     always @(posedge clk) begin
-        if (reset) begin
-            div_inst_new <= 1'b1;
-        end
-        else if (signed_handshake || unsigned_handshake) begin
-            div_inst_new <= 1'b0;
-        end
-        else if (div_ready_signed || div_ready_unsigned) begin
-            div_inst_new <= 1'b1;
-        end
+        if (reset)                                                   div_ing_signed   <= 1'b0;
+        else if (div_signed_handshake)                               div_ing_signed   <= 1'b1;
+        else if (ldata | div_ready_signed)                           div_ing_signed   <= 1'b0;
     end
-
-    // ========== 有符号除法器控制状态机 ==========
     always @(posedge clk) begin
-        if (reset) begin
-            s_axis_divisor_tvalid_signed  <= 1'b0;
-            s_axis_dividend_tvalid_signed <= 1'b0;
-        end
-        else begin
-            if (signed_handshake) begin
-                s_axis_divisor_tvalid_signed <= 1'b0;
-            end
-            else if (signed_div_inst && div_inst_new && ex_valid) begin
-                s_axis_divisor_tvalid_signed <= 1'b1;
-            end
-            else begin
-                s_axis_divisor_tvalid_signed <= s_axis_divisor_tvalid_signed;
-            end
-
-            if (signed_handshake) begin
-                s_axis_dividend_tvalid_signed <= 1'b0;
-            end
-            else if (signed_div_inst && div_inst_new && ex_valid) begin
-                s_axis_dividend_tvalid_signed <= 1'b1;
-            end
-            else begin
-                s_axis_dividend_tvalid_signed <= s_axis_dividend_tvalid_signed;
-            end
-        end
-    end
-
-    // ========== 无符号除法器控制状态机（逻辑同有符号） ==========
-    always @(posedge clk) begin
-        if (reset) begin
-            s_axis_divisor_tvalid_unsigned  <= 1'b0;
-            s_axis_dividend_tvalid_unsigned <= 1'b0;
-        end
-        else begin
-            if (unsigned_handshake) begin
-                s_axis_divisor_tvalid_unsigned <= 1'b0;
-            end
-            else if (unsigned_div_inst && div_inst_new && ex_valid) begin
-                s_axis_divisor_tvalid_unsigned <= 1'b1;
-            end
-            else begin
-                s_axis_divisor_tvalid_unsigned <= s_axis_divisor_tvalid_unsigned;
-            end
-
-            if (unsigned_handshake) begin
-                s_axis_dividend_tvalid_unsigned <= 1'b0;
-            end
-            else if (unsigned_div_inst && div_inst_new && ex_valid) begin
-                s_axis_dividend_tvalid_unsigned <= 1'b1;
-            end
-            else begin
-                s_axis_dividend_tvalid_unsigned <= s_axis_dividend_tvalid_unsigned;
-            end
-        end
+        if (reset)                                                   div_ing_unsigned <= 1'b0;
+        else if (div_unsigned_handshake)                             div_ing_unsigned <= 1'b1;
+        else if (ldata | div_ready_unsigned)                         div_ing_unsigned <= 1'b0;
     end
 
     // ========== 有符号除法器 IP 核实例化 ==========
@@ -256,26 +230,46 @@ module alu (
         .m_axis_dout_tdata      ({div_result_unsigned, mod_result_unsigned})
     );
 
-    assign div_ready = (signed_div_inst && div_ready_signed)
-                    || (unsigned_div_inst && div_ready_unsigned);
+    assign div_ready_o = (signed_div_inst   && div_signed_ready)
+                    || (unsigned_div_inst && div_unsigned_ready);
 
-    // ========== 最终结果选择（根据操作码选择对应的运算结果） ==========
-    assign alu_result = ({32{op_add|op_sub}} & add_sub_result)
-                      | ({32{op_slt       }} & slt_result)
-                      | ({32{op_sltu      }} & sltu_result)
-                      | ({32{op_and       }} & and_result)
-                      | ({32{op_nor       }} & nor_result)
-                      | ({32{op_or        }} & or_result)
-                      | ({32{op_xor       }} & xor_result)
-                      | ({32{op_lui       }} & lui_result)
-                      | ({32{op_sll       }} & sll_result)
-                      | ({32{op_srl|op_sra}} & sr_result)
-                      | ({32{op_mul       }} & mul_result)
-                      | ({32{op_mulh      }} & mulh_result)
-                      | ({32{op_mulhu     }} & mulhu_result)
-                      | ({32{op_div_w     }} & div_result_signed)
-                      | ({32{op_div_wu    }} & div_result_unsigned)
-                      | ({32{op_mod_w     }} & mod_result_signed)
-                      | ({32{op_mod_wu    }} & mod_result_unsigned);
+    // ========== 最终结果选择（二叉树 MUX，log2(17)≈5级，替代平坦OR） ==========
+    // Level 1: 17 → 9（掩码选择 + 二合一归约）
+    wire [31:0] res_l1_0 = ({32{op_add|op_sub}} & add_sub_result)
+                         | ({32{op_slt       }} & slt_result);
+    wire [31:0] res_l1_1 = ({32{op_sltu      }} & sltu_result)
+                         | ({32{op_and       }} & and_result);
+    wire [31:0] res_l1_2 = ({32{op_nor       }} & nor_result)
+                         | ({32{op_or        }} & or_result);
+    wire [31:0] res_l1_3 = ({32{op_xor       }} & xor_result)
+                         | ({32{op_lui       }} & lui_result);
+    wire [31:0] res_l1_4 = ({32{op_sll       }} & sll_result)
+                         | ({32{op_srl|op_sra}} & sr_result);
+    wire [31:0] res_l1_5 = ({32{op_mul       }} & mul_result)
+                         | ({32{op_mulh      }} & mulh_result);
+    wire [31:0] res_l1_6 = ({32{op_mulhu     }} & mulhu_result)
+                         | ({32{op_div_w     }} & div_result_signed);
+    wire [31:0] res_l1_7 = ({32{op_div_wu    }} & div_result_unsigned)
+                         | ({32{op_mod_w     }} & mod_result_signed);
+    wire [31:0] res_l1_8 = ({32{op_mod_wu    }} & mod_result_unsigned);
+
+    // Level 2: 9 → 5
+    wire [31:0] res_l2_0 = res_l1_0 | res_l1_1;
+    wire [31:0] res_l2_1 = res_l1_2 | res_l1_3;
+    wire [31:0] res_l2_2 = res_l1_4 | res_l1_5;
+    wire [31:0] res_l2_3 = res_l1_6 | res_l1_7;
+    wire [31:0] res_l2_4 = res_l1_8;
+
+    // Level 3: 5 → 3
+    wire [31:0] res_l3_0 = res_l2_0 | res_l2_1;
+    wire [31:0] res_l3_1 = res_l2_2 | res_l2_3;
+    wire [31:0] res_l3_2 = res_l2_4;
+
+    // Level 4: 3 → 2
+    wire [31:0] res_l4_0 = res_l3_0 | res_l3_1;
+    wire [31:0] res_l4_1 = res_l3_2;
+
+    // Level 5: 2 → 1
+    assign alu_result = res_l4_0 | res_l4_1;
 
 endmodule

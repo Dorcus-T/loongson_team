@@ -582,7 +582,7 @@ module dcache (
     always @(posedge clk) begin
         if (~resetn) begin
             for (prst = 0; prst < INDEX_DEPTH; prst = prst + 1)
-                plru[prst] <= {PLRU_W{1'b0}};
+                plru[prst] = {PLRU_W{1'b0}};
         end
         else if (plru_upd_en) begin
             pnode = `WAY_NUM + plru_upd_way;
@@ -937,7 +937,7 @@ module dcache (
         if (~resetn) begin
             for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1) begin
                 for (d_idx = 0; d_idx < INDEX_DEPTH; d_idx = d_idx + 1)
-                    d_ram[d_wi][d_idx] <= 1'b0;
+                    d_ram[d_wi][d_idx] = 1'b0;
             end
         end
         else begin

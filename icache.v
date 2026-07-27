@@ -357,7 +357,7 @@ module icache (
     always @(posedge clk) begin
         if (~resetn) begin
             for (prst = 0; prst < INDEX_DEPTH; prst = prst + 1)
-                plru[prst] <= {PLRU_W{1'b0}};
+                plru[prst] = {PLRU_W{1'b0}};
         end
         else if (plru_upd_en) begin
             pnode = `WAY_NUM + plru_upd_way;

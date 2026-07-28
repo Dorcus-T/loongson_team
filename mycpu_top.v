@@ -813,7 +813,7 @@ module core_top (
         .cacop_en      (icache_cacop_en),
         .cacop_code    (cacop_code),
         .cacop_va      (cacop_va),
-        .mmu_cacop_tag (if_tag),
+        .mmu_cacop_tag (ex_tag),
         .cacop_rdy     (icache_cacop_rdy),
         // AXI 接口
         .rd_req        (icache_rd_req),

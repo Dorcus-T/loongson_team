@@ -805,6 +805,7 @@ module core_top (
         .cpu_offset    (icache_cpu_offset),
         .mmu_cache     (mmu_if_cached),
         .mmu_cancel    (s0_cancel),
+        .mmu_cacop_cancel (s1_cancel),
         .cpu_addr_ok   (icache_cpu_addr_ok),
         .cpu_data_ok   (icache_cpu_data_ok),
         .cpu_rdata     (icache_cpu_rdata),

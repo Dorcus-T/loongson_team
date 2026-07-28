@@ -12,6 +12,7 @@ module icache (
     input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
     input  wire                    mmu_cache,
     input  wire                    mmu_cancel,       // MMU 取消（第1拍有效，与 tag 同步到达）
+    input  wire                    mmu_cacop_cancel,  
     output wire                    cpu_addr_ok,
     output wire                    cpu_data_ok,
     output wire [31:0]             cpu_rdata,
@@ -253,7 +254,7 @@ module icache (
     assign use_mmu_buf = main_lookup && mmu_buf_valid;
 
     wire effective_cancel;
-    assign effective_cancel = use_mmu_buf ? mmu_buf_cancel : mmu_cancel;
+    assign effective_cancel = use_mmu_buf ? mmu_buf_cancel : (cacop_en_r ? mmu_cacop_cancel : mmu_cancel);
 
     // ============================================================
     // Lookup Tag 选择（第1拍：MMU 送达的物理 tag / CACOP tag）
@@ -417,7 +418,7 @@ module icache (
         else if (mmu_buf_capture) begin
             mmu_buf_tag    <= mmu_tag;
             mmu_buf_cached <= mmu_cache;
-            mmu_buf_cancel <= mmu_cancel;
+            mmu_buf_cancel <= cacop_en_r ? mmu_cacop_cancel : mmu_cancel;
             mmu_buf_valid  <= 1'b1;
         end
         else if (main_lookup || main_idle) begin

@@ -60,7 +60,18 @@ module core_top (
     output wire [31:0]  debug0_wb_inst,            // WB阶段指令
     // 性能计数器
     output wire [31:0]  debug0_pred_cnt,           // 分支预测次数
-    output wire [31:0]  debug0_mispred_cnt         // 分支预测错误次数
+    output wire [31:0]  debug0_mispred_cnt,        // 分支预测错误次数
+    // 异常调试接口
+    output wire         debug_exc_not_rf,          // 异常提交标志
+    output wire [ 5:0]  debug_ecode,               // 异常类型码
+    output wire [31:0]  debug_exc_back_pc,          // 异常返回地址（异常指令PC）
+    // IF 级调试接口
+    output wire [31:0]  debug_pre_if_pc,            // pre-IF 级 PC
+    output wire [31:0]  debug_if_pc,                // IF 级 PC
+    output wire [31:0]  debug_if_inst,              // IF 级指令
+    output wire         debug_s0_cancel,             // ICache mmu_cancel
+    output wire         debug_icache_addr_ok,        // ICache addr_ok
+    output wire [ 2:0]  debug_inst_dirty             // IF inst_dirty
 );
 
     // ========== 复位信号处理（将低有效转换为高有效） ==========
@@ -450,7 +461,11 @@ module core_top (
         .if_exc_o           (exc_i[1:0]),
         .if_ertn_o          (ertn_i[1:0]),
         .s0_flush           (s0_flush),
-        .if_pre_if_pc_next  (if_pre_if_pc_next)
+        .if_pre_if_pc_next  (if_pre_if_pc_next),
+        .debug_pre_if_pc    (debug_pre_if_pc),
+        .debug_if_pc        (debug_if_pc),
+        .debug_if_inst      (debug_if_inst),
+        .debug_inst_dirty   (debug_inst_dirty)
     );
 
     // ================================================================
@@ -791,6 +806,11 @@ module core_top (
 
     assign debug0_pred_cnt   = pred_cnt;
     assign debug0_mispred_cnt = mispred_cnt;
+    assign debug_exc_not_rf    = exc_not_rf;
+    assign debug_ecode         = ecode_out;
+    assign debug_exc_back_pc   = exc_back_pc;
+    assign debug_s0_cancel       = s0_cancel;
+    assign debug_icache_addr_ok  = icache_cpu_addr_ok;
 
     // ================================================================
     // ICache

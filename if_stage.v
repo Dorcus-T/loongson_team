@@ -53,7 +53,12 @@ module if_stage (
     // ── inst_dirty计算 ──
     input  wire         s0_flush,        // pre_if 之后有冲刷 → inst_dirty
     // ── 分支预测器 lookup_pc_i ──
-    output wire [31:0]  if_pre_if_pc_next // pre_if_pc_next 给 branch_predict 做查表地址
+    output wire [31:0]  if_pre_if_pc_next, // pre_if_pc_next 给 branch_predict 做查表地址
+    // debug
+    output wire [31:0]  debug_pre_if_pc,
+    output wire [31:0]  debug_if_pc,
+    output wire [31:0]  debug_if_inst,
+    output wire [ 2:0]  debug_inst_dirty
 );
 
     reg  [`IF_BUS_WD-1:0] if_data_n;
@@ -299,4 +304,10 @@ module if_stage (
 
     // ========== 输出给分支预测器 ==========
     assign if_pre_if_pc_next = pre_if_pc_next;
+
+    // ========== debug ==========
+    assign debug_pre_if_pc  = pre_if_pc_r;
+    assign debug_if_pc      = if_pc_r;
+    assign debug_if_inst    = if_inst;
+    assign debug_inst_dirty = inst_dirty;
 endmodule

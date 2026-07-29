@@ -74,7 +74,30 @@ module core_top (
     output wire [ 2:0]  debug_inst_dirty,            // IF inst_dirty
     // ICache 调试接口
     output wire [ 3:0]  debug_icache_state,           // ICache 主状态机
-    output wire         debug_icache_rd_req            // ICache AXI 读请求
+    output wire         debug_icache_rd_req,           // ICache AXI 读请求
+    output wire [`TAG_WIDTH-1:0]   debug_icache_mmu_tag,
+    output wire [`INDEX_WIDTH-1:0] debug_icache_cpu_index,
+    output wire                    debug_icache_refill_cached,
+    output wire [`INDEX_WIDTH-1:0] debug_icache_refill_index,
+    output wire [`INDEX_WIDTH-1:0] debug_icache_req_index,
+    // Bridge 调试接口
+    output wire         debug_bridge_arvalid,
+    output wire         debug_bridge_arready,
+    output wire [31:0]  debug_bridge_icache_return_data,
+    output wire         debug_bridge_ic_rd_buf_valid,
+    output wire [31:0]  debug_bridge_ic_rd_buf_addr,
+    // AXI 读数据通道
+    output wire [31:0]  debug_axi_rdata,
+    output wire         debug_axi_rvalid,
+    output wire         debug_axi_rlast,
+    // DCache 调试接口
+    output wire [ 5:0]              debug_dcache_state,
+    output wire                     debug_dcache_rd_req,
+    output wire [`TAG_WIDTH-1:0]    debug_dcache_mmu_tag,
+    output wire [`INDEX_WIDTH-1:0]  debug_dcache_cpu_index,
+    output wire                     debug_dcache_refill_cached,
+    output wire [`INDEX_WIDTH-1:0]  debug_dcache_refill_index,
+    output wire [`INDEX_WIDTH-1:0]  debug_dcache_req_index
 );
 
     // ========== 复位信号处理（将低有效转换为高有效） ==========
@@ -821,6 +844,10 @@ module core_top (
     assign debug_exc_back_pc   = exc_back_pc;
     assign debug_s0_cancel       = s0_cancel;
     assign debug_icache_addr_ok  = icache_cpu_addr_ok;
+    assign debug_bridge_arready  = arready;
+    assign debug_axi_rdata       = rdata;
+    assign debug_axi_rvalid      = rvalid;
+    assign debug_axi_rlast       = rlast;
 
     // ================================================================
     // ICache
@@ -855,8 +882,13 @@ module core_top (
         .return_last   (icache_return_last),
         .return_data   (icache_return_data),
         // debug
-        .debug_main_state (debug_icache_state),
-        .debug_rd_req     (debug_icache_rd_req)
+        .debug_main_state     (debug_icache_state),
+        .debug_rd_req         (debug_icache_rd_req),
+        .debug_mmu_tag        (debug_icache_mmu_tag),
+        .debug_cpu_index      (debug_icache_cpu_index),
+        .debug_refill_cached  (debug_icache_refill_cached),
+        .debug_refill_index   (debug_icache_refill_index),
+        .debug_req_index      (debug_icache_req_index)
     );
 
     // ================================================================
@@ -898,7 +930,15 @@ module core_top (
         .wr_wstrb      (dcache_wr_wstrb),
         .wr_data       (dcache_wr_data),
         .wr_rdy        (dcache_wr_rdy),
-        .wr_done       (dcache_wr_done)
+        .wr_done       (dcache_wr_done),
+        // debug
+        .debug_main_state     (debug_dcache_state),
+        .debug_rd_req         (debug_dcache_rd_req),
+        .debug_mmu_tag        (debug_dcache_mmu_tag),
+        .debug_cpu_index      (debug_dcache_cpu_index),
+        .debug_refill_cached  (debug_dcache_refill_cached),
+        .debug_refill_index   (debug_dcache_refill_index),
+        .debug_req_index      (debug_dcache_req_index)
     );
 
     // ================================================================
@@ -966,7 +1006,12 @@ module core_top (
         .bid            (bid),
         .bresp          (bresp),
         .bvalid         (bvalid),
-        .bready         (bready)
+        .bready         (bready),
+        // debug
+        .debug_arvalid           (debug_bridge_arvalid),
+        .debug_icache_return_data (debug_bridge_icache_return_data),
+        .debug_ic_rd_buf_valid   (debug_bridge_ic_rd_buf_valid),
+        .debug_ic_rd_buf_addr    (debug_bridge_ic_rd_buf_addr)
     );
 
     `ifdef DIFFTEST_EN

@@ -352,7 +352,7 @@ module icache (
     always @(posedge clk) begin
         if (main_lookup && !cache_inst_hit && !effective_cancel) begin
             refill_index        <= req_index;
-            refill_tag          <= cacop_en_r ? mmu_cacop_tag : mmu_tag;
+            refill_tag          <= mmu_tag;
             refill_offset       <= req_offset;
             refill_cached       <= mmu_cache;
             refill_replace_way  <= victim_way;
@@ -482,7 +482,7 @@ module icache (
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel;
     wire [ 3:0]             tagv_wmask_sel;
     wire [`TAG_WIDTH:0]     tagv_wdata_sel;
-    assign tagv_waddr_sel = (cacop_code00 || cacop_code01) ? cacop_index_r : refill_index;
+    assign tagv_waddr_sel = cacop_en_r ? cacop_index_r : refill_index;
     assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001 : {TAGV_BYTES{1'b1}};
     assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} } : {refill_tag, 1'b1};
 

@@ -793,7 +793,7 @@ module dcache (
     wire [ 3:0]            tagv_wmask_sel;
     wire [`TAG_WIDTH:0]     tagv_wdata_sel;
     assign tagv_waddr_sel = vc_fill ? req_index
-                          : (cacop_code00 || cacop_code01) ? cacop_index_r
+                          : cacop_en_r ? cacop_index_r
                           : refill_index;
     assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001 : {TAGV_BYTES{1'b1}};
     wire [`TAG_WIDTH:0] vc_serve_tagv_wdata;

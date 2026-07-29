@@ -86,7 +86,7 @@ module icache (
     reg                     cacop_is_hit_r;
 
     // ============================================================
-    // Refill Buffer — enter_refill 时从 Request Buffer 快照，REFILL 期间不变
+    // Refill Buffer — LOOKUP miss 拍从 Request Buffer 快照，REFILL 期间不变
     // ============================================================
     reg  [`INDEX_WIDTH-1:0]  refill_index;
     reg  [`TAG_WIDTH-1:0]   refill_tag;
@@ -96,19 +96,6 @@ module icache (
     reg  [ 1:0]             refill_cnt;
     reg  [31:0]             refill_line [0:BANK_NUM-1];
 
-    // ============================================================
-    // 顶层标志
-    // ============================================================
-    reg  refill_already_accept_new_req; // REFILL 期间 accept 了一个新请求，待 REFILL 后进 LOOKUP
-
-    // ============================================================
-    // MMU Buffer — REFILL 提前取时，锁存 MMU 输出的 tag/cache/cancel
-    // 提前 accept 的下一拍 MMU 数据有效，此时仍在 REFILL，锁存备用
-    // ============================================================
-    reg  [`TAG_WIDTH-1:0]  mmu_buf_tag;
-    reg                    mmu_buf_cached;
-    reg                    mmu_buf_cancel;
-    reg                    mmu_buf_valid;
 
     // ============================================================
     // 树状伪 LRU
@@ -138,21 +125,13 @@ module icache (
     // ============================================================
     wire idle_accept;
     wire hit_accept;
-    wire refill_early_accept;
 
     assign idle_accept   = main_idle && (cpu_req || cacop_en);
     assign hit_accept    = main_lookup && cache_inst_hit && (cpu_req || cacop_en);
-    assign refill_early_accept = main_refill && !refill_last
-                               && !refill_already_accept_new_req
-                               && !cacop_en_r
-                               && !cacop_en
-                               && cpu_req
-                               && mmu_cache;
 
     wire accept_new_req;
     assign accept_new_req = (idle_accept && accept_ok)
-                         || (hit_accept && accept_ok)
-                         || (refill_early_accept && accept_ok);
+                         || (hit_accept && accept_ok);
 
     // ============================================================
     // RAM 读控制
@@ -168,14 +147,6 @@ module icache (
     // ============================================================
     wire refill_last;
     assign refill_last = main_refill && return_valid && return_last;
-
-    // ============================================================
-    // enter_refill — 状态转换条件
-    // ============================================================
-    wire enter_refill;
-    assign enter_refill = (main_lookup && cacop_en_r)
-                        || (main_lookup && !cache_inst_hit && rd_rdy)
-                        || (main_waitrd && rd_rdy);
 
     // ============================================================
     // 主状态机 — 时序
@@ -219,14 +190,8 @@ module icache (
                     main_next = MAIN_WAITRD;
             end
             MAIN_REFILL: begin
-                if (refill_last || cacop_en_r) begin
-                    if (cacop_en_r || !refill_cached)
-                        main_next = MAIN_IDLE;
-                    else if (refill_already_accept_new_req)
-                        main_next = MAIN_LOOKUP;
-                    else
-                        main_next = MAIN_IDLE;
-                end
+                if (refill_last || cacop_en_r)
+                    main_next = MAIN_IDLE;
                 else
                     main_next = MAIN_REFILL;
             end
@@ -235,38 +200,26 @@ module icache (
     end
 
     // ============================================================
-    // Tag/Data Bypass — LOOKUP-from-early-accept 时用 refill 数据替代过期 RAM 输出
+    // Tag Lookup — 从 RAM 直接读取
     // ============================================================
-    wire bypass_active;
-    assign bypass_active = main_lookup && refill_already_accept_new_req
-                         && (req_index == refill_index);
-
     wire [`TAG_WIDTH:0] tagv_lookup [0:`WAY_NUM-1];
     genvar gb_byp;
     generate
         for (gb_byp = 0; gb_byp < `WAY_NUM; gb_byp = gb_byp + 1) begin : tagv_bypass_gen
-            assign tagv_lookup[gb_byp] = (bypass_active && (gb_byp[WAY_IDX_W-1:0] == refill_replace_way))
-                                      ? {refill_tag, 1'b1}
-                                      : tagv_rdata[gb_byp];
+            assign tagv_lookup[gb_byp] = tagv_rdata[gb_byp];
         end
     endgenerate
 
-    // ============================================================
-    // MMU 信号来源选择 — 提前取 LOOKUP 用 MMU Buffer，常规 LOOKUP 用端口值
-    // ============================================================
-    wire use_mmu_buf;
-    assign use_mmu_buf = main_lookup && mmu_buf_valid;
-
     wire effective_cancel;
-    assign effective_cancel = use_mmu_buf ? mmu_buf_cancel : (cacop_en_r ? mmu_cacop_cancel : mmu_cancel);
+    assign effective_cancel = cacop_en_r ? mmu_cacop_cancel : mmu_cancel;
 
     // ============================================================
-    // Lookup Tag 选择（第1拍：MMU 送达的物理 tag / CACOP tag）
+    // Lookup Tag（MMU 送达的物理 tag / CACOP tag）
     // ============================================================
     wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : (use_mmu_buf ? mmu_buf_tag    : mmu_tag);
-    assign lookup_cached = cacop_en_r ? 1'b1         : (use_mmu_buf ? mmu_buf_cached : mmu_cache);
+    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
+    assign lookup_cached = cacop_en_r ? 1'b1         : mmu_cache;
 
     // ============================================================
     // Tag 比较与命中判断
@@ -404,41 +357,14 @@ module icache (
     end
 
     // ============================================================
-    // MMU Buffer — REFILL 提前 accept 的下一拍，MMU 输出有效但仍在 REFILL
-    // 锁存 tag/cache/cancel 供后续 LOOKUP 使用
-    // 捕获条件：REFILL 中 && 刚发生过 early accept（refill_already_accept_new_req=1）
-    //           && 尚未捕获（!mmu_buf_valid）
-    // ============================================================
-    wire mmu_buf_capture;
-    assign mmu_buf_capture = main_refill && refill_already_accept_new_req && !mmu_buf_valid;
-
-    always @(posedge clk) begin
-        if (~resetn) begin
-            mmu_buf_tag    <= {`TAG_WIDTH{1'b0}};
-            mmu_buf_cached <= 1'b0;
-            mmu_buf_cancel <= 1'b0;
-            mmu_buf_valid  <= 1'b0;
-        end
-        else if (mmu_buf_capture) begin
-            mmu_buf_tag    <= mmu_tag;
-            mmu_buf_cached <= mmu_cache;
-            mmu_buf_cancel <= cacop_en_r ? mmu_cacop_cancel : mmu_cancel;
-            mmu_buf_valid  <= 1'b1;
-        end
-        else if (main_lookup || main_idle) begin
-            mmu_buf_valid <= 1'b0;
-        end
-    end
-
-    // ============================================================
     // Refill Buffer — LOOKUP miss 拍一次性锁存，整个 REFILL 期间不变
     // ============================================================
     always @(posedge clk) begin
         if (main_lookup && !cache_inst_hit && !effective_cancel) begin
             refill_index        <= req_index;
-            refill_tag          <= use_mmu_buf ? mmu_buf_tag    : mmu_tag;
+            refill_tag          <= mmu_tag;
             refill_offset       <= req_offset;
-            refill_cached       <= use_mmu_buf ? mmu_buf_cached : mmu_cache;
+            refill_cached       <= mmu_cache;
             refill_replace_way  <= victim_way;
             refill_cnt          <= 2'd0;
         end
@@ -450,24 +376,10 @@ module icache (
     end
 
     // ============================================================
-    // refill_already_accept_new_req — 时序
-    // ============================================================
-    always @(posedge clk) begin
-        if (~resetn)
-            refill_already_accept_new_req <= 1'b0;
-        else if (refill_early_accept && accept_ok)
-            refill_already_accept_new_req <= 1'b1;
-        else if (main_lookup || main_idle)
-            refill_already_accept_new_req <= 1'b0;
-    end
-
-    // ============================================================
     // 数据选择 — 命中路选字
     // ============================================================
     wire [31:0] hit_word;
-    assign hit_word = (bypass_active && (hit_way_idx == refill_replace_way))
-                    ? refill_line[req_offset[3:2]]
-                    : bank_rdata[hit_way_idx][req_offset[3:2]];
+    assign hit_word = bank_rdata[hit_way_idx][req_offset[3:2]];
 
     // ============================================================
     // 读结果就绪判断
@@ -672,8 +584,8 @@ module icache (
     wire                   rd_addr_cached;
     wire [`INDEX_WIDTH-1:0]  rd_addr_index;
     wire [`OFFSET_WIDTH-1:0] rd_addr_offset;
-    assign rd_addr_tag    = rd_addr_is_lookup ? (use_mmu_buf ? mmu_buf_tag    : mmu_tag   ) : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? (use_mmu_buf ? mmu_buf_cached : mmu_cache) : refill_cached;
+    assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
+    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache  : refill_cached;
     assign rd_addr_index  = rd_addr_is_lookup ? req_index  : refill_index;
     assign rd_addr_offset = rd_addr_is_lookup ? req_offset : refill_offset;
 
@@ -699,7 +611,7 @@ module icache (
         else begin
             if (accept_new_req)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && (use_mmu_buf ? mmu_buf_cached : mmu_cache) && !cacop_en_r) begin
+            if (main_lookup && mmu_cache && !cacop_en_r) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_inst_hit) begin
                     perf_miss_cnt      <= perf_miss_cnt      + 32'd1;

@@ -225,7 +225,7 @@ module wb_stage (
     `ifdef DIFFTEST_EN
     assign debug_wb_inst     = dift_id_inst;                 // 写回指令编码
     `else
-    assign debug_wb_inst     = 32'b0;
+    assign debug_wb_inst     = wb_pc;
     `endif
 
     // ========== 前递输出 ==========

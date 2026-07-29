@@ -114,6 +114,7 @@ module id_stage (
     assign id_valid_o = id_valid;
     assign id_exc_o   = id_exc_valid;
     assign id_ertn_o  = id_ertn_flush;
+    assign id_ertn_flush = 1'b0;
 
     // ── → EX ──
     assign id_to_ex_valid = id_valid;

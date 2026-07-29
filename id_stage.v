@@ -614,6 +614,7 @@ module id_stage (
     wire        id_pred_is_ras;
     wire [ 4:0] id_pred_btb_index;
     wire [ 3:0] id_pred_ras_index;
+    wire        id_static_taken;
     assign {
         id_exc[8:5],
         id_inst,
@@ -623,7 +624,8 @@ module id_stage (
         id_pred_target,
         id_pred_is_ras,
         id_pred_btb_index,
-        id_pred_ras_index
+        id_pred_ras_index,
+        id_static_taken
     } = current_bus;
 
     // 当前指令是否是分支
@@ -703,8 +705,9 @@ module id_stage (
         id_br_type,           // 2   分支类型
         cond_cmp,             // 3   条件分支比较码
         br_offs,              // 32  分支偏移量（已符号扩展+左移2位，覆盖B/BL的26位和条件/JIRL的16位）
-        id_is_branch          // 1   是否为分支指令
-    };  // 总计 413 + 80 = 493
+        id_is_branch,         // 1   是否为分支指令
+        id_static_taken       // 1   静态分支预测
+    };  // 总计 413 + 80 + 1 = 494
 
     assign work_done = id_exc_valid || (!load_use_stall && !csr_stall && !calc_stall);
     

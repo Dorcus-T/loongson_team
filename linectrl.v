@@ -125,7 +125,7 @@ module linectrl (
 
     // flush source per stage
     wire [6:0] src;
-    assign src[0] = (exc[0] | ertn[0]) & ~mispred[3];
+    assign src[0] = (exc[0] | ertn[0]) & ~mispred[3] & ~mispred[1];
     assign src[1] = (exc[1] | ertn[1]) & ~mispred[3];
     assign src[2] = (exc[2] | ertn[2]) & ~mispred[3];
     assign src[3] = exc[3] | ertn[3];
@@ -154,7 +154,7 @@ module linectrl (
     //   pre_if（i=0）: r[-1] ≡ 1
     // ================================================================
     assign lvalid[0] = (~r[0] | ~empty[1] | ~src[0]) & ~fs[0];
-    assign lvalid[1] = (~r[1] | ~empty[2] | (r[0] & ~src[1])) & ~fs[1] & ~mispred[3];
+    assign lvalid[1] = (~r[1] | ~empty[2] | (r[0] & ~(src[1] | mispred[1]))) & ~fs[1] & ~mispred[3];
     assign lvalid[2] = (~r[2] | ~empty[3] | (r[1] & ~src[2])) & ~fs[2] & ~mispred[3];
     assign lvalid[3] = (~r[3] | ~empty[4] | (r[2] & ~(src[3] | mispred[3]))) & ~fs[3];
     assign lvalid[4] = (~r[4] | ~empty[5] | (r[3] & ~src[4])) & ~fs[4];
@@ -202,7 +202,7 @@ module linectrl (
     // ================================================================
     // s0_flush: pre_if(0) 之后有冲刷（含分支）→ 抑制 s0 μTLB refill
     // ================================================================
-    assign s0_flush = fs[0] | mispred[3];
+    assign s0_flush = fs[0] | mispred[3] | mispred[1];
 
     // ================================================================
     // bp_valid: 分支预测器更新许可（PRE_MEM 级，4=pre_mem）

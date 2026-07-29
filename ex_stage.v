@@ -113,6 +113,7 @@ module exe_stage (
     wire [ 2:0] ex_cond_cmp;            // 条件分支比较码
     wire [31:0] ex_br_offs;             // 分支偏移量（已符号扩展+左移2位，直接可用）
     wire        ex_is_branch;           // 是否为分支指令
+    wire        ex_static_taken;        // 静态分支预测
 
     `ifdef DIFFTEST_EN
     // difftest 信号
@@ -181,7 +182,8 @@ module exe_stage (
         ex_br_type,         // 37:36   分支类型
         ex_cond_cmp,        // 35:33   条件分支比较码
         ex_br_offs,         // 32:1    分支偏移量（已符号扩展+左移2位）
-        ex_is_branch        // 0       是否为分支指令
+        ex_is_branch,        // 是否为分支指令
+        ex_static_taken      // 静态分支预测
     } = current_bus;
 
     // ========== 双寄存器逻辑 ==========
@@ -281,7 +283,7 @@ module exe_stage (
     // 方向错 = 实际方向 ≠ (预测有效且预测跳转)
     wire ex_mispredict_raw;
     assign ex_mispredict_raw = ex_is_branch&& (
-        (ex_br_taken_actual != (ex_pred_valid && ex_pred_taken))           // 方向错（含冷启动：无预测→视为不跳）
+        (ex_br_taken_actual != ((ex_pred_valid && ex_pred_taken) || ex_static_taken))           // 方向错（含冷启动：无预测→视为不跳）
         || (ex_br_taken_actual && ex_pred_valid
             && (ex_pred_target != ex_br_target_actual[31:2]))              // 目标错（仅预测为跳时才检查）
     );
@@ -305,7 +307,7 @@ module exe_stage (
     wire        bp_en_comb   = (ex_is_branch || bp_del) && can_req;
 
     wire pred_comb    = bp_en_comb && ex_pred_valid;
-    wire mispred_comb = ex_mispredict && ex_pred_valid;
+    wire mispred_comb = ex_mispredict;
 
     // ========== 性能计数（组合输出） ==========
     assign pred_event    = pred_comb;

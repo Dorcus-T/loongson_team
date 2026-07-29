@@ -55,6 +55,8 @@ module if_stage (
     input  wire         s0_cancel,       // MMU TLB 异常 → 取消 pre_if 请求
     // ── 分支预测器 lookup_pc_i ──
     output wire [31:0]  if_pre_if_pc_next, // pre_if_pc_next 给 branch_predict 做查表地址
+    // ── 静态分支预测（→ linectrl）──
+    output wire         if_mispred_o,
     // debug
     output wire [31:0]  debug_pre_if_pc,
     output wire [31:0]  debug_if_pc,
@@ -214,6 +216,37 @@ module if_stage (
     assign btb_pred_taken = bp_btb_hit && bp_btb_counter[1] && !bp_ras_hit;
     assign ras_pred_taken = bp_ras_hit;
 
+    // ============================================================
+    // 静态分支预测（pred_valid == 0 时生效）
+    // ============================================================
+    wire [ 5:0] if_opcode           = if_inst[31:26];
+    wire        if_is_b_static      = (if_opcode == 6'h14);
+    wire        if_is_bl_static     = (if_opcode == 6'h15);
+    wire        if_is_cond_br_static = (if_opcode >= 6'h16) && (if_opcode <= 6'h1b);
+
+    // b/bl: 26bit 偏移（sign = inst[9]）
+    wire [25:0] if_br_offs_26       = {if_inst[9:0], if_inst[25:10]};
+    wire [31:0] if_br_target_26     = if_pc_r + {{4{if_inst[9]}}, if_br_offs_26, 2'b00};
+
+    // 条件分支: 16bit 偏移（sign = inst[25]）
+    wire [15:0] if_br_offs_16       = if_inst[25:10];
+    wire [31:0] if_br_target_16     = if_pc_r + {{14{if_inst[25]}}, if_br_offs_16, 2'b00};
+
+    wire [31:0] static_target       = (if_is_b_static || if_is_bl_static)
+                                    ? if_br_target_26 : if_br_target_16;
+
+    wire        static_decode_taken = if_is_b_static || if_is_bl_static
+                                    || (if_is_cond_br_static && if_inst[25]);
+
+    wire        if_static_taken     = !if_pred_valid && static_decode_taken;
+
+    wire        static_taken        = if_ready_go && if_static_taken && if_valid && !if_exc_valid && lpower[1];
+
+    // ============================================================
+    // 静态预测 mispred（→ linectrl 寄存）
+    // ============================================================
+    assign if_mispred_o = static_taken;
+
     // ========== 输出到ID阶段的总线 ==========
     assign if_to_id_bus = {
         if_exc_r, 
@@ -224,7 +257,8 @@ module if_stage (
         if_pred_target,
         if_pred_is_ras, 
         if_pred_btb_index, 
-        if_pred_ras_index
+        if_pred_ras_index,
+        if_static_taken
     };
 
     // ========== 流水线控制 ==========
@@ -242,6 +276,7 @@ module if_stage (
                      rf_valid      ? rf_pc          :
                      wb_ertn_flush ? exc_back_pc    :
                      ex_mispredict ? ex_corr_target :
+                     static_taken  ? static_target  :
                      pred_taken_r  ? {pred_target_r, 2'b00} :
                                      seq_pc      ;
                                      

@@ -47,13 +47,13 @@
 // ============================================================================
 // 流水线总线宽度更新（扩展 IF→ID, ID→EX 以携带预测信息）
 // ============================================================================
-// IF→ID 总线：原 68 + 预测信息 42 = 110
+// IF→ID 总线：原 68 + 预测信息 42 = 110 + static_taken 1 = 111
 `undef  IF_TO_ID_BUS_WD
-`define IF_TO_ID_BUS_WD      110
+`define IF_TO_ID_BUS_WD      111
 
-// ID→EX 总线：原 413 + 预测透传 42 + br_type 2 + cond_cmp 3 + br_offs 32 + is_branch 1 = 493
+// ID→EX 总线：原 413 + 预测透传 42 + br_type 2 + cond_cmp 3 + br_offs 32 + is_branch 1 = 493 + static_taken 1 = 494
 `undef  ID_TO_EX_BUS_WD
-`define ID_TO_EX_BUS_WD      493
+`define ID_TO_EX_BUS_WD      494
 
 // EX→PRE_MEM 总线：保持原 523（预测信息在 EX 消耗，不继续传）
 // PRE_MEM→MEM 总线：保持原 453

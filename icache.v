@@ -113,13 +113,7 @@ module icache (
     assign cacop_is_hit   = cacop_en && (cacop_code[4:3] == 2'b10);
     assign cacop_index    = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
     assign cacop_way      = cacop_va[WAY_IDX_W-1:0];
-
-    // ============================================================
-    // 统一 RAM 读地址
-    // ============================================================
-    wire [`INDEX_WIDTH-1:0] ram_raddr_req;
-    assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
-
+    
     // ============================================================
     // accept_new_req
     // ============================================================
@@ -140,7 +134,7 @@ module icache (
     assign ram_read_en = accept_new_req;
 
     wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = ram_raddr_req;
+    assign ram_raddr = cacop_en ? cacop_index : cpu_index;
 
     // ============================================================
     // REFILL 节拍
@@ -279,7 +273,7 @@ module icache (
     wire                 pre_plru_en;
     wire [`INDEX_WIDTH-1:0] pre_plru_index;
     assign pre_plru_en    = accept_new_req;
-    assign pre_plru_index = ram_raddr_req;
+    assign pre_plru_index = ram_raddr;
 
     reg  [WAY_IDX_W:0]   plru_node_pre;
     integer plv_pre;
@@ -309,7 +303,7 @@ module icache (
                           || refill_tagv_we;
     assign plru_upd_way   = (main_lookup && cache_inst_hit) ? hit_way_idx
                                                        : refill_replace_way;
-    assign plru_upd_index = refill_tagv_we ? refill_index : req_index;
+    assign plru_upd_index = refill_tagv_we ? (cacop_en_r ? cacop_index_r : refill_index) : req_index;
 
     integer pnode, pparent, pui, prst;
     always @(posedge clk) begin
@@ -342,7 +336,7 @@ module icache (
             cacop_is_hit_r   <= 1'b0;
         end
         else if (accept_new_req) begin
-            req_index        <= cacop_en ? cacop_index : cpu_index;
+            req_index        <= cpu_index;
             req_offset       <= cpu_offset;
             cacop_en_r       <= cacop_en;
             cacop_code_r     <= cacop_code;
@@ -362,7 +356,7 @@ module icache (
     always @(posedge clk) begin
         if (main_lookup && !cache_inst_hit && !effective_cancel) begin
             refill_index        <= req_index;
-            refill_tag          <= mmu_tag;
+            refill_tag          <= cacop_en_r ? mmu_cacop_tag : mmu_tag;
             refill_offset       <= req_offset;
             refill_cached       <= mmu_cache;
             refill_replace_way  <= victim_way;
@@ -423,9 +417,7 @@ module icache (
     assign cpu_addr_ok = (accept_new_req && !cacop_en);
     assign cacop_rdy   = accept_new_req && cacop_en;
 
-    wire cpu_data_ok_comb;
-    assign cpu_data_ok_comb = live_data_ready;
-    assign cpu_data_ok = cpu_data_ok_comb || !cpu_fifo_empty;
+    assign cpu_data_ok = live_data_ready || !cpu_fifo_empty;
 
     assign cpu_rdata = cpu_fifo_empty ? live_rdata
                                       : cpu_fifo_mem[cpu_fifo_rptr];
@@ -492,13 +484,11 @@ module icache (
                             || (cacop_code10 && (|way_hit)) );
 
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel;
-    wire [ 3:0]            tagv_wmask_sel;
+    wire [ 3:0]             tagv_wmask_sel;
     wire [`TAG_WIDTH:0]     tagv_wdata_sel;
     assign tagv_waddr_sel = (cacop_code00 || cacop_code01) ? cacop_index_r : refill_index;
-    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001
-                                                           : {TAGV_BYTES{1'b1}};
-    assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }
-                                       : {refill_tag, 1'b1};
+    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001 : {TAGV_BYTES{1'b1}};
+    assign tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} } : {refill_tag, 1'b1};
 
     // ============================================================
     // {Tag, V} RAM 例化
@@ -577,17 +567,14 @@ module icache (
                   || main_waitrd;
 
     // rd_addr — LOOKUP 用 Request Buffer，WAITRD/REFILL 用 Refill Buffer
-    wire rd_addr_is_lookup;
-    assign rd_addr_is_lookup = main_lookup;
-
     wire [`TAG_WIDTH-1:0]  rd_addr_tag;
     wire                   rd_addr_cached;
     wire [`INDEX_WIDTH-1:0]  rd_addr_index;
     wire [`OFFSET_WIDTH-1:0] rd_addr_offset;
-    assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache  : refill_cached;
-    assign rd_addr_index  = rd_addr_is_lookup ? req_index  : refill_index;
-    assign rd_addr_offset = rd_addr_is_lookup ? req_offset : refill_offset;
+    assign rd_addr_tag    = main_lookup ? mmu_tag    : refill_tag;
+    assign rd_addr_cached = main_lookup ? mmu_cache  : refill_cached;
+    assign rd_addr_index  = main_lookup ? req_index  : refill_index;
+    assign rd_addr_offset = main_lookup ? req_offset : refill_offset;
 
     assign rd_type = rd_addr_cached ? 3'b100 : 3'b010;
     assign rd_addr = rd_addr_cached

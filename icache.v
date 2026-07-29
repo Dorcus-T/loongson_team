@@ -32,7 +32,11 @@ module icache (
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
     input  wire [`TAG_WIDTH-1:0]   mmu_cacop_tag,
-    output wire                    cacop_rdy
+    output wire                    cacop_rdy,
+
+    // debug
+    output wire [ 3:0]  debug_main_state,
+    output wire         debug_rd_req
 );
 
     // ============================================================
@@ -704,5 +708,9 @@ module icache (
             end
         end
     end
+
+    // ========== debug ==========
+    assign debug_main_state = main_state;
+    assign debug_rd_req     = rd_req;
 
 endmodule

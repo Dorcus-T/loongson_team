@@ -52,6 +52,7 @@ module if_stage (
 
     // ── inst_dirty计算 ──
     input  wire         s0_flush,        // pre_if 之后有冲刷 → inst_dirty
+    input  wire         s0_cancel,       // MMU TLB 异常 → 取消 pre_if 请求
     // ── 分支预测器 lookup_pc_i ──
     output wire [31:0]  if_pre_if_pc_next, // pre_if_pc_next 给 branch_predict 做查表地址
     // debug
@@ -260,13 +261,34 @@ module if_stage (
     end
 
     // ========== 脏指令控制 ==========
-    wire [2:0] inst_dirty_control;
-    wire [2:0] inst_dirty;
-    reg  [2:0] inst_dirty_ctrl_r;
-    reg  [2:0] inst_dirty_r;
-    assign inst_dirty_control = ((!if_exc_valid && if_valid && !if_ready_go) && (req_already || req_set)) ? 3'b010 :
-                                ((!if_exc_valid && if_valid && !if_ready_go) || (req_already || req_set)) ? 3'b001 :
-                                                                                                            3'b000 ;
+    // 条件 A：IF 级阻塞
+    // 条件 B：pre_if 请求 — 拆为 req_already（已发起）和 req_set（本拍握手）
+    wire        cond_if       = !if_exc_valid && if_valid && !if_ready_go;
+    wire [ 2:0] inst_dirty_control;
+    wire [ 2:0] inst_dirty;
+    reg  [ 2:0] inst_dirty_ctrl_r;   // {cond_if, req_already, req_set}
+    reg  [ 2:0] inst_dirty_r;
+
+    // req_valid：追踪 pre_if 握手是否有效
+    //   req_set     → 置 0（新握手，下拍检查 cancel）
+    //   !req_set && req_already && !s0_cancel → 置 1（确认有效）
+    //   s0_cancel   → 保持/复位 0（被取消）
+    reg req_valid;
+    always @(posedge clk) begin
+        if (reset)                      req_valid <= 1'b0;
+        else if (req_set)               req_valid <= 1'b0;
+        else if (req_valid == 1'b0 && s0_cancel) req_valid <= 1'b1;
+    end
+
+    // inst_dirty_control：从上一拍记录的条件计算
+    //   req_set_r  → 与 s0_cancel（本拍 cancel 可使旧握手无效）
+    //   req_already_r → 与 req_valid（状态机确认有效）
+    wire pre_if_dirty_valid;
+    assign pre_if_dirty_valid = (inst_dirty_ctrl_r[1] && !req_valid)
+                        | (inst_dirty_ctrl_r[0] && !s0_cancel);
+    assign inst_dirty_control = (inst_dirty_ctrl_r[2] && pre_if_dirty_valid) ? 3'b010 :
+                                (inst_dirty_ctrl_r[2] || pre_if_dirty_valid) ? 3'b001 : 3'b000;
+
     always @(posedge clk) begin
         if (reset) begin
             inst_dirty_r <= 3'b0;
@@ -274,18 +296,19 @@ module if_stage (
         else if (icache_cpu_data_ok && (inst_dirty != 3'b0)) begin
             inst_dirty_r <= inst_dirty - 1'b1;
         end
-        else 
+        else begin
             inst_dirty_r <= inst_dirty;
+        end
 
         if (reset) begin
             inst_dirty_ctrl_r <= 3'b0;
         end
         else begin
-            inst_dirty_ctrl_r <= inst_dirty_control;
+            inst_dirty_ctrl_r <= {cond_if, req_already, req_set};
         end
     end
 
-    assign inst_dirty = s0_flush ? (inst_dirty_r + inst_dirty_ctrl_r) : inst_dirty_r;
+    assign inst_dirty = s0_flush ? (inst_dirty_r + inst_dirty_control) : inst_dirty_r;
 
     // ========== ICache 输出信号 ==========
     assign if_to_mmu_vaddr = pre_if_pc_r;

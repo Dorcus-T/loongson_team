@@ -71,7 +71,10 @@ module core_top (
     output wire [31:0]  debug_if_inst,              // IF 级指令
     output wire         debug_s0_cancel,             // ICache mmu_cancel
     output wire         debug_icache_addr_ok,        // ICache addr_ok
-    output wire [ 2:0]  debug_inst_dirty             // IF inst_dirty
+    output wire [ 2:0]  debug_inst_dirty,            // IF inst_dirty
+    // ICache 调试接口
+    output wire [ 3:0]  debug_icache_state,           // ICache 主状态机
+    output wire         debug_icache_rd_req            // ICache AXI 读请求
 );
 
     // ========== 复位信号处理（将低有效转换为高有效） ==========
@@ -91,6 +94,12 @@ module core_top (
     wire [6:0] mispred_i;                             // 各级 → linectrl mispred
     wire       bp_valid;                              // linectrl → EX
     wire       s0_flush;                              // linectrl → MMU/IF
+
+    // 悬空位 tie-off（linectrl 输入中 wb 不接入 exc/ertn，仅 EX 级有效 mispred）
+    assign mispred_i[6:4] = 3'b0;
+    assign mispred_i[2:0] = 3'b0;
+    assign exc_i[6]       = 1'b0;
+    assign ertn_i[6]      = 1'b0;
 
     // 各级间 upd（上级 ready && lpower → 更新下级 data_n）
     wire pre_if_to_if_upd;                            // pre_if → IF
@@ -461,6 +470,7 @@ module core_top (
         .if_exc_o           (exc_i[1:0]),
         .if_ertn_o          (ertn_i[1:0]),
         .s0_flush           (s0_flush),
+        .s0_cancel          (s0_cancel),
         .if_pre_if_pc_next  (if_pre_if_pc_next),
         .debug_pre_if_pc    (debug_pre_if_pc),
         .debug_if_pc        (debug_if_pc),
@@ -843,7 +853,10 @@ module core_top (
         .rd_rdy        (icache_rd_rdy),
         .return_valid  (icache_return_valid),
         .return_last   (icache_return_last),
-        .return_data   (icache_return_data)
+        .return_data   (icache_return_data),
+        // debug
+        .debug_main_state (debug_icache_state),
+        .debug_rd_req     (debug_icache_rd_req)
     );
 
     // ================================================================

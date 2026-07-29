@@ -40,7 +40,6 @@ module dcache (
     input  wire                    cacop_en,
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
-    input  wire [`TAG_WIDTH-1:0]   mmu_cacop_tag,
     output wire                    cacop_rdy
 );
 
@@ -172,14 +171,11 @@ module dcache (
     // ============================================================
     // 统一 RAM 读地址
     // ============================================================
-    wire [`INDEX_WIDTH-1:0] ram_raddr_req;
-    assign ram_raddr_req = (cacop_is_index || cacop_is_hit) ? cacop_index : cpu_index;
-
     wire ram_read_en;
     assign ram_read_en = accept_new_req;
 
     wire [`INDEX_WIDTH-1:0] ram_raddr;
-    assign ram_raddr = ram_raddr_req;
+    assign ram_raddr = cacop_en ? cacop_index : cpu_index;
 
     // ============================================================
     // accept_new_req
@@ -256,10 +252,8 @@ module dcache (
     // ============================================================
     // Lookup Tag（MMU 送达的物理 tag / CACOP tag）
     // ============================================================
-    wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
-    assign lookup_cached = cacop_en_r ? 1'b1         : mmu_cache;
+    assign lookup_cached = cacop_en_r ? 1'b1 : mmu_cache;
 
     // ============================================================
     // Tag 比较与命中判断
@@ -269,7 +263,7 @@ module dcache (
     generate
         for (gh = 0; gh < `WAY_NUM; gh = gh + 1) begin : way_hit_gen
             assign way_hit[gh] = tagv_lookup[gh][0]
-                               && (tagv_lookup[gh][`TAG_WIDTH:1] == lookup_tag)
+                               && (tagv_lookup[gh][`TAG_WIDTH:1] == mmu_tag)
                                && (lookup_cached || cacop_en_r);
         end
     endgenerate
@@ -310,7 +304,7 @@ module dcache (
     wire pre_plru_en;
     wire [`INDEX_WIDTH-1:0] pre_plru_index;
     assign pre_plru_en    = accept_new_req;
-    assign pre_plru_index = ram_raddr_req;
+    assign pre_plru_index = ram_raddr;
 
     reg  [WAY_IDX_W:0]   plru_node_pre;
     integer plv_pre;
@@ -532,7 +526,7 @@ module dcache (
                           || refill_tagv_we;
     assign plru_upd_way   = (main_lookup && cache_hit) ? hit_way_idx
                                                        : refill_replace_way;
-    assign plru_upd_index = refill_tagv_we ? refill_index : req_index;
+    assign plru_upd_index = refill_tagv_we ? (cacop_en_r ? cacop_index_r : refill_index) : req_index;
 
     integer pnode, pparent, pui, prst;
     always @(posedge clk) begin
@@ -569,7 +563,7 @@ module dcache (
         end
         else if (accept_new_req) begin
             req_d           <= cpu_op;
-            req_index        <= cacop_en ? cacop_index : cpu_index;
+            req_index        <= cpu_index;
             req_offset       <= cpu_offset;
             req_wstrb_mask   <= { {8{cpu_wstrb[3]}}, {8{cpu_wstrb[2]}},
                                   {8{cpu_wstrb[1]}}, {8{cpu_wstrb[0]}} };
@@ -801,8 +795,7 @@ module dcache (
     assign tagv_waddr_sel = vc_fill ? req_index
                           : (cacop_code00 || cacop_code01) ? cacop_index_r
                           : refill_index;
-    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001
-                                                           : {TAGV_BYTES{1'b1}};
+    assign tagv_wmask_sel = (cacop_code01 || cacop_code10) ? 4'b0001 : {TAGV_BYTES{1'b1}};
     wire [`TAG_WIDTH:0] vc_serve_tagv_wdata;
     assign vc_serve_tagv_wdata = vc_exchange_lookup
         ? {vc_addr[vc_hit_idx][`TAG_WIDTH+`INDEX_WIDTH-1:`INDEX_WIDTH], 1'b1}
@@ -1024,17 +1017,14 @@ module dcache (
                                                   : 3'b000;
 
     // rd_addr — LOOKUP 用 Request Buffer，WAITRD/REFILL 用 Refill Buffer
-    wire rd_addr_is_lookup;
-    assign rd_addr_is_lookup = main_lookup;
-
     wire [`TAG_WIDTH-1:0]  rd_addr_tag;
     wire                   rd_addr_cached;
     wire [`INDEX_WIDTH-1:0]  rd_addr_index;
     wire [`OFFSET_WIDTH-1:0] rd_addr_offset;
-    assign rd_addr_tag    = rd_addr_is_lookup ? mmu_tag    : refill_tag;
-    assign rd_addr_cached = rd_addr_is_lookup ? mmu_cache  : refill_cached;
-    assign rd_addr_index  = rd_addr_is_lookup ? req_index  : refill_index;
-    assign rd_addr_offset = rd_addr_is_lookup ? req_offset : refill_offset;
+    assign rd_addr_tag    = main_lookup ? mmu_tag    : refill_tag;
+    assign rd_addr_cached = main_lookup ? mmu_cache  : refill_cached;
+    assign rd_addr_index  = main_lookup ? req_index  : refill_index;
+    assign rd_addr_offset = main_lookup ? req_offset : refill_offset;
 
     assign rd_type = rd_addr_cached ? 3'b100 : uncached_rd_type;
     assign rd_addr = rd_addr_cached

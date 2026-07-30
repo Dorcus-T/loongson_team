@@ -249,8 +249,7 @@ module dcache (
     // ============================================================
     wire is_uncached_store = !refill_cached && req_op && !cacop_en_r;
 
-    // 写回需求 — WAITWR 拍组合判定
-    wire wr_needs_write = cacop_en_r ? ( ((cacop_code_r[4:3] != 2'b11) && !((cacop_code_r[4:3] == 2'b10) && !(|way_hit))) && d_rdata[replace_way] )
+    wire wr_needs_write = cacop_en_r ? (cacop_code_r[4:3]==2'b00 || cacop_code_r[4:3]==2'b01 || (cacop_code_r[4:3]==2'b10 && |way_hit)) && d_rdata[replace_way]
                                      : ( (refill_cached && d_rdata[refill_replace_way]) || is_uncached_store );
 
     // ============================================================

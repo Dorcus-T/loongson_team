@@ -222,21 +222,14 @@ module if_stage (
     wire [ 5:0] if_opcode           = if_inst[31:26];
     wire        if_is_b_static      = (if_opcode == 6'h14);
     wire        if_is_bl_static     = (if_opcode == 6'h15);
-    wire        if_is_cond_br_static = (if_opcode >= 6'h16) && (if_opcode <= 6'h1b);
 
     // b/bl: 26bit 偏移（sign = inst[9]）
     wire [25:0] if_br_offs_26       = {if_inst[9:0], if_inst[25:10]};
     wire [31:0] if_br_target_26     = if_pc_r + {{4{if_inst[9]}}, if_br_offs_26, 2'b00};
 
-    // 条件分支: 16bit 偏移（sign = inst[25]）
-    wire [15:0] if_br_offs_16       = if_inst[25:10];
-    wire [31:0] if_br_target_16     = if_pc_r + {{14{if_inst[25]}}, if_br_offs_16, 2'b00};
+    wire [31:0] static_target       = if_br_target_26;
 
-    wire [31:0] static_target       = (if_is_b_static || if_is_bl_static)
-                                    ? if_br_target_26 : if_br_target_16;
-
-    wire        static_decode_taken = if_is_b_static || if_is_bl_static
-                                    || (if_is_cond_br_static && if_inst[25]);
+    wire        static_decode_taken = if_is_b_static || if_is_bl_static;
 
     wire        if_static_taken     = !if_pred_valid && static_decode_taken;
 

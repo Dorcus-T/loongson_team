@@ -244,10 +244,8 @@ module core_top (
     wire [2:0]  if_tlb_exc;         // MMU → if_stage
     wire [ 4:0] pre_mem_tlb_exc;    // MMU → mem_stage
     wire [ 5:0] srch_value;         // 发pre_mem tlbsrch查询结果
-    wire        s0_cancel_mmu;       // MMU TLB异常
-    wire        s0_cancel;           // MMU TLB异常 | s0_flush → ICache/IF
+    wire        s0_cancel;           // MMU → ICache
     wire        s1_cancel;           // MMU → DCache
-    assign      s0_cancel = s0_cancel_mmu | s0_flush;
     wire        s0_need_mmu_r;       // MMU → if_stage
     wire        s1_need_mmu_r;       // MMU → mem_stage
     wire [`TLBRD_BUS_WD-1:0] tlbrd_value;
@@ -805,7 +803,7 @@ module core_top (
         .tlbcsr             (tlbcsr_bus),
         .tlbrd_value        (tlbrd_value),
         .tlbfill_rand_index (tlbfill_rand_index),
-        .s0_cancel          (s0_cancel_mmu),
+        .s0_cancel          (s0_cancel),
         .s1_cancel          (s1_cancel),
         .s0_need_mmu_r      (s0_need_mmu_r),
         .s1_need_mmu_r      (s1_need_mmu_r),

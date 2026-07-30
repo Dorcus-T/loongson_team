@@ -402,7 +402,7 @@ module dcache (
             wb_wstrb_mask  <= req_wstrb_mask;
             wb_wdata       <= req_wdata;
         end
-        else if (wb_write && !ram_read_en && !wb_new_store_hit) begin
+        else if (wb_write && !wb_new_store_hit) begin
             wb_valid <= 1'b0;
         end
     end
@@ -509,7 +509,7 @@ module dcache (
                 if ((main_refill && return_valid && return_last && refill_cached)
                     && (refill_replace_way == d_wi))
                     d_ram[d_wi][refill_index] <= req_op;
-                else if (wb_write && wb_way_hit[d_wi] && !ram_read_en)
+                else if (wb_write && wb_way_hit[d_wi])
                     d_ram[d_wi][wb_index] <= 1'b1;
                 if (ram_read_en)
                     d_rdata[d_wi] <= d_ram[d_wi][ram_raddr];
@@ -535,7 +535,7 @@ module dcache (
                                               && (refill_replace_way == gw)
                                               && refill_cached;
                 assign bank_wr_hit[gw][gb]    = wb_write && wb_way_hit[gw]
-                                              && (wb_bank == gb) && !ram_read_en;
+                                              && (wb_bank == gb);
 
                 assign bank_en[gw][gb]    = bank_wr_refill[gw][gb]
                                           || bank_wr_hit[gw][gb]

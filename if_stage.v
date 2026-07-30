@@ -244,9 +244,7 @@ module if_stage (
                      ex_mispredict ? ex_corr_target :
                      pred_taken_r  ? {pred_target_r, 2'b00} :
                                      seq_pc      ;
-    wire flush_active;
-    assign flush_active = ex_mispredict || exc_no_rf || wb_ertn_flush || rf_valid;
-
+                                     
     wire if_work_done = (icache_cpu_data_ok || if_exc_valid) && (inst_dirty == 3'b0);
     assign if_ready_go    = if_work_done || !if_valid || lready[1];
     assign if_to_id_valid = if_valid;
@@ -273,18 +271,21 @@ module if_stage (
     //   req_set     → 置 0（新握手，下拍检查 cancel）
     //   !req_set && req_already && !s0_cancel → 置 1（确认有效）
     //   s0_cancel   → 保持/复位 0（被取消）
-    reg req_valid;
+    reg  [ 1:0] req_valid;
     always @(posedge clk) begin
-        if (reset)                      req_valid <= 1'b0;
-        else if (req_set)               req_valid <= 1'b0;
-        else if (req_valid == 1'b0 && s0_cancel) req_valid <= 1'b1;
+        if (reset)                      req_valid <= 2'b00;
+        else if (req_set)               req_valid <= 2'b10;
+        else if (req_valid == 2'b10) begin
+            if (s0_cancel)              req_valid <= 2'b01;
+            else                        req_valid <= 2'b00;
+        end
     end
 
     // inst_dirty_control：从上一拍记录的条件计算
     //   req_set_r  → 与 s0_cancel（本拍 cancel 可使旧握手无效）
     //   req_already_r → 与 req_valid（状态机确认有效）
     wire pre_if_dirty_valid;
-    assign pre_if_dirty_valid = (inst_dirty_ctrl_r[1] && !req_valid)
+    assign pre_if_dirty_valid = (inst_dirty_ctrl_r[1] && !req_valid[0])
                         | (inst_dirty_ctrl_r[0] && !s0_cancel);
     assign inst_dirty_control = (inst_dirty_ctrl_r[2] && pre_if_dirty_valid) ? 3'b010 :
                                 (inst_dirty_ctrl_r[2] || pre_if_dirty_valid) ? 3'b001 : 3'b000;

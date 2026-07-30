@@ -40,7 +40,16 @@ module dcache (
     input  wire                    cacop_en,
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
-    output wire                    cacop_rdy
+    output wire                    cacop_rdy,
+
+    // debug
+    output wire [ 5:0]              debug_main_state,
+    output wire                     debug_rd_req,
+    output wire [`TAG_WIDTH-1:0]    debug_mmu_tag,
+    output wire [`INDEX_WIDTH-1:0]  debug_cpu_index,
+    output wire                     debug_refill_cached,
+    output wire [`INDEX_WIDTH-1:0]  debug_refill_index,
+    output wire [`INDEX_WIDTH-1:0]  debug_req_index
 );
 
     // ============================================================
@@ -679,5 +688,14 @@ module dcache (
             end
         end
     end
+
+    // ========== debug ==========
+    assign debug_main_state    = main_state;
+    assign debug_rd_req        = rd_req;
+    assign debug_mmu_tag       = mmu_tag;
+    assign debug_cpu_index     = cpu_index;
+    assign debug_refill_cached = refill_cached;
+    assign debug_refill_index  = refill_index;
+    assign debug_req_index     = req_index;
 
 endmodule

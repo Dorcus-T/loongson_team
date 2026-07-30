@@ -71,7 +71,13 @@ module cache_axi_bridge (
     input  wire [ 3:0]  bid,
     input  wire [ 1:0]  bresp,
     input  wire         bvalid,
-    output wire         bready
+    output wire         bready,
+
+    // debug
+    output wire         debug_arvalid,
+    output wire [31:0]  debug_icache_return_data,
+    output wire         debug_ic_rd_buf_valid,
+    output wire [31:0]  debug_ic_rd_buf_addr
 );
 
     // ============================================================
@@ -405,5 +411,11 @@ module cache_axi_bridge (
     assign awlock  = 2'b00;
     assign awcache = 4'h0;
     assign awprot  = 3'h0;
+
+    // ========== debug ==========
+    assign debug_arvalid           = arvalid;
+    assign debug_icache_return_data = icache_return_data;
+    assign debug_ic_rd_buf_valid   = ic_rd_buf_valid;
+    assign debug_ic_rd_buf_addr    = ic_rd_buf_addr;
 
 endmodule

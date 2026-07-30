@@ -100,7 +100,7 @@ module icache (
     reg  [WAY_IDX_W-1:0]    refill_replace_way;
     reg  [ 1:0]             refill_cnt;
     reg  [31:0]             refill_line [0:BANK_NUM-1];
-
+    reg  [`WAY_NUM-1:0]     refill_way_hit_r;
 
     // ============================================================
     // 树状伪 LRU
@@ -366,6 +366,7 @@ module icache (
             refill_cached       <= lookup_cached;
             refill_replace_way  <= victim_way;
             refill_cnt          <= 2'd0;
+            refill_way_hit_r    <= way_hit;
         end
         else if (main_refill && return_valid) begin
             refill_cnt <= refill_cnt + 2'd1;
@@ -483,10 +484,10 @@ module icache (
 
     wire tagv_do_write;
     assign tagv_do_write = refill_tagv_we
-                         && ( !cacop_en_r
+                         && (!cacop_en_r
                             || cacop_code00
                             || cacop_code01
-                            || (cacop_code10 && (|way_hit)) );
+                            || (cacop_code10 && (|refill_way_hit_r)));
 
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel;
     wire [ 3:0]             tagv_wmask_sel;

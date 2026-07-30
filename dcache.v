@@ -126,7 +126,7 @@ module dcache (
     reg  [WAY_IDX_W-1:0]    refill_replace_way;
     reg  [ 1:0]             refill_cnt;
     reg  [31:0]             refill_line [0:BANK_NUM-1];
-    reg                     refill_way_hit_r;
+    reg  [`WAY_NUM-1:0]     refill_way_hit_r;
     // ============================================================
     // Write Buffer — 命中 store 时写入，延迟写入 bank RAM
     // ============================================================
@@ -249,7 +249,7 @@ module dcache (
     // ============================================================
     wire is_uncached_store = !refill_cached && req_op && !cacop_en_r;
 
-    wire wr_needs_write = cacop_en_r ? (cacop_code_r[4:3]==2'b00 || cacop_code_r[4:3]==2'b01 || (cacop_code_r[4:3]==2'b10 && refill_way_hit_r)) && d_rdata[replace_way]    
+    wire wr_needs_write = cacop_en_r ? (cacop_code_r[4:3]==2'b00 || cacop_code_r[4:3]==2'b01 || (cacop_code_r[4:3]==2'b10 && |refill_way_hit_r)) && d_rdata[replace_way]    
                                      : ( (refill_cached && d_rdata[refill_replace_way]) || is_uncached_store );
 
     // ============================================================
@@ -417,7 +417,7 @@ module dcache (
             refill_offset      <= req_offset;
             refill_replace_way <= replace_way;
             refill_cnt         <= 2'd0;
-            refill_way_hit_r   <= |way_hit;
+            refill_way_hit_r   <= way_hit;
         end
         if (main_refill && return_valid) begin
             refill_cnt <= refill_cnt + 2'd1;
@@ -453,7 +453,7 @@ module dcache (
     wire tagv_do_write = refill_tagv_we && ( !cacop_en_r
             || (cacop_en_r && (cacop_code_r[4:3] == 2'b00))
             || (cacop_en_r && (cacop_code_r[4:3] == 2'b01))
-            || (cacop_en_r && (cacop_code_r[4:3] == 2'b10) && (|way_hit)) );
+            || (cacop_en_r && (cacop_code_r[4:3] == 2'b10) && (|refill_way_hit_r)) );
 
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel = cacop_en_r ? cacop_index_r : refill_index;
     wire [ 3:0]            tagv_wmask_sel = (cacop_en_r && (cacop_code_r[4:3] == 2'b01))

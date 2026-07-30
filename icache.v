@@ -89,6 +89,7 @@ module icache (
     reg  [`INDEX_WIDTH-1:0] cacop_index_r;
     reg                     cacop_is_index_r;
     reg                     cacop_is_hit_r;
+    reg  [`TAG_WIDTH-1:0]   cacop_tag_r;
 
     // ============================================================
     // Refill Buffer — LOOKUP miss 拍从 Request Buffer 快照，REFILL 期间不变
@@ -217,7 +218,9 @@ module icache (
     // ============================================================
     wire [`TAG_WIDTH-1:0] lookup_tag;
     wire                  lookup_cached;
-    assign lookup_tag    = cacop_en_r ? mmu_cacop_tag : mmu_tag;
+    assign lookup_tag    = (cacop_en_r && main_refill) ? cacop_tag_r :
+                            cacop_en_r                 ? mmu_cacop_tag :
+                                                          mmu_tag;
     assign lookup_cached = cacop_en_r ? 1'b1         : mmu_cache;
 
     // ============================================================
@@ -352,6 +355,21 @@ module icache (
         end
         else if (main_refill && cacop_en_r) begin
             cacop_en_r <= 1'b0;
+        end
+    end
+
+    // ============================================================
+    // CACOP tag 锁存 — LOOKUP 拍捕获 mmu_cacop_tag，REFILL 拍使用
+    // ============================================================
+    always @(posedge clk) begin
+        if (~resetn) begin
+            cacop_tag_r <= {`TAG_WIDTH{1'b0}};
+        end
+        else if (main_lookup && cacop_en_r) begin
+            cacop_tag_r <= mmu_cacop_tag;
+        end
+        else begin
+            cacop_tag_r <= {`TAG_WIDTH{1'b0}};
         end
     end
 

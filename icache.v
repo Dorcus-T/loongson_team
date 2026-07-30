@@ -379,9 +379,9 @@ module icache (
     always @(posedge clk) begin
         if (main_lookup && !cache_inst_hit && !effective_cancel) begin
             refill_index        <= req_index;
-            refill_tag          <= mmu_tag;
+            refill_tag          <= lookup_tag;
             refill_offset       <= req_offset;
-            refill_cached       <= mmu_cache;
+            refill_cached       <= lookup_cached;
             refill_replace_way  <= victim_way;
             refill_cnt          <= 2'd0;
         end

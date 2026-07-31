@@ -447,20 +447,10 @@ module dcache (
     // ============================================================
     // {Tag, V} RAM 写控制
     // ============================================================
-    wire refill_tagv_we = (main_refill && return_valid && return_last && refill_cached)
-                        || (main_refill && cacop_en_r);
-
-    wire tagv_do_write = refill_tagv_we && ( !cacop_en_r
-            || (cacop_en_r && (cacop_code_r[4:3] == 2'b00))
-            || (cacop_en_r && (cacop_code_r[4:3] == 2'b01))
-            || (cacop_en_r && (cacop_code_r[4:3] == 2'b10) && (|refill_way_hit_r)) );
-
+    wire refill_tagv_we = main_refill && ((return_valid && return_last && refill_cached) || (cacop_en_r && ((cacop_code_r[4:3] == 2'b00)|| (cacop_code_r[4:3] == 2'b01) || ((cacop_code_r[4:3] == 2'b10) && (|refill_way_hit_r)))));
     wire [`INDEX_WIDTH-1:0] tagv_waddr_sel = cacop_en_r ? cacop_index_r : refill_index;
-    wire [ 3:0]            tagv_wmask_sel = (cacop_en_r && (cacop_code_r[4:3] == 2'b01))
-                                          || (cacop_en_r && (cacop_code_r[4:3] == 2'b10))
-                                            ? 4'b0001 : {TAGV_BYTES{1'b1}};
-    wire [`TAG_WIDTH:0]     tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} }
-                                                        : {refill_tag, 1'b1};
+    wire [ 3:0]             tagv_wmask_sel = (cacop_en_r && (cacop_code_r[4:3] == 2'b01 || cacop_code_r[4:3] ==2'b10))  ? 4'b0001 : {TAGV_BYTES{1'b1}};
+    wire [`TAG_WIDTH:0]     tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} } : {refill_tag, 1'b1};
 
     // ============================================================
     // {Tag, V} RAM 例化
@@ -472,7 +462,7 @@ module dcache (
     genvar gt;
     generate
         for (gt = 0; gt < `WAY_NUM; gt = gt + 1) begin : tagv_ram_gen
-            wire tagv_wr = (tagv_do_write && (refill_replace_way == gt));
+            wire tagv_wr = (refill_tagv_we && (refill_replace_way == gt));
             assign tagv_en[gt]   = tagv_wr || ram_read_en;
             assign tagv_wen[gt]  = tagv_wr ? tagv_wmask_sel : 4'b0;
             assign tagv_addr[gt] = tagv_wr ? tagv_waddr_sel : ram_raddr;

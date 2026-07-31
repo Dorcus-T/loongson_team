@@ -113,7 +113,7 @@ Vivado 用真实 FPGA 延迟数据库（硅实测），OpenSTA 用 ASIC .lib 估
 |------|------|----------|
 | `run_mycpu_func.bat [-v] [-w] [-d]` | func 指令测试（79 点）+ golden trace 比对 | 79 |
 | `run_nscscc_func.bat [-v] [-w] [-d]` | NSCSCC 功能测试（58 点） | 58 |
-| `run_perf.bat <bench> [-v] [-w] [-d]` | 性能测试（18 个 benchmark 可选） | 1 |
+| `run_perf.bat <bench> [-v] [-w] [-d] [-s hex]` | 性能测试（20 个 benchmark + allbench 可选） | 1 |
 | `run_cpu_diag.bat [-v] [-w] [-d]` | CPU 诊断测试 | 1 |
 
 ## perf 可用 benchmark
@@ -124,6 +124,7 @@ stream_copy  bitcount  crc32  sha  stringsearch
 inner_product  lookup_table  loop_induction
 minmax_sequence  my_memcmp
 fireye_A0  fireye_B2  fireye_C0  fireye_D1  fireye_I2
+allbench    ← 全部集成，用 -s 拨码开关选择
 ```
 
 ## 开关说明
@@ -133,6 +134,25 @@ fireye_A0  fireye_B2  fireye_C0  fireye_D1  fireye_I2
 | `-v` | 逐周期打印 PC、指令、寄存器值 |
 | `-w` | 生成 fst 波形到 `tool/simu_trace.fst` |
 | `-d` | 启用 difftest |
+| `-s <hex>` | 仿真拨码开关输入值（仅 `allbench` 需要） |
+
+### allbench 拨码开关映射
+
+`run_perf.bat allbench -s 0x1c` 等价于拨码开关拨到 `0x1c`。
+程序读取 `SWITCH_ADDR & 0x1f` 后取反（`xori 0x1f`）得到 benchmark 编号：
+
+```
+0x1f=end    0x1e=bitcount  0x1d=bubble_sort  0x1c=coremark
+0x1b=crc32  0x1a=dhrystone 0x19=quick_sort   0x18=select_sort
+0x17=sha    0x16=stream_copy  0x15=stringsearch
+0x14=fireye_A0  0x13=fireye_B2  0x12=fireye_C0
+0x11=fireye_D1  0x10=fireye_I2  0x0f=inner_product
+0x0e=lookup_table  0x0d=loop_induction  0x0c=my_memcmp
+0x0b=minmax_sequence
+```
+
+> 默认 `0xff` → 低 5 位为 `0x1f` → 直接结束（等价于不选任何 benchmark）。
+> 单个 benchmark 不用 `-s`，直接 `run_perf.bat coremark` 即可。
 
 ## 终止条件
 

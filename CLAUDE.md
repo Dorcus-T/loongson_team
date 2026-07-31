@@ -8,7 +8,7 @@ LoongArch (LA) 6级顺序流水线 CPU，FPGA 原型验证用。
 | 前推网络 | EX/MEM/WB → ID 全旁路（PRE_MEM 参与 stall 不参与前递） |
 | 冒险处理 | Load-use 停顿（EX/PRE_MEM/MEM）、CSR/ERTN 互锁 |
 | 总线接口 | AXI3 Master，cache_axi_bridge 桥接 |
-| Cache | 2路组相联 ICache + DCache，各 8KB (256行×32B) |
+| Cache | 2路组相联 ICache + DCache，各 8KB (256行×32B)；DCache 写直通 AXI（bridge 写缓冲+挂起计数） |
 | TLB | 32项全相联 MTLB + STLB，虚拟地址翻译 |
 | 乘法器 | 64×64 流水线（3级，mult/unsigned/signed 三结果并行，96位输出） |
 | 除法器 | 串行迭代，多拍完成，带握手停顿 |
@@ -59,7 +59,7 @@ tmp/                 — 临时文件（仿真测试等）
 | `tool/run_nscscc_func.bat` | NSCSCC 功能测试 |
 | `tool/run_quick_sort.bat` | 快速排序测试 |
 | `tool/run_cpu_diag.bat` | CPU 诊断测试 |
-| `tool/run_perf.bat` | 性能测试 |
+| `tool/run_perf.bat` | 性能测试（20 benchmark + allbench，`-s hex` 拨码选 bench） |
 
 ## 时序分析
 
@@ -92,6 +92,12 @@ tmp/                 — 临时文件（仿真测试等）
 - **STA 假路径**：除法器多拍迭代路径在 STA 中需设 false_path/multicycle，否则 WNS 虚高
 - **乘法器前递**：乘结果为 3 级流水线多拍输出（mymul.v），前递时需注意流水状态。当前若前递给下条指令需检查时序
 - **dcache miss 停顿**：dcache miss 时 mem_stage 一直等 data_ok，期间不能流水前进
+- **CACOP way hit 需寄存**：CACOP 命中 way 存 `refill_way_hit_r` 供后续状态使用，
+  `way_hit` 是 lookup 拍组合输出，之后的状态直接用会错
+- **DCache 写通路**：写请求经 cache_axi_bridge 的 `dc_wr_buf` 写缓冲发 AXI（支持 burst），
+  `wr_rdy = !dc_wr_buf_valid && !wr_pend_full`，缓冲满时 dcache 需等
+- **debug 端口约定**：dcache/pre_mem/bridge 调试信号统一命名 `debug_*`，
+  逐级引出到 mycpu_top 顶层端口供仿真观测
 - **PRE_MEM 级**：MMU 翻译（va→pa）延迟在此级隐藏；若时序仍有问题可加寄存器切分 MMU→cache tag 路径
 - **分支预测 0 气泡路径**：BTB/RAS 组合输出不经寄存器直连 pre_if_pc_r 的 D 端 MUX。
   若 STA 显示此路径不收敛，在 BTB target 输出后加寄存改 1 气泡方案。

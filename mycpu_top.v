@@ -91,13 +91,43 @@ module core_top (
     output wire         debug_axi_rvalid,
     output wire         debug_axi_rlast,
     // DCache 调试接口
-    output wire [ 5:0]              debug_dcache_state,
+    output wire [ 6:0]              debug_dcache_state,
     output wire                     debug_dcache_rd_req,
     output wire [`TAG_WIDTH-1:0]    debug_dcache_mmu_tag,
     output wire [`INDEX_WIDTH-1:0]  debug_dcache_cpu_index,
     output wire                     debug_dcache_refill_cached,
     output wire [`INDEX_WIDTH-1:0]  debug_dcache_refill_index,
-    output wire [`INDEX_WIDTH-1:0]  debug_dcache_req_index
+    output wire [`INDEX_WIDTH-1:0]  debug_dcache_req_index,
+    // PRE_MEM 调试接口
+    output wire [31:0]  debug_pre_mem_pc,
+    output wire [31:0]  debug_alu_result,
+    // DCache 内部状态
+    output wire                     debug_dcache_mmu_cache,
+    output wire                     debug_dcache_req_op,
+    output wire [`OFFSET_WIDTH-1:0] debug_dcache_req_offset,
+    output wire [`TAG_WIDTH-1:0]    debug_dcache_refill_tag,
+    output wire [`OFFSET_WIDTH-1:0] debug_dcache_refill_offset,
+    output wire                     debug_dcache_wr_req,
+    output wire [ 2:0]              debug_dcache_wr_type,
+    output wire [31:0]              debug_dcache_wr_addr,
+    output wire [ 3:0]              debug_dcache_wr_wstrb,
+    output wire [127:0]             debug_dcache_wr_data,
+    output wire                     debug_dcache_wr_rdy,
+    output wire                     debug_dcache_wr_done,
+    // Bridge DCache 写 buffer + AXI 写通道
+    output wire         debug_bridge_dc_wr_buf_valid,
+    output wire         debug_bridge_aw_done,
+    output wire         debug_bridge_awready,
+    output wire         debug_bridge_wready,
+    output wire         debug_bridge_bvalid,
+    output wire         debug_bridge_awvalid,
+    output wire         debug_bridge_wvalid,
+    output wire         debug_bridge_bready_out,
+    output wire [ 2:0]  debug_bridge_wr_pend_cnt,
+    output wire         debug_bridge_wr_pend_full,
+    output wire         debug_bridge_dcache_wr_rdy,
+    output wire         debug_bridge_wr_aw_done_r,
+    output wire         debug_bridge_wr_w_done_r
 );
 
     // ========== 复位信号处理（将低有效转换为高有效） ==========
@@ -636,7 +666,9 @@ module core_top (
         .pre_mem_ertn_o      (ertn_i[4]),
         .bp_update_en        (bp_update_en),
         .bp_bus              (bp_bus),
-        .bp_valid            (bp_valid)
+        .bp_valid            (bp_valid),
+        .debug_pre_mem_pc    (debug_pre_mem_pc),
+        .debug_alu_result    (debug_alu_result)
     );
 
     // ================================================================
@@ -850,6 +882,11 @@ module core_top (
     assign debug_axi_rdata       = rdata;
     assign debug_axi_rvalid      = rvalid;
     assign debug_axi_rlast       = rlast;
+    assign debug_dcache_wr_rdy   = dcache_wr_rdy;
+    assign debug_dcache_wr_done  = dcache_wr_done;
+    assign debug_bridge_awready  = awready;
+    assign debug_bridge_wready   = wready;
+    assign debug_bridge_bvalid   = bvalid;
 
     // ================================================================
     // ICache
@@ -940,7 +977,17 @@ module core_top (
         .debug_cpu_index      (debug_dcache_cpu_index),
         .debug_refill_cached  (debug_dcache_refill_cached),
         .debug_refill_index   (debug_dcache_refill_index),
-        .debug_req_index      (debug_dcache_req_index)
+        .debug_req_index      (debug_dcache_req_index),
+        .debug_mmu_cache      (debug_dcache_mmu_cache),
+        .debug_req_op         (debug_dcache_req_op),
+        .debug_req_offset     (debug_dcache_req_offset),
+        .debug_refill_tag     (debug_dcache_refill_tag),
+        .debug_refill_offset  (debug_dcache_refill_offset),
+        .debug_dc_wr_req      (debug_dcache_wr_req),
+        .debug_dc_wr_type     (debug_dcache_wr_type),
+        .debug_dc_wr_addr     (debug_dcache_wr_addr),
+        .debug_dc_wr_wstrb    (debug_dcache_wr_wstrb),
+        .debug_dc_wr_data     (debug_dcache_wr_data)
     );
 
     // ================================================================
@@ -1013,7 +1060,17 @@ module core_top (
         .debug_arvalid           (debug_bridge_arvalid),
         .debug_icache_return_data (debug_bridge_icache_return_data),
         .debug_ic_rd_buf_valid   (debug_bridge_ic_rd_buf_valid),
-        .debug_ic_rd_buf_addr    (debug_bridge_ic_rd_buf_addr)
+        .debug_ic_rd_buf_addr    (debug_bridge_ic_rd_buf_addr),
+        .debug_dc_wr_buf_valid   (debug_bridge_dc_wr_buf_valid),
+        .debug_aw_done           (debug_bridge_aw_done),
+        .debug_awvalid           (debug_bridge_awvalid),
+        .debug_wvalid            (debug_bridge_wvalid),
+        .debug_bready            (debug_bridge_bready_out),
+        .debug_wr_pend_cnt       (debug_bridge_wr_pend_cnt),
+        .debug_wr_pend_full      (debug_bridge_wr_pend_full),
+        .debug_dcache_wr_rdy     (debug_bridge_dcache_wr_rdy),
+        .debug_wr_aw_done_r      (debug_bridge_wr_aw_done_r),
+        .debug_wr_w_done_r       (debug_bridge_wr_w_done_r)
     );
 
     `ifdef DIFFTEST_EN

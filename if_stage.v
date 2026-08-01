@@ -259,19 +259,14 @@ module if_stage (
     assign pre_if_pc_next = nextpc;
 
     // ========== IF 级 ==========
-    assign seq_pc = pre_if_pc_r + 32'h4;
-
-    // 预计算默认路径条件，扁平化优先级链（seq_pc 是最常见 case）
-    wire use_seq_pc = !exc_no_rf && !rf_valid && !wb_ertn_flush
-                    && !ex_mispredict && !static_taken && !pred_taken_r;
-
-    assign nextpc  = use_seq_pc    ? seq_pc          :
-                     exc_no_rf     ? exc_entry      :
+    assign seq_pc  = pre_if_pc_r + 32'h4;
+    assign nextpc  = exc_no_rf     ? exc_entry      :
                      rf_valid      ? rf_pc          :
                      wb_ertn_flush ? exc_back_pc    :
                      ex_mispredict ? ex_corr_target :
                      static_taken  ? static_target  :
-                                     {pred_target_r, 2'b00};
+                     pred_taken_r  ? {pred_target_r, 2'b00} :
+                                     seq_pc      ;
                                      
     wire if_work_done = (icache_cpu_data_ok || if_exc_valid) && (inst_dirty == 3'b0);
     assign if_ready_go    = if_work_done || !if_valid || lready[1];

@@ -167,16 +167,20 @@ module dcache (
     wire effective_cancel = mmu_cancel;
 
     // ============================================================
-    // Tag 比较与命中判断
+    // Tag 比较与命中判断 — XOR 树实现（强制 LUT，避免 CARRY4 减法器）
     // ============================================================
 
-    wire [`WAY_NUM-1:0] way_hit;
+    wire [`TAG_WIDTH-1:0] tag_diff     [0:`WAY_NUM-1];
+    wire                  tag_match    [0:`WAY_NUM-1];
+    wire [`WAY_NUM-1:0]   way_hit;
     genvar gh;
     generate
         for (gh = 0; gh < `WAY_NUM; gh = gh + 1) begin : way_hit_gen
-            assign way_hit[gh] = tagv_rdata[gh][0]
-                               && (tagv_rdata[gh][`TAG_WIDTH:1] == mmu_tag)
-                               && (mmu_cache || cacop_en_r);
+            assign tag_diff[gh]  = tagv_rdata[gh][`TAG_WIDTH:1] ^ mmu_tag;
+            assign tag_match[gh] = ~(|tag_diff[gh]);
+            assign way_hit[gh]   = tagv_rdata[gh][0]
+                                 && tag_match[gh]
+                                 && (mmu_cache || cacop_en_r);
         end
     endgenerate
 
@@ -254,48 +258,41 @@ module dcache (
     end
 
     // ============================================================
-    // 主状态机 — 下一状态逻辑
+    // 主状态机 — 下一状态逻辑（并行 assign，消除 case 级联延迟）
     // ============================================================
+    wire cache_miss = !cache_hit;
+
+    wire main_idle_lookup   = main_idle   && accept_new_req;
+
+    wire main_lookup_reread = main_lookup && cache_miss;
+    wire main_lookup_lookup = main_lookup && cache_hit && accept_new_req;
+
+    wire main_reread_waitwr = main_reread;
+
+    wire main_waitwr_waitdone = main_waitwr && is_uncached_store && wr_rdy;
+    wire main_waitwr_refill   = main_waitwr && !is_uncached_store
+                              && (!wr_needs_write || wr_rdy) && cacop_en_r;
+    wire main_waitwr_waitrd   = main_waitwr && !is_uncached_store
+                              && (!wr_needs_write || wr_rdy) && !cacop_en_r;
+
+    wire main_waitdone_idle   = main_wait_wr_done && wr_done;
+
+    wire main_waitrd_refill   = main_waitrd && rd_rdy;
+
+    wire main_refill_idle     = main_refill && (refill_last || cacop_en_r);
+
     always @(*) begin
-        case (main_state)
-            MAIN_IDLE: begin
-                main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
-            end
-            MAIN_LOOKUP: begin
-                if (effective_cancel)
-                    main_next = MAIN_IDLE;
-                else if (cache_hit) begin
-                    main_next = accept_new_req ? MAIN_LOOKUP : MAIN_IDLE;
-                end
-                else begin
-                    main_next = MAIN_REREAD;
-                end
-            end
-            MAIN_REREAD: begin
-                main_next = MAIN_WAITWR;
-            end
-            MAIN_WAITWR: begin
-                if (is_uncached_store) begin
-                    main_next = wr_rdy ? MAIN_WAIT_WR_DONE : MAIN_WAITWR;
-                end
-                else if (!wr_needs_write || wr_rdy) begin
-                    main_next = cacop_en_r ? MAIN_REFILL : MAIN_WAITRD;
-                end
-                else begin
-                    main_next = MAIN_WAITWR;
-                end
-            end
-            MAIN_WAIT_WR_DONE: begin
-                main_next = wr_done ? MAIN_IDLE : MAIN_WAIT_WR_DONE;
-            end
-            MAIN_WAITRD: begin
-                main_next = rd_rdy ? MAIN_REFILL : MAIN_WAITRD;
-            end
-            MAIN_REFILL: begin
-                main_next = (refill_last || cacop_en_r) ? MAIN_IDLE : MAIN_REFILL;
-            end
-            default: main_next = MAIN_IDLE;
-        endcase
+        main_next = MAIN_IDLE;
+        if (main_idle_lookup)                              main_next = MAIN_LOOKUP;
+        if (main_lookup_lookup)                            main_next = MAIN_LOOKUP;
+        if (main_lookup_reread)                            main_next = MAIN_REREAD;
+        if (main_reread_waitwr)                            main_next = MAIN_WAITWR;
+        if (main_waitwr_refill)                            main_next = MAIN_REFILL;
+        if (main_waitwr_waitrd)                            main_next = MAIN_WAITRD;
+        if (main_waitwr_waitdone)                          main_next = MAIN_WAIT_WR_DONE;
+        if (main_waitdone_idle)                            main_next = MAIN_IDLE;
+        if (main_waitrd_refill)                            main_next = MAIN_REFILL;
+        if (main_refill_idle)                              main_next = MAIN_IDLE;
     end
 
     // ============================================================

@@ -420,6 +420,14 @@ module mmu (
 
     assign ex_cached = ((s1_need_tlb_r ? s1_mat : ex_mat_dmw_r) == 2'b01);
 
+    // 展平 s1 tag MUX（同 s0）：高位 ppn 统一，低位按 page size 选
+    wire        s1_ps_is_4mb = (s1_ps == 6'd21);
+    wire [19:0] ex_tag_tlb;
+    assign ex_tag_tlb[19:10] = s1_ppn[19:10];
+    assign ex_tag_tlb[ 9: 0] = s1_ps_is_4mb ? ex_vaddr_r[21:12] : s1_ppn[9:0];
+    assign ex_tag = s1_need_tlb_r ? ex_tag_tlb : paddr_ex_dmw_r[31:12];
+
+    // paddr_to_ex 仅 MEM/difftest 使用，非关键路径，保持完整 paddr
     wire [31:0] paddr_ex;
     wire [31:0] paddr_ex_tlb;
     assign paddr_ex_tlb = (s1_ps == 6'd12) ? {s1_ppn[19:0], ex_vaddr_r[11:0]}  :
@@ -427,7 +435,6 @@ module mmu (
                                              32'b0;
     assign paddr_ex    = s1_need_tlb_r ? paddr_ex_tlb : paddr_ex_dmw_r;
     assign paddr_to_ex = paddr_ex;
-    assign ex_tag      = paddr_ex[31:12];
     assign srch_value    = {s1_found, s1_index};
     assign invtlb_valid  = invtlb_en;
     assign invtlb_op     = invtlb_opcode;

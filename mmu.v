@@ -346,14 +346,21 @@ module mmu (
 
     assign if_cached = ((s0_need_tlb_r ? s0_mat : if_mat_dmw_r) == 2'b01);
 
-    wire [31:0] paddr_if;
+    // 展平 tag MUX：高位 ppn 统一，低位按 page size 选，消除两级 MUX
+    wire        ps_is_4mb = (s0_ps == 6'd21);
+    wire [19:0] if_tag_tlb;
+    assign if_tag_tlb[19:10] = s0_ppn[19:10];
+    assign if_tag_tlb[ 9: 0] = ps_is_4mb ? if_vaddr_r[21:12] : s0_ppn[9:0];
+    assign if_tag = s0_need_tlb_r ? if_tag_tlb : paddr_if_dmw_r[31:12];
+
+    // paddr_to_if 仅 MEM/difftest 使用，非关键路径，保持完整 paddr
     wire [31:0] paddr_if_tlb;
     assign paddr_if_tlb = (s0_ps == 6'd12) ? {s0_ppn[19:0], if_vaddr_r[11:0]}  :
                           (s0_ps == 6'd21) ? {s0_ppn[19:10], if_vaddr_r[21:0]} :
                                              32'b0;
+    wire [31:0] paddr_if;
     assign paddr_if    = s0_need_tlb_r ? paddr_if_tlb : paddr_if_dmw_r;
     assign paddr_to_if = paddr_if;
-    assign if_tag      = paddr_if[31:12];
 
     // ex logic
     assign {ex_vppn, ex_va_bit12, ex_offset} = vaddr_from_ex;

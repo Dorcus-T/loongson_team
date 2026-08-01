@@ -237,14 +237,14 @@ module exe_stage (
     // ============================================================
     // ex_br_offs 已由 ID 计算好（符号扩展+左移2位），覆盖 B/BL 的 26 位 offs 和条件/JIRL 的 16 位 offs
 
-    // -------- 条件分支：复用减法器结果，消除冗余 32-bit 比较器 --------
+    // -------- 条件分支：rj/rk 比较 --------
     wire [31:0] ex_adder_result;
     wire        ex_adder_cout;
     assign {ex_adder_cout, ex_adder_result} = {1'b0, rj_value} + {1'b0, ~rkd_value} + 1'b1;
 
-    // rj == rk 时减法结果为 0，直接 OR-reduce 省掉第二条 CARRY4 链
+    // 保持独立比较器，与加法器并行（复用加法器会导致 ~|result 串行依赖）
     wire ex_rj_eq_rd;
-    assign ex_rj_eq_rd = ~|ex_adder_result;
+    assign ex_rj_eq_rd = (rj_value == rkd_value);
 
     wire ex_rj_lt_rd_s;
     assign ex_rj_lt_rd_s = (rj_value[31] && ~rkd_value[31])

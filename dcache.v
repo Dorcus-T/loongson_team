@@ -13,7 +13,7 @@ module dcache (
     input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
     input  wire [ 3:0]             cpu_wstrb,
     input  wire [31:0]             cpu_wdata,
-    input  wire                    mmu_cached,
+    input  wire                    mmu_cache,
     input  wire                    mmu_cancel,
     output wire                    cpu_addr_ok,
     output wire                    cpu_data_ok,
@@ -134,7 +134,6 @@ module dcache (
     reg  [1:0]               refill_vc_hitway_idx_r;
 
     // Write Buffer — 命中 store 时写入，延迟写入 bank RAM
-    reg                     wb_valid;
     reg  [`WAY_NUM-1:0]     wb_way_hit;
     reg  [`INDEX_WIDTH-1:0] wb_index;
     reg  [ 1:0]             wb_bank;
@@ -177,7 +176,7 @@ module dcache (
     // ============================================================
     // Tag 比较与命中判断
     // ============================================================
-    wire                  lookup_cached = cacop_en_r ? 1'b1        : mmu_cached;
+    wire                  lookup_cached = cacop_en_r ? 1'b1        : mmu_cache;
 
     wire [`WAY_NUM-1:0] way_hit;
     genvar gh;
@@ -436,15 +435,11 @@ module dcache (
     // Write Buffer — 时序更新
     always @(posedge clk) begin
         if (wb_new_store_hit) begin
-            wb_valid       <= 1'b1;
             wb_way_hit     <= way_hit;
             wb_index       <= req_index;
             wb_bank        <= req_offset[3:2];
             wb_wstrb_mask  <= req_wstrb_mask;
             wb_wdata       <= req_wdata;
-        end
-        else if (wb_write && !wb_new_store_hit) begin
-            wb_valid <= 1'b0;
         end
     end
 
@@ -537,7 +532,9 @@ module dcache (
                     d_ram[d_wi][refill_index] <= req_op;
                 else if (wb_write && wb_way_hit[d_wi])
                     d_ram[d_wi][wb_index] <= 1'b1;
-                if (ram_read_en)
+            end
+            if (ram_read_en) begin
+                for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1)    
                     d_rdata[d_wi] <= d_ram[d_wi][ram_raddr];
             end
         end
@@ -692,7 +689,7 @@ module dcache (
         else begin
             if (accept_new_req && !cacop_en)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && mmu_cached && !cacop_en_r && !mmu_cancel) begin
+            if (main_lookup && mmu_cache && !cacop_en_r && !mmu_cancel) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_hit) begin
                     perf_miss_cnt <= perf_miss_cnt + 32'd1;

@@ -13,7 +13,7 @@ module dcache (
     input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
     input  wire [ 3:0]             cpu_wstrb,
     input  wire [31:0]             cpu_wdata,
-    input  wire                    mmu_cached,
+    input  wire                    mmu_cache,
     input  wire                    mmu_cancel,
     output wire                    cpu_addr_ok,
     output wire                    cpu_data_ok,
@@ -176,7 +176,7 @@ module dcache (
     // ============================================================
     // Tag 比较与命中判断 — XOR 树实现（强制 LUT，避免 CARRY4 减法器）
     // ============================================================
-    wire                  lookup_cached = cacop_en_r ? 1'b1        : mmu_cached;
+    wire                  lookup_cached = cacop_en_r ? 1'b1        : mmu_cache;
 
     wire [`TAG_WIDTH-1:0] tag_diff     [0:`WAY_NUM-1];
     wire                  tag_match    [0:`WAY_NUM-1];
@@ -714,7 +714,7 @@ module dcache (
         else begin
             if (accept_new_req && !cacop_en)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && mmu_cached && !cacop_en_r && !mmu_cancel) begin
+            if (main_lookup && mmu_cache && !cacop_en_r && !mmu_cancel) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_hit) begin
                     perf_miss_cnt <= perf_miss_cnt + 32'd1;

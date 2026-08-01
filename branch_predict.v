@@ -64,52 +64,30 @@ module branch_predict (
     reg  [ 1:0] btb_counter[0:`BTB_ENTRIES-1];
     reg         btb_valid  [0:`BTB_ENTRIES-1];
 
-    // 查找逻辑：32 路并行比较，纯组合
+    // 查找逻辑：32 路并行比较，XOR 树实现（强制 LUT，避免 CARRY4 减法器）
     wire [`BTB_ENTRIES-1:0] btb_match;
     genvar i;
     generate
         for (i = 0; i < `BTB_ENTRIES; i = i + 1) begin : btb_cam
-            assign btb_match[i] = btb_valid[i] && (btb_tag[i] == lookup_pc_r);
+            assign btb_match[i] = btb_valid[i] && ~(|(btb_tag[i] ^ lookup_pc_r));
         end
     endgenerate
 
     // 命中信号
     assign btb_hit_o = |btb_match;
 
-    // 优先编码器（取第一个命中项）
+    // 优先编码器 — 并行按位 OR-reduce（btb_match 为 one-hot，2 LUT 级）
     wire [4:0] btb_match_index;
-    assign btb_match_index = btb_match[ 0] ? 5'd0  :
-                             btb_match[ 1] ? 5'd1  :
-                             btb_match[ 2] ? 5'd2  :
-                             btb_match[ 3] ? 5'd3  :
-                             btb_match[ 4] ? 5'd4  :
-                             btb_match[ 5] ? 5'd5  :
-                             btb_match[ 6] ? 5'd6  :
-                             btb_match[ 7] ? 5'd7  :
-                             btb_match[ 8] ? 5'd8  :
-                             btb_match[ 9] ? 5'd9  :
-                             btb_match[10] ? 5'd10 :
-                             btb_match[11] ? 5'd11 :
-                             btb_match[12] ? 5'd12 :
-                             btb_match[13] ? 5'd13 :
-                             btb_match[14] ? 5'd14 :
-                             btb_match[15] ? 5'd15 :
-                             btb_match[16] ? 5'd16 :
-                             btb_match[17] ? 5'd17 :
-                             btb_match[18] ? 5'd18 :
-                             btb_match[19] ? 5'd19 :
-                             btb_match[20] ? 5'd20 :
-                             btb_match[21] ? 5'd21 :
-                             btb_match[22] ? 5'd22 :
-                             btb_match[23] ? 5'd23 :
-                             btb_match[24] ? 5'd24 :
-                             btb_match[25] ? 5'd25 :
-                             btb_match[26] ? 5'd26 :
-                             btb_match[27] ? 5'd27 :
-                             btb_match[28] ? 5'd28 :
-                             btb_match[29] ? 5'd29 :
-                             btb_match[30] ? 5'd30 :
-                             btb_match[31] ? 5'd31 : 5'd0;
+    genvar b;
+    generate
+        for (b = 0; b < 5; b = b + 1) begin : gen_btb_index
+            wire [`BTB_ENTRIES-1:0] term;
+            for (i = 0; i < `BTB_ENTRIES; i = i + 1) begin : gen_btb_term
+                assign term[i] = btb_match[i] & ((i >> b) & 1'b1);
+            end
+            assign btb_match_index[b] = |term;
+        end
+    endgenerate
     assign btb_index_o = btb_match_index;
 
     // 目标地址和计数器（用 index 做 MUX 选通）
@@ -127,29 +105,23 @@ module branch_predict (
     wire [`RAS_CAM_ENTRIES-1:0] ras_match;
     generate
         for (i = 0; i < `RAS_CAM_ENTRIES; i = i + 1) begin : ras_cam_cmp
-            assign ras_match[i] = ras_cam_valid[i] && (ras_cam_tag[i] == lookup_pc_r);
+            assign ras_match[i] = ras_cam_valid[i] && ~(|(ras_cam_tag[i] ^ lookup_pc_r));
         end
     endgenerate
 
     assign ras_hit_o = |ras_match;
 
+    // 优先编码器 — 并行按位 OR-reduce（ras_match 为 one-hot，2 LUT 级）
     wire [3:0] ras_match_index;
-    assign ras_match_index = ras_match[ 0] ? 4'd0  :
-                             ras_match[ 1] ? 4'd1  :
-                             ras_match[ 2] ? 4'd2  :
-                             ras_match[ 3] ? 4'd3  :
-                             ras_match[ 4] ? 4'd4  :
-                             ras_match[ 5] ? 4'd5  :
-                             ras_match[ 6] ? 4'd6  :
-                             ras_match[ 7] ? 4'd7  :
-                             ras_match[ 8] ? 4'd8  :
-                             ras_match[ 9] ? 4'd9  :
-                             ras_match[10] ? 4'd10 :
-                             ras_match[11] ? 4'd11 :
-                             ras_match[12] ? 4'd12 :
-                             ras_match[13] ? 4'd13 :
-                             ras_match[14] ? 4'd14 :
-                             ras_match[15] ? 4'd15 : 4'd0;
+    generate
+        for (b = 0; b < 4; b = b + 1) begin : gen_ras_index
+            wire [`RAS_CAM_ENTRIES-1:0] term;
+            for (i = 0; i < `RAS_CAM_ENTRIES; i = i + 1) begin : gen_ras_term
+                assign term[i] = ras_match[i] & ((i >> b) & 1'b1);
+            end
+            assign ras_match_index[b] = |term;
+        end
+    endgenerate
     assign ras_index_o = ras_match_index;
 
     // 更新侧 RAS CAM 全相联匹配（独立于 BTB 索引，避免冷启动退化）

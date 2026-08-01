@@ -496,12 +496,12 @@ module id_stage (
     assign need_si26 = inst_b | inst_bl;                            // 26位有符号立即数（分支）
     assign src2_is_4 = inst_jirl | inst_bl;                         // 常数4（用于链接寄存器）
 
-    assign imm = src2_is_4 ? 32'h4 :
-                 need_si20 ? {i20[19:0], 12'b0} :                 // 左移12位
-                 need_ui5  ? {27'b0, rk} :                        // 零扩展5位
-                 need_si12 ? {{20{i12[11]}}, i12[11:0]} :         // 符号扩展12位
-                 need_ui12 ? {20'b0, i12} :                       // 零扩展12位
-                 32'b0;
+    // 扁平化 5:1 优先级链为并行 mask（条件互斥）
+    assign imm = ({32{src2_is_4}} & 32'h4)
+               | ({32{need_si20}} & {i20[19:0], 12'b0})
+               | ({32{need_ui5 }} & {27'b0, rk})
+               | ({32{need_si12}} & {{20{i12[11]}}, i12[11:0]})
+               | ({32{need_ui12}} & {20'b0, i12});
 
     // 分支偏移量计算（左移2位，因为指令是4字节对齐）
     assign br_offs = need_si26 ? { {4{i26[25]}}, i26[25:0], 2'b0 } :
@@ -633,22 +633,22 @@ module id_stage (
     assign id_is_branch = inst_beq | inst_bne | inst_bl | inst_b |
                           inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_jirl;
 
-    // 分支类型编码：00=无条件(B/JIRL call) 01=条件 10=call(BL) 11=ret(JIRL with rd=0,rj=1,offs=0)
+    // 分支类型编码：00=无条件(B/JIRL call) 01=条件 10=call(BL) 11=ret
     wire [1:0] id_br_type;
-    assign id_br_type = inst_bl                                                 ? 2'b10 :  // call
-                        (inst_jirl && rd == 5'd0 && rj == 5'd1 && i16 == 16'd0) ? 2'b11 :  // ret
-                        (inst_beq | inst_bne | inst_blt
-                        | inst_bge | inst_bltu | inst_bgeu)                     ? 2'b01 :  // 条件分支
-                                                                                  2'b00 ;  // 无条件跳转(B/JIRL call)
+    wire is_ret = inst_jirl && rd == 5'd0 && rj == 5'd1 && ~|i16;
+    wire is_cond= inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
+    assign id_br_type = ({2{inst_bl }} & 2'b10)
+                      | ({2{is_ret   }} & 2'b11)
+                      | ({2{is_cond  }} & 2'b01);
 
-    // 条件分支比较码（供 EX 用 ALU 操作数重算方向）
+    // 条件分支比较码 — 扁平化 6:1 优先级链（条件互斥）
     wire [2:0] cond_cmp;
-    assign cond_cmp = inst_beq  ? 3'b000 :
-                      inst_bne  ? 3'b001 :
-                      inst_blt  ? 3'b010 :
-                      inst_bge  ? 3'b011 :
-                      inst_bltu ? 3'b100 :
-                      inst_bgeu ? 3'b101 : 3'b110;
+    assign cond_cmp = ({3{inst_beq }} & 3'b000)
+                    | ({3{inst_bne }} & 3'b001)
+                    | ({3{inst_blt }} & 3'b010)
+                    | ({3{inst_bge }} & 3'b011)
+                    | ({3{inst_bltu}} & 3'b100)
+                    | ({3{inst_bgeu}} & 3'b101);
 
     // ========== 输出到ex阶段的总线 ==========
     // ID到EX总线组装

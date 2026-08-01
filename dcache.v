@@ -264,7 +264,7 @@ module dcache (
 
     wire main_idle_lookup   = main_idle   && accept_new_req;
 
-    wire main_lookup_reread = main_lookup && cache_miss;
+    wire main_lookup_reread = main_lookup && cache_miss && !effective_cancel;
     wire main_lookup_lookup = main_lookup && cache_hit && accept_new_req;
 
     wire main_reread_waitwr = main_reread;
@@ -274,12 +274,17 @@ module dcache (
                               && (!wr_needs_write || wr_rdy) && cacop_en_r;
     wire main_waitwr_waitrd   = main_waitwr && !is_uncached_store
                               && (!wr_needs_write || wr_rdy) && !cacop_en_r;
+    wire main_waitwr_stay     = main_waitwr
+                              && (is_uncached_store ? !wr_rdy : wr_needs_write && !wr_rdy);
 
     wire main_waitdone_idle   = main_wait_wr_done && wr_done;
+    wire main_waitdone_stay   = main_wait_wr_done && !wr_done;
 
     wire main_waitrd_refill   = main_waitrd && rd_rdy;
+    wire main_waitrd_stay     = main_waitrd && !rd_rdy;
 
     wire main_refill_idle     = main_refill && (refill_last || cacop_en_r);
+    wire main_refill_stay     = main_refill && !refill_last && !cacop_en_r;
 
     always @(*) begin
         main_next = MAIN_IDLE;
@@ -290,9 +295,13 @@ module dcache (
         if (main_waitwr_refill)                            main_next = MAIN_REFILL;
         if (main_waitwr_waitrd)                            main_next = MAIN_WAITRD;
         if (main_waitwr_waitdone)                          main_next = MAIN_WAIT_WR_DONE;
+        if (main_waitwr_stay)                              main_next = MAIN_WAITWR;
         if (main_waitdone_idle)                            main_next = MAIN_IDLE;
+        if (main_waitdone_stay)                            main_next = MAIN_WAIT_WR_DONE;
         if (main_waitrd_refill)                            main_next = MAIN_REFILL;
+        if (main_waitrd_stay)                              main_next = MAIN_WAITRD;
         if (main_refill_idle)                              main_next = MAIN_IDLE;
+        if (main_refill_stay)                              main_next = MAIN_REFILL;
     end
 
     // ============================================================

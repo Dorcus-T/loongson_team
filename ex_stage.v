@@ -237,35 +237,40 @@ module exe_stage (
     // ============================================================
     // ex_br_offs 已由 ID 计算好（符号扩展+左移2位），覆盖 B/BL 的 26 位 offs 和条件/JIRL 的 16 位 offs
 
-    // -------- 条件分支：用 rj_value / rkd_value 重算比较结果 --------
-    wire ex_rj_eq_rd;
-    assign ex_rj_eq_rd = (rj_value == rkd_value);
-
+    // -------- 条件分支：复用减法器结果，消除冗余 32-bit 比较器 --------
     wire [31:0] ex_adder_result;
     wire        ex_adder_cout;
     assign {ex_adder_cout, ex_adder_result} = {1'b0, rj_value} + {1'b0, ~rkd_value} + 1'b1;
+
+    // rj == rk 时减法结果为 0，直接 OR-reduce 省掉第二条 CARRY4 链
+    wire ex_rj_eq_rd;
+    assign ex_rj_eq_rd = ~|ex_adder_result;
+
     wire ex_rj_lt_rd_s;
     assign ex_rj_lt_rd_s = (rj_value[31] && ~rkd_value[31])
                          | ((rj_value[31] ~^ rkd_value[31]) && ex_adder_result[31]);
     wire ex_rj_lt_rd_u;
     assign ex_rj_lt_rd_u = !ex_adder_cout;
 
+    // 扁平化 6:1 优先级链为并行 mask
     wire ex_cond_taken;
-    assign ex_cond_taken = (ex_cond_cmp == 3'b000) ?  ex_rj_eq_rd     // BEQ
-                         : (ex_cond_cmp == 3'b001) ? !ex_rj_eq_rd     // BNE
-                         : (ex_cond_cmp == 3'b010) ?  ex_rj_lt_rd_s   // BLT
-                         : (ex_cond_cmp == 3'b011) ? !ex_rj_lt_rd_s   // BGE
-                         : (ex_cond_cmp == 3'b100) ?  ex_rj_lt_rd_u   // BLTU
-                         : (ex_cond_cmp == 3'b101) ? !ex_rj_lt_rd_u   // BGEU
-                         : 1'b0;
+    wire [5:0] cond_onehot;
+    assign cond_onehot[0] = (ex_cond_cmp == 3'b000);
+    assign cond_onehot[1] = (ex_cond_cmp == 3'b001);
+    assign cond_onehot[2] = (ex_cond_cmp == 3'b010);
+    assign cond_onehot[3] = (ex_cond_cmp == 3'b011);
+    assign cond_onehot[4] = (ex_cond_cmp == 3'b100);
+    assign cond_onehot[5] = (ex_cond_cmp == 3'b101);
+    assign ex_cond_taken = (cond_onehot[0] &  ex_rj_eq_rd)
+                         | (cond_onehot[1] & !ex_rj_eq_rd)
+                         | (cond_onehot[2] &  ex_rj_lt_rd_s)
+                         | (cond_onehot[3] & !ex_rj_lt_rd_s)
+                         | (cond_onehot[4] &  ex_rj_lt_rd_u)
+                         | (cond_onehot[5] & !ex_rj_lt_rd_u);
 
-    // -------- 实际分支方向（按 br_type 决定）--------
+    // -------- 实际分支方向：br_type[1]|~br_type[0] 覆盖无条件跳转，条件分支取 ex_cond_taken
     wire ex_br_taken_actual;
-    assign ex_br_taken_actual = (ex_br_type == 2'b10) ? 1'b1 :           // BL/call 一定跳
-                                (ex_br_type == 2'b11) ? 1'b1 :           // ret 一定跳
-                                (ex_br_type == 2'b00) ? 1'b1 :           // B/JIRL call 一定跳
-                                (ex_br_type == 2'b01) ? ex_cond_taken :  // 条件分支
-                                1'b0;
+    assign ex_br_taken_actual = ex_br_type[1] | ~ex_br_type[0] | ex_cond_taken;
 
     // -------- 实际分支目标 --------
     // JIRL 是唯一的寄存器相对分支（rj + offset），其余全是 PC 相对
@@ -285,7 +290,7 @@ module exe_stage (
     assign ex_mispredict_raw = ex_is_branch&& (
         (ex_br_taken_actual != ((ex_pred_valid && ex_pred_taken) || ex_static_taken))           // 方向错（含冷启动：无预测→视为不跳）
         || (ex_br_taken_actual && ex_pred_valid
-            && (ex_pred_target != ex_br_target_actual[31:2]))              // 目标错（仅预测为跳时才检查）
+            && |(ex_pred_target ^ ex_br_target_actual[31:2]))               // 目标错（XOR 树，仅预测为跳时才检查）
     );
 
     // 对外输出（can_req 门控）

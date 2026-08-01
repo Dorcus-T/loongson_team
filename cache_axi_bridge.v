@@ -71,23 +71,7 @@ module cache_axi_bridge (
     input  wire [ 3:0]  bid,
     input  wire [ 1:0]  bresp,
     input  wire         bvalid,
-    output wire         bready,
-
-    // debug
-    output wire         debug_arvalid,
-    output wire [31:0]  debug_icache_return_data,
-    output wire         debug_ic_rd_buf_valid,
-    output wire [31:0]  debug_ic_rd_buf_addr,
-    output wire         debug_dc_wr_buf_valid,
-    output wire         debug_aw_done,
-    output wire         debug_awvalid,
-    output wire         debug_wvalid,
-    output wire         debug_bready,
-    output wire [ 2:0]  debug_wr_pend_cnt,
-    output wire         debug_wr_pend_full,
-    output wire         debug_dcache_wr_rdy,
-    output wire         debug_wr_aw_done_r,
-    output wire         debug_wr_w_done_r
+    output wire         bready
 );
 
     // ============================================================
@@ -421,21 +405,5 @@ module cache_axi_bridge (
     assign awlock  = 2'b00;
     assign awcache = 4'h0;
     assign awprot  = 3'h0;
-
-    // ========== debug ==========
-    assign debug_arvalid           = arvalid;
-    assign debug_icache_return_data = icache_return_data;
-    assign debug_ic_rd_buf_valid   = ic_rd_buf_valid;
-    assign debug_ic_rd_buf_addr    = ic_rd_buf_addr;
-    assign debug_dc_wr_buf_valid   = dc_wr_buf_valid;
-    assign debug_aw_done           = aw_done;
-    assign debug_awvalid           = awvalid;
-    assign debug_wvalid            = wvalid;
-    assign debug_bready            = bready;
-    assign debug_wr_pend_cnt       = wr_pend_cnt;
-    assign debug_wr_pend_full      = wr_pend_full;
-    assign debug_dcache_wr_rdy     = dcache_wr_rdy;
-    assign debug_wr_aw_done_r      = wr_aw_done_r;
-    assign debug_wr_w_done_r       = wr_w_done_r;
 
 endmodule

@@ -40,26 +40,7 @@ module dcache (
     input  wire                    cacop_en,
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
-    output wire                    cacop_rdy,
-
-    // debug
-    output wire [ 6:0]              debug_main_state,
-    output wire                     debug_rd_req,
-    output wire [`TAG_WIDTH-1:0]    debug_mmu_tag,
-    output wire [`INDEX_WIDTH-1:0]  debug_cpu_index,
-    output wire                     debug_refill_cached,
-    output wire [`INDEX_WIDTH-1:0]  debug_refill_index,
-    output wire [`INDEX_WIDTH-1:0]  debug_req_index,
-    output wire                     debug_mmu_cache,
-    output wire                     debug_req_op,
-    output wire [`OFFSET_WIDTH-1:0] debug_req_offset,
-    output wire [`TAG_WIDTH-1:0]    debug_refill_tag,
-    output wire [`OFFSET_WIDTH-1:0] debug_refill_offset,
-    output wire                     debug_dc_wr_req,
-    output wire [ 2:0]              debug_dc_wr_type,
-    output wire [31:0]              debug_dc_wr_addr,
-    output wire [ 3:0]              debug_dc_wr_wstrb,
-    output wire [127:0]             debug_dc_wr_data
+    output wire                    cacop_rdy
 );
 
     // ============================================================
@@ -698,24 +679,5 @@ module dcache (
             end
         end
     end
-
-    // ========== debug ==========
-    assign debug_main_state    = main_state;
-    assign debug_rd_req        = rd_req;
-    assign debug_mmu_tag       = mmu_tag;
-    assign debug_cpu_index     = cpu_index;
-    assign debug_refill_cached = refill_cached;
-    assign debug_refill_index  = refill_index;
-    assign debug_req_index     = req_index;
-    assign debug_mmu_cache     = mmu_cache;
-    assign debug_req_op        = req_op;
-    assign debug_req_offset    = req_offset;
-    assign debug_refill_tag    = refill_tag;
-    assign debug_refill_offset = refill_offset;
-    assign debug_dc_wr_req     = wr_req;
-    assign debug_dc_wr_type    = wr_type;
-    assign debug_dc_wr_addr    = wr_addr;
-    assign debug_dc_wr_wstrb   = wr_wstrb;
-    assign debug_dc_wr_data    = wr_data;
 
 endmodule

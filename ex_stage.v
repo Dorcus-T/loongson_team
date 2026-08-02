@@ -445,15 +445,18 @@ module exe_stage (
     wire       is_cpucfg  = res_from_csr && (ex_csr_num == 14'h00b1);
     wire [7:0] cfg_valen  = `VALEN - 1;
     wire [7:0] cfg_palen  = `PALEN - 1;
-    wire [3:0] cfg_off    = `D_OFFSET_WIDTH;
-    wire [7:0] cfg_idx    = `D_INDEX_WIDTH;
-    wire [15:0] cfg_ways  = `D_WAY_NUM - 1;
+    wire [3:0] i_cfg_off    = `I_OFFSET_WIDTH;
+    wire [7:0] i_cfg_idx    = `I_INDEX_WIDTH;
+    wire [15:0] i_cfg_ways  = `I_WAY_NUM - 1;
+    wire [3:0] d_cfg_off    = `D_OFFSET_WIDTH;
+    wire [7:0] d_cfg_idx    = `D_INDEX_WIDTH;
+    wire [15:0] d_cfg_ways  = `D_WAY_NUM - 1;
     wire [31:0] cpucfg_rvalue =
         (rj_value[5:0] == 6'd1)  ? {12'd0, cfg_valen, cfg_palen, 1'b0, 1'b1, 2'd0} :
         (rj_value[5:0] == 6'd2)  ? 32'h0 :
         (rj_value[5:0] == 6'd16) ? {25'd0, 1'b0, 1'b0, 2'd0, 1'b1, 1'b0, 1'b1} :
-        (rj_value[5:0] == 6'd17) ? {1'b0, 3'd0, cfg_off, cfg_idx, cfg_ways} :
-        (rj_value[5:0] == 6'd18) ? {1'b0, 3'd0, cfg_off, cfg_idx, cfg_ways} :
+        (rj_value[5:0] == 6'd17) ? {1'b0, 3'd0, i_cfg_off, i_cfg_idx, i_cfg_ways} :
+        (rj_value[5:0] == 6'd18) ? {1'b0, 3'd0, d_cfg_off, d_cfg_idx, d_cfg_ways} :
         (rj_value[5:0] == 6'd19) ? 32'h0 : 32'h0;
     wire [31:0] csr_rvalue_actual = is_cpucfg ? cpucfg_rvalue : csr_rvalue;
 

@@ -236,9 +236,12 @@ module csr_regfile (
     // ============================================================
     wire [ 7:0] cpucfg_valen  = `VALEN - 1;
     wire [ 7:0] cpucfg_palen  = `PALEN - 1;
-    wire [ 3:0] cpucfg_offset = `D_OFFSET_WIDTH;
-    wire [ 7:0] cpucfg_index  = `D_INDEX_WIDTH;
-    wire [15:0] cpucfg_way_m1 = `D_WAY_NUM - 1;
+    wire [ 3:0] i_cpucfg_off  = `I_OFFSET_WIDTH;
+    wire [ 7:0] i_cpucfg_idx  = `I_INDEX_WIDTH;
+    wire [15:0] i_cpucfg_ways = `I_WAY_NUM - 1;
+    wire [ 3:0] d_cpucfg_off  = `D_OFFSET_WIDTH;
+    wire [ 7:0] d_cpucfg_idx  = `D_INDEX_WIDTH;
+    wire [15:0] d_cpucfg_ways = `D_WAY_NUM - 1;
     // CPUCFG.1：基本架构 LA32, PGMMU=1
     assign csr_cpucfg1_rvalue  = {12'd0, cpucfg_valen, cpucfg_palen,
                                   1'b0, 1'b1, 2'd0};
@@ -250,11 +253,14 @@ module csr_regfile (
                                   1'b1, 1'b0, 1'b1};  // [2:0]
     // CPUCFG.11：L1 I-Cache 参数
     assign csr_cpucfg11_rvalue = {1'b0, 3'd0,           // [31:28]
-                                  cpucfg_offset,         // [27:24]
-                                  cpucfg_index,          // [23:16]
-                                  cpucfg_way_m1};        // [15:0]
-    // CPUCFG.12：L1 D-Cache 参数（同 I-Cache）
-    assign csr_cpucfg12_rvalue = csr_cpucfg11_rvalue;
+                                  i_cpucfg_off,           // [27:24]
+                                  i_cpucfg_idx,           // [23:16]
+                                  i_cpucfg_ways};         // [15:0]
+    // CPUCFG.12：L1 D-Cache 参数
+    assign csr_cpucfg12_rvalue = {1'b0, 3'd0,           // [31:28]
+                                  d_cpucfg_off,           // [27:24]
+                                  d_cpucfg_idx,           // [23:16]
+                                  d_cpucfg_ways};         // [15:0]
     // CPUCFG.13：无L2 Cache
     assign csr_cpucfg13_rvalue = 32'h0;
 

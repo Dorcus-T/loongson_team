@@ -48,7 +48,7 @@ module icache (
     // 局部参数
     // ============================================================
     localparam INDEX_DEPTH = 1 << `I_INDEX_WIDTH;
-    localparam BANK_NUM    = 1 << (`I_OFFSET_WIDTH - 2);
+    localparam BANK_NUM    = `I_LINE_WORDS;
     localparam BANK_IDX_W  = $clog2(BANK_NUM);
     localparam WAY_IDX_W   = $clog2(`I_WAY_NUM);
     localparam PLRU_W      = `I_WAY_NUM - 1;

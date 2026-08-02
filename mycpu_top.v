@@ -279,7 +279,7 @@ module core_top (
     wire [ 2:0] dcache_wr_type;
     wire [31:0] dcache_wr_addr;
     wire [ 3:0] dcache_wr_wstrb;
-    wire [127:0] dcache_wr_data;
+    wire [32*`D_LINE_WORDS-1:0] dcache_wr_data;
     wire        dcache_wr_rdy;
     wire        dcache_wr_done;
 

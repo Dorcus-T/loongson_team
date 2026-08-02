@@ -6,7 +6,7 @@ module mmu (
 
     // if interact
     input  wire [31:0] vaddr_from_if,
-    output wire [19:0] if_tag,         // 物理 tag → ICache
+    output wire [`I_TAG_WIDTH-1:0] if_tag,         // 物理 tag → ICache
     output wire [ 2:0] if_tlb_exc,
     output wire        if_cached,       // IF 访问可缓存
     output wire [31:0] paddr_to_if,     // 完整物理地址
@@ -16,7 +16,7 @@ module mmu (
     input  wire [31:0] vaddr_from_ex,
     input  wire [35:0] vtlb_enop,
     input  wire [ 1:0] ld_and_str,
-    output wire [19:0] ex_tag,         // 物理 tag → DCache
+    output wire [`D_TAG_WIDTH-1:0] ex_tag,         // 物理 tag → DCache
     output wire [31:0] paddr_to_ex,     // 完整物理地址 → mem_stage
     output wire [ 5:0] srch_value,
     output wire [ 4:0] ex_tlb_exc,
@@ -348,7 +348,7 @@ module mmu (
 
     // 展平 tag MUX：高位 ppn 统一，低位按 page size 选，消除两级 MUX
     wire        ps_is_4mb = (s0_ps == 6'd21);
-    wire [19:0] if_tag_tlb;
+    wire [`I_TAG_WIDTH-1:0] if_tag_tlb;
     assign if_tag_tlb[19:10] = s0_ppn[19:10];
     assign if_tag_tlb[ 9: 0] = ps_is_4mb ? if_vaddr_r[21:12] : s0_ppn[9:0];
     assign if_tag = s0_need_tlb_r ? if_tag_tlb : paddr_if_dmw_r[31:12];
@@ -422,7 +422,7 @@ module mmu (
 
     // 展平 s1 tag MUX（同 s0）：高位 ppn 统一，低位按 page size 选
     wire        s1_ps_is_4mb = (s1_ps == 6'd21);
-    wire [19:0] ex_tag_tlb;
+    wire [`D_TAG_WIDTH-1:0] ex_tag_tlb;
     assign ex_tag_tlb[19:10] = s1_ppn[19:10];
     assign ex_tag_tlb[ 9: 0] = s1_ps_is_4mb ? ex_vaddr_r[21:12] : s1_ppn[9:0];
     assign ex_tag = s1_need_tlb_r ? ex_tag_tlb : paddr_ex_dmw_r[31:12];

@@ -32,7 +32,7 @@ module dcache (
     output wire [ 2:0]          wr_type,
     output wire [31:0]          wr_addr,
     output wire [ 3:0]          wr_wstrb,
-    output wire [127:0]         wr_data,
+    output wire [32*`D_LINE_WORDS-1:0] wr_data,
     input  wire                 wr_rdy,
     input  wire                 wr_done,
 
@@ -56,7 +56,7 @@ module dcache (
     // 局部参数
     // ============================================================
     localparam INDEX_DEPTH = 1 << `D_INDEX_WIDTH;
-    localparam BANK_NUM    = 1 << (`D_OFFSET_WIDTH - 2);
+    localparam BANK_NUM    = `D_LINE_WORDS;
     localparam BANK_IDX_W  = $clog2(BANK_NUM);
     localparam WAY_IDX_W   = $clog2(`D_WAY_NUM);
     localparam PLRU_W      = `D_WAY_NUM - 1;
@@ -281,7 +281,9 @@ module dcache (
     wire vc_invalidate  = vc_write_cache && !(cache_write_vc && (vc_fifo_ptr == refill_vc_hitway_idx_r));
     
     reg  [1:0] vc_fifo_ptr;
-    
+
+    integer gvb;
+
     always @(posedge clk) begin
         if (~resetn) begin
             vc_fifo_ptr <= 2'd0;
@@ -294,13 +296,11 @@ module dcache (
         end
         else begin
             if (cache_write_vc) begin
-                vc_tagv[vc_fifo_ptr]       <= {tagv_rdata[refill_replace_way][`D_TAG_WIDTH:1], 1'b1};
-                vc_index[vc_fifo_ptr]      <= refill_index;
-                vc_bank[vc_fifo_ptr][0]    <= bank_rdata[refill_replace_way][0];
-                vc_bank[vc_fifo_ptr][1]    <= bank_rdata[refill_replace_way][1];
-                vc_bank[vc_fifo_ptr][2]    <= bank_rdata[refill_replace_way][2];
-                vc_bank[vc_fifo_ptr][3]    <= bank_rdata[refill_replace_way][3];
-                vc_fifo_ptr                <= vc_fifo_ptr + 2'd1;
+                vc_tagv[vc_fifo_ptr]  <= {tagv_rdata[refill_replace_way][`D_TAG_WIDTH:1], 1'b1};
+                vc_index[vc_fifo_ptr] <= refill_index;
+                for (gvb = 0; gvb < BANK_NUM; gvb = gvb + 1)
+                    vc_bank[vc_fifo_ptr][gvb] <= bank_rdata[refill_replace_way][gvb];
+                vc_fifo_ptr           <= vc_fifo_ptr + 2'd1;
             end
             if (vc_invalidate) begin
                 vc_tagv[refill_vc_hitway_idx_r][0] <= 1'b0;
@@ -687,10 +687,18 @@ module dcache (
 
     assign wr_wstrb = !is_uncached_store ? 4'b1111 : req_wstrb_4b;
 
-    assign wr_data = !is_uncached_store ?
-                     {bank_rdata[refill_replace_way][3], bank_rdata[refill_replace_way][2],
-                      bank_rdata[refill_replace_way][1], bank_rdata[refill_replace_way][0]} :
-                     {96'd0, req_wdata};
+    // 写回数据 — 整行 bank 拼接
+    wire [32*BANK_NUM-1:0] wr_data_cached;
+    genvar gwb;
+    generate
+        for (gwb = 0; gwb < BANK_NUM; gwb = gwb + 1) begin : wr_data_pack
+            assign wr_data_cached[gwb*32 +: 32] = bank_rdata[refill_replace_way][gwb];
+        end
+    endgenerate
+
+    wire [32*BANK_NUM-1:0] wr_data_uncached = {{32*(BANK_NUM-1){1'b0}}, req_wdata};
+
+    assign wr_data = !is_uncached_store ? wr_data_cached : wr_data_uncached;
 
     // ============================================================
     // 性能计数器

@@ -1,3 +1,4 @@
+`include "mycpu.h"
 // ========== Cache-AXI 转接桥 ==========
 // 三组寄存器：ICache 读 Buffer、DCache 读 Buffer、DCache 写 Buffer
 //           写追踪 FIFO（4项）、Burst 写事务寄存器、单拍写分拆握手寄存器
@@ -27,7 +28,7 @@ module cache_axi_bridge (
     input  wire [ 2:0]  dcache_wr_type,
     input  wire [31:0]  dcache_wr_addr,
     input  wire [ 3:0]  dcache_wr_wstrb,
-    input  wire [127:0] dcache_wr_data,
+    input  wire [32*`D_LINE_WORDS-1:0] dcache_wr_data,
     output wire         dcache_wr_rdy,
     output wire         dcache_wr_done,
 
@@ -75,6 +76,17 @@ module cache_axi_bridge (
 );
 
     // ============================================================
+    // 局部参数 — 由头文件 I/D_LINE_WORDS 推导
+    // ============================================================
+    localparam IC_BEATS     = `I_LINE_WORDS;               // icache 行 = 几个 32-bit beat
+    localparam IC_BEAT_W    = $clog2(IC_BEATS);            // beat 计数位宽
+    localparam IC_BURST_LEN = IC_BEATS - 1;                // AXI arlen
+    localparam DC_BEATS     = `D_LINE_WORDS;               // dcache 行 beat 数
+    localparam DC_BEAT_W    = $clog2(DC_BEATS);            // beat 计数位宽
+    localparam DC_BURST_LEN = DC_BEATS - 1;                // AXI arlen/awlen
+    localparam DC_WR_BYTES   = `D_LINE_WORDS * 4;          // DCache 写回 burst 总字节数
+
+    // ============================================================
     // ICache 读 Buffer
     // ============================================================
     reg         ic_rd_buf_valid;
@@ -95,7 +107,7 @@ module cache_axi_bridge (
     reg  [ 2:0] dc_wr_buf_type;
     reg  [31:0] dc_wr_buf_addr;
     reg  [ 3:0] dc_wr_buf_wstrb;
-    reg  [127:0] dc_wr_buf_data;
+    reg  [32*DC_BEATS-1:0] dc_wr_buf_data;
 
     // ========== Buffer Burst 检测 ==========
     wire is_ic_rd_burst_buf;
@@ -124,7 +136,7 @@ module cache_axi_bridge (
     function [5:0] wr_total_bytes;
         input [2:0] wr_type;
         case (wr_type)
-            3'b100:  wr_total_bytes = 6'd16;
+            3'b100:  wr_total_bytes = DC_WR_BYTES[5:0];
             3'b010:  wr_total_bytes = 6'd4;
             3'b001:  wr_total_bytes = 6'd2;
             3'b000:  wr_total_bytes = 6'd1;
@@ -169,7 +181,7 @@ module cache_axi_bridge (
     wire ic_rd_buf_conflict;
     wire dc_rd_buf_conflict;
     assign ic_rd_buf_conflict = rd_wr_conflict(ic_rd_buf_addr, is_ic_rd_burst_buf ? 6'd16 : 6'd4);
-    assign dc_rd_buf_conflict = rd_wr_conflict(dc_rd_buf_addr, is_dc_rd_burst_buf ? 6'd16 : 6'd4);
+    assign dc_rd_buf_conflict = rd_wr_conflict(dc_rd_buf_addr, is_dc_rd_burst_buf ? DC_WR_BYTES[5:0] : 6'd4);
 
     // ============================================================
     // Cache 侧握手 — 纯解耦，仅看 buffer 是否空
@@ -245,8 +257,8 @@ module cache_axi_bridge (
     assign arid    = dc_rd_buf_win ? 4'd1 : 4'd0;
     assign araddr  = dc_rd_buf_win ? dc_rd_buf_addr : ic_rd_buf_addr;
     assign arsize  = 3'b010;
-    assign arlen   = dc_rd_buf_win ? (is_dc_rd_burst_buf ? 8'h03 : 8'h00)
-                                    : (is_ic_rd_burst_buf  ? 8'h03 : 8'h00);
+    assign arlen   = dc_rd_buf_win ? (is_dc_rd_burst_buf ? DC_BURST_LEN[7:0] : 8'h00)
+                                    : (is_ic_rd_burst_buf  ? IC_BURST_LEN[7:0] : 8'h00);
 
     // ============================================================
     // 读响应 — 直通，按 rid 分发
@@ -264,7 +276,7 @@ module cache_axi_bridge (
     // ========== 写握手寄存器 ==========
     reg         wr_aw_done_r;  // AW 已握手
     reg         wr_w_done_r;   // W  已完成（单拍=一拍/ Burst=最后一拍）
-    reg  [ 1:0] wr_beat;       // W beat 计数（0..3）
+    reg  [DC_BEAT_W-1:0] wr_beat;       // W beat 计数（0..3）
 
     // ============================================================
     // 写路径 — 握手（Buffer → 总线）
@@ -274,7 +286,7 @@ module cache_axi_bridge (
 
     wire w_done;
     assign w_done = (dc_wr_buf_valid && wready && !wr_pend_full
-                     && (is_dc_wr_burst_buf ? (wr_beat == 2'd3) : 1'b1))
+                     && (is_dc_wr_burst_buf ? (wr_beat == DC_BURST_LEN) : 1'b1))
                      || wr_w_done_r;
 
     wire single_wr_done;
@@ -285,23 +297,23 @@ module cache_axi_bridge (
         if (reset) begin
             wr_aw_done_r <= 1'b0;
             wr_w_done_r  <= 1'b0;
-            wr_beat      <= 2'd0;
+            wr_beat      <= {DC_BEAT_W{1'b0}};
         end
         else begin
             if (dc_wr_buf_valid && awready && !wr_pend_full && !wr_aw_done_r)
                 wr_aw_done_r <= 1'b1;
             if (dc_wr_buf_valid && wready && !wr_pend_full
-                && (is_dc_wr_burst_buf ? (wr_beat == 2'd3) : 1'b1)
+                && (is_dc_wr_burst_buf ? (wr_beat == DC_BURST_LEN) : 1'b1)
                 && !wr_w_done_r)
                 wr_w_done_r <= 1'b1;
             if ((aw_done && w_done)) begin
                 wr_aw_done_r <= 1'b0;
                 wr_w_done_r  <= 1'b0;
             end
-            if (dc_wr_buf_valid && wready && !wr_pend_full && is_dc_wr_burst_buf && wr_beat != 2'd3)
-                wr_beat <= wr_beat + 2'd1;
+            if (dc_wr_buf_valid && wready && !wr_pend_full && is_dc_wr_burst_buf && wr_beat != DC_BURST_LEN)
+                wr_beat <= wr_beat + 1'b1;
             else if ((aw_done && w_done))
-                wr_beat <= 2'd0;
+                wr_beat <= {DC_BEAT_W{1'b0}};
         end
     end
 
@@ -312,7 +324,7 @@ module cache_axi_bridge (
             dc_wr_buf_type  <= 3'b010;
             dc_wr_buf_addr  <= 32'b0;
             dc_wr_buf_wstrb <= 4'b0;
-            dc_wr_buf_data  <= 128'b0;
+            dc_wr_buf_data  <= {32*DC_BEATS{1'b0}};
         end
         else if ((dcache_wr_req && dcache_wr_rdy)) begin
             dc_wr_buf_valid <= 1'b1;
@@ -332,14 +344,14 @@ module cache_axi_bridge (
     assign awvalid = dc_wr_buf_valid && !wr_aw_done_r && !wr_pend_full;
     assign awaddr  = dc_wr_buf_valid ? dc_wr_buf_addr : 32'b0;
     assign awsize  = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? 3'b010 : dc_wr_buf_type) : 3'b010;
-    assign awlen   = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? 8'h03 : 8'h00) : 8'h00;
+    assign awlen   = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? DC_BURST_LEN[7:0] : 8'h00) : 8'h00;
 
     assign wid    = 4'd1;
     assign wvalid = dc_wr_buf_valid && !wr_pend_full
                   && (is_dc_wr_burst_buf || !wr_w_done_r);
     assign wdata  = dc_wr_buf_valid ? dc_wr_buf_data[wr_beat * 32 +: 32] : 32'b0;
     assign wstrb  = dc_wr_buf_valid ? dc_wr_buf_wstrb : 4'b0;
-    assign wlast  = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? (wr_beat == 2'd3) : 1'b1) : 1'b0;
+    assign wlast  = dc_wr_buf_valid ? (is_dc_wr_burst_buf ? (wr_beat == DC_BURST_LEN) : 1'b1) : 1'b0;
 
     // ========== 写完成检测 ==========
     wire wr_complete;
@@ -366,7 +378,7 @@ module cache_axi_bridge (
                     wr_pend_addr[wr_pend_wptr]  <= dc_wr_buf_addr;
                     wr_pend_bytes[wr_pend_wptr] <= single_wr_done
                                                   ? wr_total_bytes(dc_wr_buf_type)
-                                                  : 6'd16;
+                                                  : DC_WR_BYTES[5:0];
                     wr_pend_wptr <= wr_pend_wptr + 2'd1;
                     wr_pend_cnt  <= wr_pend_cnt  + 3'd1;
                 end
@@ -378,7 +390,7 @@ module cache_axi_bridge (
                     wr_pend_addr[wr_pend_wptr]  <= dc_wr_buf_addr;
                     wr_pend_bytes[wr_pend_wptr] <= single_wr_done
                                                   ? wr_total_bytes(dc_wr_buf_type)
-                                                  : 6'd16;
+                                                  : DC_WR_BYTES[5:0];
                     wr_pend_wptr <= wr_pend_wptr + 2'd1;
                     wr_pend_rptr <= wr_pend_rptr + 2'd1;
                 end

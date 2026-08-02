@@ -205,9 +205,10 @@
 // ICache 参数定义
 // ============================================================================
 `define I_WAY_NUM       2
-`define I_INDEX_WIDTH   8
+`define I_INDEX_WIDTH   6
 `define I_TAG_WIDTH     20
-`define I_OFFSET_WIDTH  4
+`define I_OFFSET_WIDTH  6
+`define I_LINE_WORDS    (1 << (`I_OFFSET_WIDTH - 2))  // = 16
 
 // ============================================================================
 // DCache 参数定义
@@ -216,4 +217,5 @@
 `define D_INDEX_WIDTH   8
 `define D_TAG_WIDTH     20
 `define D_OFFSET_WIDTH  4
+`define D_LINE_WORDS    (1 << (`D_OFFSET_WIDTH - 2))  // = 4
 `endif

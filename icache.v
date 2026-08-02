@@ -48,7 +48,8 @@ module icache (
     // 局部参数
     // ============================================================
     localparam INDEX_DEPTH = 1 << `I_INDEX_WIDTH;
-    localparam BANK_NUM    = 4;
+    localparam BANK_NUM    = 1 << (`I_OFFSET_WIDTH - 2);
+    localparam BANK_IDX_W  = $clog2(BANK_NUM);
     localparam WAY_IDX_W   = $clog2(`I_WAY_NUM);
     localparam PLRU_W      = `I_WAY_NUM - 1;
     localparam TAGV_BYTES  = (`I_TAG_WIDTH + 1 + 7) / 8;
@@ -94,7 +95,7 @@ module icache (
     reg  [`I_OFFSET_WIDTH-1:0] refill_offset;
     reg                      refill_cached;
     reg  [WAY_IDX_W-1:0]     refill_replace_way;
-    reg  [ 1:0]              refill_cnt;
+    reg  [BANK_IDX_W-1:0]      refill_cnt;
     reg  [31:0]              refill_line [0:BANK_NUM-1];
     reg  [`I_WAY_NUM-1:0]      refill_way_hit_r;
 
@@ -297,7 +298,7 @@ module icache (
             refill_offset       <= req_offset;
             refill_cached       <= lookup_cache;
             refill_replace_way  <= replace_way;
-            refill_cnt          <= 2'd0;
+            refill_cnt          <= {BANK_IDX_W{1'b0}};
             refill_way_hit_r    <= way_hit;
         end
         else if (main_refill && return_valid) begin
@@ -311,7 +312,7 @@ module icache (
     // 数据处理
     // ============================================================
     // lookup返回数据
-    wire [31:0] lookup_rdata = bank_rdata[hit_way_idx][req_offset[3:2]];
+    wire [31:0] lookup_rdata = bank_rdata[hit_way_idx][req_offset[`I_OFFSET_WIDTH-1:2]];
 
     // 输出 FIFO
     reg  [31:0] cpu_fifo_mem [0:3];
@@ -324,7 +325,7 @@ module icache (
     wire cpu_fifo_re    = cpu_accept && !cpu_fifo_empty;
     
     wire lookup_read_hit_done  = main_lookup && cache_hit;
-    wire refill_read_miss_done = main_refill && return_valid && (refill_cnt == refill_offset[3:2] || !refill_cached);
+    wire refill_read_miss_done = main_refill && return_valid && (refill_cnt == refill_offset[`I_OFFSET_WIDTH-1:2] || !refill_cached);
     
     wire [31:0] live_rdata = lookup_read_hit_done  ? lookup_rdata :
                              refill_read_miss_done ? return_data : 32'd0;
@@ -432,7 +433,7 @@ module icache (
 
     assign rd_type = rd_addr_cached ? 3'b100 : 3'b010;
     
-    assign rd_addr = rd_addr_cached ? {rd_addr_tag, rd_addr_index, 4'b0000} : {rd_addr_tag, rd_addr_index, rd_addr_offset};
+    assign rd_addr = rd_addr_cached ? {rd_addr_tag, rd_addr_index, {`I_OFFSET_WIDTH{1'b0}}} : {rd_addr_tag, rd_addr_index, rd_addr_offset};
 
     wire [`I_TAG_WIDTH-1:0]    rd_addr_tag    = main_lookup ? lookup_tag    : refill_tag;
     wire                     rd_addr_cached = main_lookup ? lookup_cache  : refill_cached;

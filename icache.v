@@ -139,60 +139,89 @@ module icache (
             assign tag_diff[gh]  = tagv_rdata[gh][`I_TAG_WIDTH:1] ^ lookup_tag;
             assign tag_match[gh] = ~(|tag_diff[gh]);
             assign way_hit[gh]   = tagv_rdata[gh][0]
-                                 && tag_match[gh]
-                                 && (lookup_cache || cacop_en_r);
+                                 && tag_match[gh];
         end
     endgenerate
 
-    wire cache_hit = (|way_hit) && !cacop_en_r && !lookup_cancel;
+    wire cache_hit = (|way_hit) && lookup_cache && !cacop_en_r && !lookup_cancel;
     
     // ============================================================
     // 命中路号编码
     // ============================================================
-    reg  [WAY_IDX_W-1:0] hit_way_idx;
-    integer hwi;
-    always @(*) begin
-        hit_way_idx = {WAY_IDX_W{1'b0}};
-        for (hwi = 0; hwi < `I_WAY_NUM; hwi = hwi + 1)
-            if (way_hit[hwi]) hit_way_idx = hwi[WAY_IDX_W-1:0];
-    end
+    wire [WAY_IDX_W-1:0] hit_way_idx;
+    genvar hb, hw;
+    generate
+        for (hb = 0; hb < WAY_IDX_W; hb = hb + 1) begin : hit_enc
+            wire [`I_WAY_NUM-1:0] hit_term;
+            for (hw = 0; hw < `I_WAY_NUM; hw = hw + 1) begin : hit_bit
+                if ((hw >> hb) & 1'b1)
+                    assign hit_term[hw] = way_hit[hw];
+                else
+                    assign hit_term[hw] = 1'b0;
+            end
+            assign hit_way_idx[hb] = |hit_term;
+        end
+    endgenerate
     
     // ============================================================
     // 替换路号计算
     // ============================================================
     // 无效路计算
-    reg  [WAY_IDX_W-1:0] invalid_way;
-    reg                  has_invalid;
-    integer vwi;
-    always @(*) begin
-        has_invalid = 1'b0;
-        invalid_way = {WAY_IDX_W{1'b0}};
-        for (vwi = `I_WAY_NUM-1; vwi >= 0; vwi = vwi - 1)
-            if (!tagv_rdata[vwi][0]) begin
-                has_invalid = 1'b1;
-                invalid_way = vwi[WAY_IDX_W-1:0];
+    wire                  has_invalid;
+    wire [WAY_IDX_W-1:0]  invalid_way;
+
+    wire [`I_WAY_NUM-1:0] way_invalid;
+    genvar iw;
+    generate
+        for (iw = 0; iw < `I_WAY_NUM; iw = iw + 1) begin : inv_flag
+            assign way_invalid[iw] = !tagv_rdata[iw][0];
+        end
+    endgenerate
+    assign has_invalid = |way_invalid;
+
+    // 高于当前路号的 V 位全有效检测（自顶向下前缀 AND）
+    wire [`I_WAY_NUM-1:0] higher_valid;
+    assign higher_valid[`I_WAY_NUM-1] = 1'b1;
+    genvar hv;
+    generate
+        for (hv = 0; hv < `I_WAY_NUM - 1; hv = hv + 1) begin : hv_chain
+            assign higher_valid[hv] = higher_valid[hv+1] && tagv_rdata[hv+1][0];
+        end
+    endgenerate
+
+    // 每位由符合条件的路号 OR 产生
+    genvar ib;
+    generate
+        for (ib = 0; ib < WAY_IDX_W; ib = ib + 1) begin : inv_enc
+            wire [`I_WAY_NUM-1:0] inv_term;
+            for (iw = 0; iw < `I_WAY_NUM; iw = iw + 1) begin : inv_bit
+                if ((iw >> ib) & 1'b1)
+                    assign inv_term[iw] = way_invalid[iw] && higher_valid[iw];
+                else
+                    assign inv_term[iw] = 1'b0;
             end
-    end
+            assign invalid_way[ib] = |inv_term;
+        end
+    endgenerate
     
     // PLRU 预计算 — accept 拍遍历 PLRU 树
     reg  [PLRU_W-1:0]  plru [0:INDEX_DEPTH-1];
+
     reg  [WAY_IDX_W:0] plru_node_pre;
-    wire pre_plru_en = accept_new_req;
-    wire [`I_INDEX_WIDTH-1:0] pre_plru_index = ram_raddr;
-   
     integer plv_pre;
     always @(*) begin
         plru_node_pre = 1;
         for (plv_pre = 0; plv_pre < WAY_IDX_W; plv_pre = plv_pre + 1)
-            plru_node_pre = (plru_node_pre << 1) + plru[pre_plru_index][plru_node_pre-1];
+            plru_node_pre = (plru_node_pre << 1) + plru[ram_raddr][plru_node_pre-1];
     end
-    wire [WAY_IDX_W-1:0] plru_victim_pre = plru_node_pre - `I_WAY_NUM;
+    wire [WAY_IDX_W-1:0] plru_victim_pre;
+    assign plru_victim_pre = plru_node_pre - `I_WAY_NUM;
 
     reg  [WAY_IDX_W-1:0] plru_victim_r;
     always @(posedge clk) begin
         if (~resetn)
             plru_victim_r <= {WAY_IDX_W{1'b0}};
-        else if (pre_plru_en)
+        else if (accept_new_req)
             plru_victim_r <= plru_victim_pre;
     end
     
@@ -216,10 +245,8 @@ module icache (
     wire main_idle_lookup  = main_idle   && accept_new_req;
 
     wire main_lookup_cancel = main_lookup && lookup_cancel;
-    wire main_lookup_refill = main_lookup && !lookup_cancel
-                            && (cacop_en_r || (!cache_hit && rd_rdy));
-    wire main_lookup_waitrd = main_lookup && !cache_hit && !rd_rdy
-                            && !cacop_en_r && !lookup_cancel;
+    wire main_lookup_refill = main_lookup && !lookup_cancel && cacop_en_r;
+    wire main_lookup_waitrd = main_lookup && !cache_hit && !cacop_en_r && !lookup_cancel;
     wire main_lookup_hit    = main_lookup && cache_hit
                             && !cacop_en_r && !lookup_cancel;
 
@@ -429,16 +456,11 @@ module icache (
     // ============================================================
     // AXI 读请求
     // ============================================================
-    assign rd_req = (main_lookup && !cache_hit && !cacop_en_r && !lookup_cancel) || main_waitrd;
+    assign rd_req = main_waitrd;
 
-    assign rd_type = rd_addr_cached ? 3'b100 : 3'b010;
-    
-    assign rd_addr = rd_addr_cached ? {rd_addr_tag, rd_addr_index, {`I_OFFSET_WIDTH{1'b0}}} : {rd_addr_tag, rd_addr_index, rd_addr_offset};
+    assign rd_type = refill_cached ? 3'b100 : 3'b010;
 
-    wire [`I_TAG_WIDTH-1:0]    rd_addr_tag    = main_lookup ? lookup_tag    : refill_tag;
-    wire                     rd_addr_cached = main_lookup ? lookup_cache  : refill_cached;
-    wire [`I_INDEX_WIDTH-1:0]  rd_addr_index  = main_lookup ? req_index  : refill_index;
-    wire [`I_OFFSET_WIDTH-1:0] rd_addr_offset = main_lookup ? req_offset : refill_offset;
+    assign rd_addr = refill_cached ? {refill_tag, refill_index, {`I_OFFSET_WIDTH{1'b0}}} : {refill_tag, refill_index, refill_offset};
 
     // ============================================================
     // 性能计数器

@@ -186,12 +186,11 @@ module dcache (
             assign tag_diff[gh]  = tagv_rdata[gh][`D_TAG_WIDTH:1] ^ mmu_tag;
             assign tag_match[gh] = ~(|tag_diff[gh]);
             assign way_hit[gh]   = tagv_rdata[gh][0]
-                                 && tag_match[gh]
-                                 && (lookup_cached || cacop_en_r);
+                                 && tag_match[gh];
         end
     endgenerate
 
-    wire cache_hit = (|way_hit) && !cacop_en_r && !mmu_cancel;
+    wire cache_hit = (|way_hit) && lookup_cached && !cacop_en_r && !mmu_cancel;
 
     // VC 命中判断 — XOR 树同时比较 tag（20-bit）和 index（8-bit）
     wire [`D_TAG_WIDTH-1:0] vc_tag_diff    [0:3];
@@ -208,23 +207,29 @@ module dcache (
             assign vc_idx_match[gvc] = ~(|vc_idx_diff[gvc]);
             assign vc_way_hit[gvc]   = vc_tagv[gvc][0]
                                     && vc_tag_match[gvc]
-                                    && vc_idx_match[gvc]
-                                    && (lookup_cached || cacop_en_r);
+                                    && vc_idx_match[gvc];
         end
     endgenerate
 
-    wire vc_way_hit_any = |vc_way_hit && !cacop_en_r && !mmu_cancel;
+    wire vc_way_hit_any = |vc_way_hit && lookup_cached && !cacop_en_r && !mmu_cancel;
     
     // ============================================================
     // 命中路号编码
     // ============================================================
-    reg  [WAY_IDX_W-1:0] hit_way_idx;
-    integer hwi;
-    always @(*) begin
-        hit_way_idx = {WAY_IDX_W{1'b0}};
-        for (hwi = 0; hwi < `D_WAY_NUM; hwi = hwi + 1)
-            if (way_hit[hwi]) hit_way_idx = hwi[WAY_IDX_W-1:0];
-    end
+    wire [WAY_IDX_W-1:0] hit_way_idx;
+    genvar hb, hw;
+    generate
+        for (hb = 0; hb < WAY_IDX_W; hb = hb + 1) begin : hit_enc
+            wire [`D_WAY_NUM-1:0] hit_term;
+            for (hw = 0; hw < `D_WAY_NUM; hw = hw + 1) begin : hit_bit
+                if ((hw >> hb) & 1'b1)
+                    assign hit_term[hw] = way_hit[hw];
+                else
+                    assign hit_term[hw] = 1'b0;
+            end
+            assign hit_way_idx[hb] = |hit_term;
+        end
+    endgenerate
 
     // LOOKUP 拍组合 VC 索引（供 load 数据选择）
     wire [1:0] vc_hitway_idx = vc_way_hit[0] ? 2'd0 : vc_way_hit[1] ? 2'd1 :
@@ -234,18 +239,42 @@ module dcache (
     // 替换路号计算
     // ============================================================   
     // 无效路计算
-    reg  [WAY_IDX_W-1:0] invalid_way;
-    reg                  has_invalid;
-    integer vwi;
-    always @(*) begin
-        has_invalid = 1'b0;
-        invalid_way = {WAY_IDX_W{1'b0}};
-        for (vwi = `D_WAY_NUM-1; vwi >= 0; vwi = vwi - 1)
-            if (!tagv_rdata[vwi][0]) begin
-                has_invalid = 1'b1;
-                invalid_way = vwi[WAY_IDX_W-1:0];
+    wire                  has_invalid;
+    wire [WAY_IDX_W-1:0]  invalid_way;
+
+    wire [`D_WAY_NUM-1:0] way_invalid;
+    genvar iw;
+    generate
+        for (iw = 0; iw < `D_WAY_NUM; iw = iw + 1) begin : inv_flag
+            assign way_invalid[iw] = !tagv_rdata[iw][0];
+        end
+    endgenerate
+    assign has_invalid = |way_invalid;
+
+    // 高于当前路号的 V 位全有效检测（自顶向下前缀 AND）
+    wire [`D_WAY_NUM-1:0] higher_valid;
+    assign higher_valid[`D_WAY_NUM-1] = 1'b1;
+    genvar hv;
+    generate
+        for (hv = 0; hv < `D_WAY_NUM - 1; hv = hv + 1) begin : hv_chain
+            assign higher_valid[hv] = higher_valid[hv+1] && tagv_rdata[hv+1][0];
+        end
+    endgenerate
+
+    // 每位由符合条件的路号 OR 产生
+    genvar ib;
+    generate
+        for (ib = 0; ib < WAY_IDX_W; ib = ib + 1) begin : inv_enc
+            wire [`D_WAY_NUM-1:0] inv_term;
+            for (iw = 0; iw < `D_WAY_NUM; iw = iw + 1) begin : inv_bit
+                if ((iw >> ib) & 1'b1)
+                    assign inv_term[iw] = way_invalid[iw] && higher_valid[iw];
+                else
+                    assign inv_term[iw] = 1'b0;
             end
-    end
+            assign invalid_way[ib] = |inv_term;
+        end
+    endgenerate
 
     // PLRU 预计算
     reg  [PLRU_W-1:0] plru [0:INDEX_DEPTH-1];
@@ -329,8 +358,9 @@ module dcache (
 
     wire main_idle_lookup   = main_idle   && accept_new_req;
 
-    wire main_lookup_reread = main_lookup && cache_miss && !mmu_cancel;
-    wire main_lookup_lookup = main_lookup && cache_hit && accept_new_req;
+    wire main_lookup_reread       = main_lookup && cache_miss && (lookup_cached || cacop_en_r) && !mmu_cancel;
+    wire main_lookup_uncached_miss = main_lookup && cache_miss && !lookup_cached && !cacop_en_r && !mmu_cancel;
+    wire main_lookup_lookup        = main_lookup && cache_hit && accept_new_req;
 
     wire main_reread_waitwr = main_reread;
 
@@ -363,6 +393,7 @@ module dcache (
         main_next = MAIN_IDLE;
         if (main_idle_lookup)                              main_next = MAIN_LOOKUP;
         if (main_lookup_lookup)                            main_next = MAIN_LOOKUP;
+        if (main_lookup_uncached_miss)                     main_next = MAIN_WAITWR;
         if (main_lookup_reread)                            main_next = MAIN_REREAD;
         if (main_reread_waitwr)                            main_next = MAIN_WAITWR;
         if (main_waitwr_vc_idle)                           main_next = MAIN_IDLE;

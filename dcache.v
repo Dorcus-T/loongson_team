@@ -6,19 +6,19 @@ module dcache (
     input  wire                 resetn,
 
     // CPU 流水线接口
-    input  wire                    cpu_req,
-    input  wire                    cpu_op,
+    input  wire                     cpu_req,
+    input  wire                     cpu_op,
     input  wire [`INDEX_WIDTH-1:0]  cpu_index,
     input  wire [ `TAG_WIDTH-1:0]   mmu_tag,
     input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
-    input  wire [ 3:0]             cpu_wstrb,
-    input  wire [31:0]             cpu_wdata,
-    input  wire                    mmu_cache,
-    input  wire                    mmu_cancel,
-    output wire                    cpu_addr_ok,
-    output wire                    cpu_data_ok,
-    output wire [31:0]             cpu_rdata,
-    input  wire                    cpu_accept,
+    input  wire [ 3:0]              cpu_wstrb,
+    input  wire [31:0]              cpu_wdata,
+    input  wire                     mmu_cache,
+    input  wire                     mmu_cancel,
+    output wire                     cpu_addr_ok,
+    output wire                     cpu_data_ok,
+    output wire [31:0]              cpu_rdata,
+    input  wire                     cpu_accept,
 
     // AXI 总线接口
     output wire                 rd_req,
@@ -40,18 +40,16 @@ module dcache (
     input  wire                    cacop_en,
     input  wire [ 4:0]             cacop_code,
     input  wire [31:0]             cacop_va,
-    input  wire [`TAG_WIDTH-1:0]   cacop_tag,
-    output wire                    cacop_rdy
+    output wire                    cacop_rdy,
 
     // debug
-    output wire [ 5:0]              debug_main_state,
+    output wire [ 6:0]              debug_main_state,
     output wire                     debug_rd_req,
     output wire [`TAG_WIDTH-1:0]    debug_mmu_tag,
     output wire [`INDEX_WIDTH-1:0]  debug_cpu_index,
     output wire                     debug_refill_cached,
     output wire [`INDEX_WIDTH-1:0]  debug_refill_index,
     output wire [`INDEX_WIDTH-1:0]  debug_req_index
-);
 );
 
     // ============================================================
@@ -77,13 +75,13 @@ module dcache (
     // ============================================================
     // RAM 存储阵列
     // ============================================================
-    wire [`TAG_WIDTH:0]  tagv_rdata [0:`WAY_NUM-1];
-    reg                  d_rdata    [0:`WAY_NUM-1];
-    wire [31:0]          bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
-    reg                  d_ram      [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
-    reg  [`TAG_WIDTH:0]  vc_tagv    [0:3];
+    wire [`TAG_WIDTH:0]     tagv_rdata [0:`WAY_NUM-1];
+    reg                     d_rdata    [0:`WAY_NUM-1];
+    wire [31:0]             bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
+    reg                     d_ram      [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
+    reg  [`TAG_WIDTH:0]     vc_tagv    [0:3];
     reg  [`INDEX_WIDTH-1:0] vc_index [0:3];   // VC 条目 index — 命中需 tag+index 双匹配
-    reg  [31:0]          vc_bank    [0:3][0:BANK_NUM-1];
+    reg  [31:0]             vc_bank    [0:3][0:BANK_NUM-1];
 
     // ============================================================
     // 状态机有关，主状态机和wb状态机
@@ -143,8 +141,8 @@ module dcache (
     // ============================================================
     // CACOP 组合译码
     // ============================================================
-    wire cacop_is_index  = cacop_en && (cacop_code[4:3] != 2'b10);
-    wire cacop_is_hit    = cacop_en && (cacop_code[4:3] == 2'b10);
+    wire cacop_is_index  =  cacop_en && (cacop_code[4:3] != 2'b10);
+    wire cacop_is_hit    =  cacop_en && (cacop_code[4:3] == 2'b10);
     wire [`INDEX_WIDTH-1:0] cacop_index = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
     wire [WAY_IDX_W-1:0]    cacop_way   = cacop_va[WAY_IDX_W-1:0];
      
@@ -153,9 +151,9 @@ module dcache (
     // ============================================================
     // 统一 RAM 读控制
     wire ram_read_en = accept_new_req || main_reread;
-    wire [`INDEX_WIDTH-1:0] ram_raddr = main_reread ? refill_index
-                                      : cacop_en    ? cacop_index
-                                                    : cpu_index;
+
+    wire [`INDEX_WIDTH-1:0] ram_raddr = main_reread ? refill_index :
+                                        cacop_en    ? cacop_index  : cpu_index;
 
     // accept_new_req — (IDLE || LOOKUP hit) && !冲突 && accept_ok
     wire accept_new_req = accept_ok && (cpu_req || cacop_en) && (main_idle || (main_lookup && cache_hit)) 
@@ -176,15 +174,13 @@ module dcache (
     // ============================================================
     // Tag 比较与命中判断
     // ============================================================
-    wire                  lookup_cached = cacop_en_r ? 1'b1        : mmu_cache;
+    wire lookup_cached = cacop_en_r ? 1'b1 : mmu_cache;
 
     wire [`WAY_NUM-1:0] way_hit;
     genvar gh;
     generate
         for (gh = 0; gh < `WAY_NUM; gh = gh + 1) begin : way_hit_gen
-            assign way_hit[gh] = tagv_rdata[gh][0]
-                               && (tagv_rdata[gh][`TAG_WIDTH:1] == mmu_tag)
-                               && (lookup_cached || cacop_en_r);
+            assign way_hit[gh] = tagv_rdata[gh][0] && (tagv_rdata[gh][`TAG_WIDTH:1] == mmu_tag) && (lookup_cached || cacop_en_r);
         end
     endgenerate
 
@@ -256,16 +252,19 @@ module dcache (
     end
 
     // 替换路号
-    wire [WAY_IDX_W-1:0] replace_way = cacop_en_r ? ((cacop_code_r[4:3] == 2'b10) ? hit_way_idx : cacop_way_r)
-                                                  : (has_invalid ? invalid_way : plru_victim_r);
+    wire [WAY_IDX_W-1:0] replace_way = cacop_en_r ? ((cacop_code_r[4:3] == 2'b10) ? hit_way_idx : cacop_way_r) :
+                                                    (has_invalid ? invalid_way : plru_victim_r);
 
     // ============================================================
     // VC 更新
     // ============================================================
     // VC 更新 — 仅干净 victim 且 VC 未命中时追加（命中做交换，不走 FIFO）
     wire cache_write_vc = main_waitwr && tagv_rdata[refill_replace_way][0] && !d_rdata[refill_replace_way] && refill_cached && !cacop_en_r;
+    
     wire cacop_write_vc = main_refill && cacop_en_r && (cacop_code_r[4:3] == 2'b10) && |refill_vc_way_hit_r;
-    wire vc_invalidate = vc_write_cache && !(cache_write_vc && (vc_fifo_ptr == refill_vc_hitway_idx_r));
+    
+    wire vc_invalidate  = vc_write_cache && !(cache_write_vc && (vc_fifo_ptr == refill_vc_hitway_idx_r));
+    
     reg  [1:0] vc_fifo_ptr;
     
     always @(posedge clk) begin
@@ -375,8 +374,8 @@ module dcache (
     // ============================================================
     // PLRU 更新
     // ============================================================
-    wire                 plru_upd_en    = (main_lookup && cache_hit) || refill_tagv_we;
-    wire [WAY_IDX_W-1:0] plru_upd_way   = (main_lookup && cache_hit) ? hit_way_idx : refill_replace_way;
+    wire                    plru_upd_en    = (main_lookup && cache_hit) || refill_tagv_we;
+    wire [WAY_IDX_W-1:0]    plru_upd_way   = (main_lookup && cache_hit) ? hit_way_idx : refill_replace_way;
     wire [`INDEX_WIDTH-1:0] plru_upd_index = refill_tagv_we ? (cacop_en_r ? cacop_index_r : refill_index) : req_index;
 
     integer pnode, pparent, pui, prst;
@@ -475,11 +474,65 @@ module dcache (
                                ((wb_wdata & wb_wstrb_mask) | (lookup_bank_data & ~wb_wstrb_mask)) : lookup_bank_data;
 
     // REFILL 合并写数据
-    wire [3:0] req_wstrb_4b = {req_wstrb_mask[31], req_wstrb_mask[23], req_wstrb_mask[15], req_wstrb_mask[ 7]};
-    wire wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);
-    wire [31:0] refill_merged_word = (req_op && (refill_cnt == refill_offset[3:2]))
-                                     ? ((req_wdata & req_wstrb_mask) | (return_data & ~req_wstrb_mask))
-                                     : return_data;
+    wire [3:0]  req_wstrb_4b = {req_wstrb_mask[31], req_wstrb_mask[23], req_wstrb_mask[15], req_wstrb_mask[ 7]};
+    wire        wstrb_hw = (req_wstrb_4b == 4'b0011) || (req_wstrb_4b == 4'b1100);
+    wire [31:0] refill_merged_word = (req_op && (refill_cnt == refill_offset[3:2])) ?
+                                     ((req_wdata & req_wstrb_mask) | (return_data & ~req_wstrb_mask)) : 
+                                       return_data;
+   
+    // 输出 FIFO
+    reg  [31:0] cpu_fifo_mem [0:3];
+    reg  [ 1:0] cpu_fifo_wptr;
+    reg  [ 1:0] cpu_fifo_rptr;
+    reg  [ 2:0] cpu_fifo_cnt;
+
+    wire cpu_fifo_empty = (cpu_fifo_cnt == 3'd0);
+    wire cpu_fifo_we = (lookup_read_hit_done || refill_read_miss_done) && !(cpu_accept && cpu_fifo_empty);
+    wire cpu_fifo_re = cpu_accept && !cpu_fifo_empty;
+
+    wire lookup_read_hit_done  = main_lookup && (cache_hit || vc_way_hit_any) && !req_op;
+    wire lookup_write_done     = main_lookup && req_op && !mmu_cancel;
+    wire refill_read_miss_done = main_refill && return_valid && !req_op && (refill_cnt == refill_offset[3:2] || !refill_cached);
+
+    wire [31:0] live_rdata = lookup_read_hit_done  ? lookup_rdata :
+                             refill_read_miss_done ? return_data : 32'd0;
+
+    wire accept_ok = cpu_op || (cpu_fifo_cnt < 3'd3) || (cpu_fifo_cnt == 3'd3 && req_op);
+
+    assign cpu_addr_ok = accept_new_req && !cacop_en;
+    assign cacop_rdy   = accept_new_req && cacop_en;
+    assign cpu_data_ok = (lookup_read_hit_done || refill_read_miss_done || !cpu_fifo_empty) || lookup_write_done;
+    assign cpu_rdata   = cpu_fifo_empty ? live_rdata : cpu_fifo_mem[cpu_fifo_rptr];
+
+    integer oi;
+    always @(posedge clk) begin
+        if (~resetn) begin
+            cpu_fifo_wptr <= 2'd0;
+            cpu_fifo_rptr <= 2'd0;
+            cpu_fifo_cnt  <= 3'd0;
+            for (oi = 0; oi < 4; oi = oi + 1)
+                cpu_fifo_mem[oi] <= 32'b0;
+        end
+        else begin
+            case ({cpu_fifo_we, cpu_fifo_re})
+                2'b10: begin
+                    cpu_fifo_mem[cpu_fifo_wptr] <= live_rdata;
+                    cpu_fifo_wptr <= cpu_fifo_wptr + 2'd1;
+                    cpu_fifo_cnt  <= cpu_fifo_cnt  + 3'd1;
+                end
+                2'b01: begin
+                    cpu_fifo_rptr <= cpu_fifo_rptr + 2'd1;
+                    cpu_fifo_cnt  <= cpu_fifo_cnt  - 3'd1;
+                end
+                2'b11: begin
+                    cpu_fifo_mem[cpu_fifo_wptr] <= live_rdata;
+                    cpu_fifo_wptr <= cpu_fifo_wptr + 2'd1;
+                    cpu_fifo_rptr <= cpu_fifo_rptr + 2'd1;
+                end
+                default: ;
+            endcase
+        end
+    end
 
     // ============================================================
     // 存储数据管理
@@ -494,7 +547,7 @@ module dcache (
     genvar gt;
     generate
         for (gt = 0; gt < `WAY_NUM; gt = gt + 1) begin : tagv_ram_gen
-            wire tagv_wr = (refill_tagv_we && (refill_replace_way == gt)) || (vc_write_cache && (refill_replace_way == gt));
+            wire        tagv_wr = (refill_tagv_we && (refill_replace_way == gt)) || (vc_write_cache && (refill_replace_way == gt));
             wire        tagv_en  = tagv_wr || ram_read_en;
             wire [ 3:0] tagv_wen = tagv_wr ? tagv_wmask_sel : 4'b0;
             wire [`INDEX_WIDTH-1:0] tagv_addr = tagv_wr ? tagv_waddr_sel : ram_raddr;
@@ -583,62 +636,6 @@ module dcache (
     endgenerate
 
     // ============================================================
-    // 输出 FIFO
-    // ============================================================
-    reg  [31:0] cpu_fifo_mem [0:3];
-    reg  [ 1:0] cpu_fifo_wptr;
-    reg  [ 1:0] cpu_fifo_rptr;
-    reg  [ 2:0] cpu_fifo_cnt;
-
-    wire cpu_fifo_empty = (cpu_fifo_cnt == 3'd0);
-    wire cpu_fifo_we = (lookup_read_hit_done || refill_read_miss_done) && !(cpu_accept && cpu_fifo_empty);
-    wire cpu_fifo_re = cpu_accept && !cpu_fifo_empty;
-
-    wire lookup_read_hit_done  = main_lookup && (cache_hit || vc_way_hit_any) && !req_op;
-    wire lookup_write_done     = main_lookup && req_op && !mmu_cancel;
-    wire refill_read_miss_done = main_refill && return_valid && !req_op && (refill_cnt == refill_offset[3:2] || !refill_cached);
-
-    wire [31:0] live_rdata = lookup_read_hit_done  ? lookup_rdata :
-                             refill_read_miss_done ? return_data : 32'd0;
-
-    wire accept_ok = cpu_op || (cpu_fifo_cnt < 3'd3) || (cpu_fifo_cnt == 3'd3 && req_op);
-
-    assign cpu_addr_ok = accept_new_req && !cacop_en;
-    assign cacop_rdy   = accept_new_req && cacop_en;
-    assign cpu_data_ok = (lookup_read_hit_done || refill_read_miss_done || !cpu_fifo_empty) || lookup_write_done;
-    assign cpu_rdata   = cpu_fifo_empty ? live_rdata : cpu_fifo_mem[cpu_fifo_rptr];
-
-    integer oi;
-    always @(posedge clk) begin
-        if (~resetn) begin
-            cpu_fifo_wptr <= 2'd0;
-            cpu_fifo_rptr <= 2'd0;
-            cpu_fifo_cnt  <= 3'd0;
-            for (oi = 0; oi < 4; oi = oi + 1)
-                cpu_fifo_mem[oi] <= 32'b0;
-        end
-        else begin
-            case ({cpu_fifo_we, cpu_fifo_re})
-                2'b10: begin
-                    cpu_fifo_mem[cpu_fifo_wptr] <= live_rdata;
-                    cpu_fifo_wptr <= cpu_fifo_wptr + 2'd1;
-                    cpu_fifo_cnt  <= cpu_fifo_cnt  + 3'd1;
-                end
-                2'b01: begin
-                    cpu_fifo_rptr <= cpu_fifo_rptr + 2'd1;
-                    cpu_fifo_cnt  <= cpu_fifo_cnt  - 3'd1;
-                end
-                2'b11: begin
-                    cpu_fifo_mem[cpu_fifo_wptr] <= live_rdata;
-                    cpu_fifo_wptr <= cpu_fifo_wptr + 2'd1;
-                    cpu_fifo_rptr <= cpu_fifo_rptr + 2'd1;
-                end
-                default: ;
-            endcase
-        end
-    end
-
-    // ============================================================
     // AXI 交互
     // ============================================================
     // AXI读请求
@@ -646,28 +643,28 @@ module dcache (
 
     assign rd_type = refill_cached ? 3'b100 : 3'b010;
 
-    assign rd_addr = refill_cached
-                   ? {refill_tag, refill_index, 4'b0000}
-                   : {refill_tag, refill_index, refill_offset};
+    assign rd_addr = refill_cached ?
+                    {refill_tag, refill_index, 4'b0000} :
+                    {refill_tag, refill_index, refill_offset};
 
     // AXI 写请求 — 仅 WAITWR 状态
     assign wr_req = main_waitwr && wr_needs_write;
 
-    assign wr_type = !is_uncached_store ? 3'b100
-                   : (&req_wstrb_4b)     ? 3'b010
-                   : wstrb_hw            ? 3'b001
-                                         : 3'b000;
+    assign wr_type = !is_uncached_store ? 3'b100 :
+                    (&req_wstrb_4b)     ? 3'b010 :
+                    wstrb_hw            ? 3'b001 :
+                                        : 3'b000 ;
 
-    assign wr_addr = !is_uncached_store
-                   ? {tagv_rdata[refill_replace_way][`TAG_WIDTH:1], refill_index, 4'b0000}
-                   : {refill_tag, refill_index, refill_offset};
+    assign wr_addr = !is_uncached_store ?
+                     {tagv_rdata[refill_replace_way][`TAG_WIDTH:1], refill_index, 4'b0000} :
+                     {refill_tag, refill_index, refill_offset};
 
     assign wr_wstrb = !is_uncached_store ? 4'b1111 : req_wstrb_4b;
 
-    assign wr_data = !is_uncached_store
-                   ? {bank_rdata[refill_replace_way][3], bank_rdata[refill_replace_way][2],
-                      bank_rdata[refill_replace_way][1], bank_rdata[refill_replace_way][0]}
-                   : {96'd0, req_wdata};
+    assign wr_data = !is_uncached_store ?
+                     {bank_rdata[refill_replace_way][3], bank_rdata[refill_replace_way][2],
+                      bank_rdata[refill_replace_way][1], bank_rdata[refill_replace_way][0]} :
+                     {96'd0, req_wdata};
 
     // ============================================================
     // 性能计数器

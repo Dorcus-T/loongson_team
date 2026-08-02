@@ -220,9 +220,9 @@ module core_top (
     // ================================================================
     // ICache — CPU 侧连线
     // ================================================================
-    wire        icache_cpu_req;
-    wire [ 7:0] icache_cpu_index;
-    wire [ 3:0] icache_cpu_offset;
+    wire                        icache_cpu_req;
+    wire [`I_INDEX_WIDTH-1:0]   icache_cpu_index;
+    wire [`I_OFFSET_WIDTH-1:0]  icache_cpu_offset;
     wire        icache_cpu_addr_ok;
     wire        icache_cpu_data_ok;
     wire [31:0] icache_cpu_rdata;
@@ -231,10 +231,10 @@ module core_top (
     // ================================================================
     // DCache — CPU 侧连线
     // ================================================================
-    wire        dcache_cpu_req;
-    wire        dcache_cpu_op;
-    wire [ 7:0] dcache_cpu_index;
-    wire [ 3:0] dcache_cpu_offset;
+    wire                        dcache_cpu_req;
+    wire                        dcache_cpu_op;
+    wire [`D_INDEX_WIDTH-1:0]   dcache_cpu_index;
+    wire [`D_OFFSET_WIDTH-1:0]  dcache_cpu_offset;
     wire [ 3:0] dcache_cpu_wstrb;
     wire [31:0] dcache_cpu_wdata;
     wire        dcache_cpu_addr_ok;

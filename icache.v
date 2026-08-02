@@ -302,7 +302,7 @@ module icache (
             refill_way_hit_r    <= way_hit;
         end
         else if (main_refill && return_valid) begin
-            refill_cnt <= refill_cnt + 2'd1;
+            refill_cnt <= refill_cnt + 1'b1;
             if (refill_cached)
                 refill_line[refill_cnt] <= return_data;
         end

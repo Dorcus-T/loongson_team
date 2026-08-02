@@ -197,8 +197,8 @@ module core_top (
     wire [35:0] vtlb_enop;          // 发mmu tlbsrch，invtlb使能即操作数
     wire [ 1:0] ld_and_str;         // 发mmu load和store信号
     wire [ 2:0] tlbrwf_valid;       // tlbrd tlbwr tlbfill使能
-    wire [`TAG_WIDTH-1:0] if_tag;        // MMU → ICache 物理 tag
-    wire [`TAG_WIDTH-1:0] ex_tag;        // MMU → DCache 物理 tag
+    wire [`I_TAG_WIDTH-1:0] if_tag;        // MMU → ICache 物理 tag
+    wire [`D_TAG_WIDTH-1:0] ex_tag;        // MMU → DCache 物理 tag
     wire [31:0] pre_mem_paddr;      // MMU → mem_stage 物理地址
     wire        if_s0_need_mmu;      // if_stage → MMU
     wire        pre_mem_s1_need_mmu; // pre_mem → MMU
@@ -248,7 +248,6 @@ module core_top (
     wire [4:0]  cacop_code;
     wire        cacop_en_final;
     wire [31:0] cacop_va;
-    wire [`WAY_NUM-1:0] cacop_way;
     wire        icache_cacop_en;
     wire        dcache_cacop_en;
     assign icache_cacop_en = cacop_en_final && (cacop_code[2:0] == 3'd0);

@@ -236,9 +236,9 @@ module csr_regfile (
     // ============================================================
     wire [ 7:0] cpucfg_valen  = `VALEN - 1;
     wire [ 7:0] cpucfg_palen  = `PALEN - 1;
-    wire [ 3:0] cpucfg_offset = `OFFSET_WIDTH;
-    wire [ 7:0] cpucfg_index  = `INDEX_WIDTH;
-    wire [15:0] cpucfg_way_m1 = `WAY_NUM - 1;
+    wire [ 3:0] cpucfg_offset = `D_OFFSET_WIDTH;
+    wire [ 7:0] cpucfg_index  = `D_INDEX_WIDTH;
+    wire [15:0] cpucfg_way_m1 = `D_WAY_NUM - 1;
     // CPUCFG.1：基本架构 LA32, PGMMU=1
     assign csr_cpucfg1_rvalue  = {12'd0, cpucfg_valen, cpucfg_palen,
                                   1'b0, 1'b1, 2'd0};

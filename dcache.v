@@ -8,9 +8,9 @@ module dcache (
     // CPU 流水线接口
     input  wire                     cpu_req,
     input  wire                     cpu_op,
-    input  wire [`INDEX_WIDTH-1:0]  cpu_index,
-    input  wire [ `TAG_WIDTH-1:0]   mmu_tag,
-    input  wire [`OFFSET_WIDTH-1:0] cpu_offset,
+    input  wire [`D_INDEX_WIDTH-1:0]  cpu_index,
+    input  wire [ `D_TAG_WIDTH-1:0]   mmu_tag,
+    input  wire [`D_OFFSET_WIDTH-1:0] cpu_offset,
     input  wire [ 3:0]              cpu_wstrb,
     input  wire [31:0]              cpu_wdata,
     input  wire                     mmu_cache,
@@ -45,21 +45,21 @@ module dcache (
     // debug
     output wire [ 6:0]              debug_main_state,
     output wire                     debug_rd_req,
-    output wire [`TAG_WIDTH-1:0]    debug_mmu_tag,
-    output wire [`INDEX_WIDTH-1:0]  debug_cpu_index,
+    output wire [`D_TAG_WIDTH-1:0]    debug_mmu_tag,
+    output wire [`D_INDEX_WIDTH-1:0]  debug_cpu_index,
     output wire                     debug_refill_cached,
-    output wire [`INDEX_WIDTH-1:0]  debug_refill_index,
-    output wire [`INDEX_WIDTH-1:0]  debug_req_index
+    output wire [`D_INDEX_WIDTH-1:0]  debug_refill_index,
+    output wire [`D_INDEX_WIDTH-1:0]  debug_req_index
 );
 
     // ============================================================
     // 局部参数
     // ============================================================
-    localparam INDEX_DEPTH = 1 << `INDEX_WIDTH;
+    localparam INDEX_DEPTH = 1 << `D_INDEX_WIDTH;
     localparam BANK_NUM    = 4;
-    localparam WAY_IDX_W   = $clog2(`WAY_NUM);
-    localparam PLRU_W      = `WAY_NUM - 1;
-    localparam TAGV_BYTES  = (`TAG_WIDTH + 1 + 7) / 8;
+    localparam WAY_IDX_W   = $clog2(`D_WAY_NUM);
+    localparam PLRU_W      = `D_WAY_NUM - 1;
+    localparam TAGV_BYTES  = (`D_TAG_WIDTH + 1 + 7) / 8;
 
     localparam MAIN_IDLE       = 7'b0000001;
     localparam MAIN_LOOKUP     = 7'b0000010;
@@ -75,12 +75,12 @@ module dcache (
     // ============================================================
     // RAM 存储阵列
     // ============================================================
-    wire [`TAG_WIDTH:0]     tagv_rdata [0:`WAY_NUM-1];
-    reg                     d_rdata    [0:`WAY_NUM-1];
-    wire [31:0]             bank_rdata [0:`WAY_NUM-1][0:BANK_NUM-1];
-    reg                     d_ram      [0:`WAY_NUM-1][0:INDEX_DEPTH-1];
-    reg  [`TAG_WIDTH:0]     vc_tagv    [0:3];
-    reg  [`INDEX_WIDTH-1:0] vc_index [0:3];   // VC 条目 index — 命中需 tag+index 双匹配
+    wire [`D_TAG_WIDTH:0]     tagv_rdata [0:`D_WAY_NUM-1];
+    reg                     d_rdata    [0:`D_WAY_NUM-1];
+    wire [31:0]             bank_rdata [0:`D_WAY_NUM-1][0:BANK_NUM-1];
+    reg                     d_ram      [0:`D_WAY_NUM-1][0:INDEX_DEPTH-1];
+    reg  [`D_TAG_WIDTH:0]     vc_tagv    [0:3];
+    reg  [`D_INDEX_WIDTH-1:0] vc_index [0:3];   // VC 条目 index — 命中需 tag+index 双匹配
     reg  [31:0]             vc_bank    [0:3][0:BANK_NUM-1];
 
     // ============================================================
@@ -108,32 +108,32 @@ module dcache (
     // ============================================================
     // Request Buffer — accept_new_req 时更新，miss 处理期间稳定
     reg                      req_op;
-    reg  [`INDEX_WIDTH-1:0]  req_index;
-    reg  [`OFFSET_WIDTH-1:0] req_offset;
+    reg  [`D_INDEX_WIDTH-1:0]  req_index;
+    reg  [`D_OFFSET_WIDTH-1:0] req_offset;
     reg  [31:0]              req_wstrb_mask;
     reg  [31:0]              req_wdata;
     reg                      cacop_en_r;
     reg  [4:0]               cacop_code_r;
     reg  [WAY_IDX_W-1:0]     cacop_way_r;
-    reg  [`INDEX_WIDTH-1:0]  cacop_index_r;
+    reg  [`D_INDEX_WIDTH-1:0]  cacop_index_r;
     reg                      cacop_is_index_r;
     reg                      cacop_is_hit_r;
 
     // Refill Buffer — 总线读上下文 + REFILL 拼装（6 信号）
-    reg  [`INDEX_WIDTH-1:0]  refill_index;
-    reg  [`TAG_WIDTH-1:0]    refill_tag;
+    reg  [`D_INDEX_WIDTH-1:0]  refill_index;
+    reg  [`D_TAG_WIDTH-1:0]    refill_tag;
     reg                      refill_cached;
-    reg  [`OFFSET_WIDTH-1:0] refill_offset;
+    reg  [`D_OFFSET_WIDTH-1:0] refill_offset;
     reg  [WAY_IDX_W-1:0]     refill_replace_way;
     reg  [ 1:0]              refill_cnt;
     reg  [31:0]              refill_line [0:BANK_NUM-1];
-    reg  [`WAY_NUM-1:0]      refill_way_hit_r;
+    reg  [`D_WAY_NUM-1:0]      refill_way_hit_r;
     reg  [3:0]               refill_vc_way_hit_r;
     reg  [1:0]               refill_vc_hitway_idx_r;
 
     // Write Buffer — 命中 store 时写入，延迟写入 bank RAM
-    reg  [`WAY_NUM-1:0]     wb_way_hit;
-    reg  [`INDEX_WIDTH-1:0] wb_index;
+    reg  [`D_WAY_NUM-1:0]     wb_way_hit;
+    reg  [`D_INDEX_WIDTH-1:0] wb_index;
     reg  [ 1:0]             wb_bank;
     reg  [31:0]             wb_wstrb_mask;
     reg  [31:0]             wb_wdata;
@@ -143,7 +143,7 @@ module dcache (
     // ============================================================
     wire cacop_is_index  =  cacop_en && (cacop_code[4:3] != 2'b10);
     wire cacop_is_hit    =  cacop_en && (cacop_code[4:3] == 2'b10);
-    wire [`INDEX_WIDTH-1:0] cacop_index = cacop_va[`OFFSET_WIDTH +: `INDEX_WIDTH];
+    wire [`D_INDEX_WIDTH-1:0] cacop_index = cacop_va[`D_OFFSET_WIDTH +: `D_INDEX_WIDTH];
     wire [WAY_IDX_W-1:0]    cacop_way   = cacop_va[WAY_IDX_W-1:0];
      
      // ============================================================
@@ -152,7 +152,7 @@ module dcache (
     // 统一 RAM 读控制
     wire ram_read_en = accept_new_req || main_reread;
 
-    wire [`INDEX_WIDTH-1:0] ram_raddr = main_reread ? refill_index :
+    wire [`D_INDEX_WIDTH-1:0] ram_raddr = main_reread ? refill_index :
                                         cacop_en    ? cacop_index  : cpu_index;
 
     // accept_new_req — (IDLE || LOOKUP hit) && !冲突 && accept_ok
@@ -176,13 +176,13 @@ module dcache (
     // ============================================================
     wire                  lookup_cached = cacop_en_r ? 1'b1        : mmu_cache;
 
-    wire [`TAG_WIDTH-1:0] tag_diff     [0:`WAY_NUM-1];
-    wire                  tag_match    [0:`WAY_NUM-1];
-    wire [`WAY_NUM-1:0]   way_hit;
+    wire [`D_TAG_WIDTH-1:0] tag_diff     [0:`D_WAY_NUM-1];
+    wire                  tag_match    [0:`D_WAY_NUM-1];
+    wire [`D_WAY_NUM-1:0]   way_hit;
     genvar gh;
     generate
-        for (gh = 0; gh < `WAY_NUM; gh = gh + 1) begin : way_hit_gen
-            assign tag_diff[gh]  = tagv_rdata[gh][`TAG_WIDTH:1] ^ mmu_tag;
+        for (gh = 0; gh < `D_WAY_NUM; gh = gh + 1) begin : way_hit_gen
+            assign tag_diff[gh]  = tagv_rdata[gh][`D_TAG_WIDTH:1] ^ mmu_tag;
             assign tag_match[gh] = ~(|tag_diff[gh]);
             assign way_hit[gh]   = tagv_rdata[gh][0]
                                  && tag_match[gh]
@@ -193,15 +193,15 @@ module dcache (
     wire cache_hit = (|way_hit) && !cacop_en_r && !mmu_cancel;
 
     // VC 命中判断 — XOR 树同时比较 tag（20-bit）和 index（8-bit）
-    wire [`TAG_WIDTH-1:0] vc_tag_diff    [0:3];
+    wire [`D_TAG_WIDTH-1:0] vc_tag_diff    [0:3];
     wire                  vc_tag_match   [0:3];
-    wire [`INDEX_WIDTH-1:0] vc_idx_diff  [0:3];
+    wire [`D_INDEX_WIDTH-1:0] vc_idx_diff  [0:3];
     wire                  vc_idx_match   [0:3];
     wire [3:0] vc_way_hit;
     genvar gvc;
     generate
         for (gvc = 0; gvc < 4; gvc = gvc + 1) begin : vc_hit_gen
-            assign vc_tag_diff[gvc]  = vc_tagv[gvc][`TAG_WIDTH:1] ^ mmu_tag;
+            assign vc_tag_diff[gvc]  = vc_tagv[gvc][`D_TAG_WIDTH:1] ^ mmu_tag;
             assign vc_tag_match[gvc] = ~(|vc_tag_diff[gvc]);
             assign vc_idx_diff[gvc]  = vc_index[gvc] ^ req_index;
             assign vc_idx_match[gvc] = ~(|vc_idx_diff[gvc]);
@@ -221,7 +221,7 @@ module dcache (
     integer hwi;
     always @(*) begin
         hit_way_idx = {WAY_IDX_W{1'b0}};
-        for (hwi = 0; hwi < `WAY_NUM; hwi = hwi + 1)
+        for (hwi = 0; hwi < `D_WAY_NUM; hwi = hwi + 1)
             if (way_hit[hwi]) hit_way_idx = hwi[WAY_IDX_W-1:0];
     end
 
@@ -239,7 +239,7 @@ module dcache (
     always @(*) begin
         has_invalid = 1'b0;
         invalid_way = {WAY_IDX_W{1'b0}};
-        for (vwi = `WAY_NUM-1; vwi >= 0; vwi = vwi - 1)
+        for (vwi = `D_WAY_NUM-1; vwi >= 0; vwi = vwi - 1)
             if (!tagv_rdata[vwi][0]) begin
                 has_invalid = 1'b1;
                 invalid_way = vwi[WAY_IDX_W-1:0];
@@ -255,7 +255,7 @@ module dcache (
         for (plv_pre = 0; plv_pre < WAY_IDX_W; plv_pre = plv_pre + 1)
             plru_node_pre = (plru_node_pre << 1) + plru[ram_raddr][plru_node_pre-1];
     end
-    wire [WAY_IDX_W-1:0] plru_victim_pre = plru_node_pre - `WAY_NUM;
+    wire [WAY_IDX_W-1:0] plru_victim_pre = plru_node_pre - `D_WAY_NUM;
 
     reg  [WAY_IDX_W-1:0] plru_victim_r;
     always @(posedge clk) begin
@@ -286,14 +286,14 @@ module dcache (
             vc_fifo_ptr <= 2'd0;
             // VC 条目复位清 V — 否则 V 位为 x，x 会经 vc_way_hit 传播到
             // lookup_bank_data / lookup_read_hit_done 等数据选择路径
-            vc_tagv[0]   <= {(`TAG_WIDTH+1){1'b0}};
-            vc_tagv[1]   <= {(`TAG_WIDTH+1){1'b0}};
-            vc_tagv[2]   <= {(`TAG_WIDTH+1){1'b0}};
-            vc_tagv[3]   <= {(`TAG_WIDTH+1){1'b0}};
+            vc_tagv[0]   <= {(`D_TAG_WIDTH+1){1'b0}};
+            vc_tagv[1]   <= {(`D_TAG_WIDTH+1){1'b0}};
+            vc_tagv[2]   <= {(`D_TAG_WIDTH+1){1'b0}};
+            vc_tagv[3]   <= {(`D_TAG_WIDTH+1){1'b0}};
         end
         else begin
             if (cache_write_vc) begin
-                vc_tagv[vc_fifo_ptr]       <= {tagv_rdata[refill_replace_way][`TAG_WIDTH:1], 1'b1};
+                vc_tagv[vc_fifo_ptr]       <= {tagv_rdata[refill_replace_way][`D_TAG_WIDTH:1], 1'b1};
                 vc_index[vc_fifo_ptr]      <= refill_index;
                 vc_bank[vc_fifo_ptr][0]    <= bank_rdata[refill_replace_way][0];
                 vc_bank[vc_fifo_ptr][1]    <= bank_rdata[refill_replace_way][1];
@@ -401,7 +401,7 @@ module dcache (
     // ============================================================
     wire                    plru_upd_en    = (main_lookup && cache_hit) || refill_tagv_we;
     wire [WAY_IDX_W-1:0]    plru_upd_way   = (main_lookup && cache_hit) ? hit_way_idx : refill_replace_way;
-    wire [`INDEX_WIDTH-1:0] plru_upd_index = refill_tagv_we ? (cacop_en_r ? cacop_index_r : refill_index) : req_index;
+    wire [`D_INDEX_WIDTH-1:0] plru_upd_index = refill_tagv_we ? (cacop_en_r ? cacop_index_r : refill_index) : req_index;
 
     integer pnode, pparent, pui, prst;
     always @(posedge clk) begin
@@ -410,7 +410,7 @@ module dcache (
                 plru[prst] = {PLRU_W{1'b0}};
         end
         else if (plru_upd_en) begin
-            pnode = `WAY_NUM + plru_upd_way;
+            pnode = `D_WAY_NUM + plru_upd_way;
             for (pui = 0; pui < WAY_IDX_W; pui = pui + 1) begin
                 pparent = pnode >> 1;
                 plru[plru_upd_index][pparent-1] <= ~pnode[0];
@@ -426,14 +426,14 @@ module dcache (
     always @(posedge clk) begin
         if (~resetn) begin
             req_op           <= 1'b0;
-            req_index        <= {`INDEX_WIDTH{1'b0}};
-            req_offset       <= {`OFFSET_WIDTH{1'b0}};
+            req_index        <= {`D_INDEX_WIDTH{1'b0}};
+            req_offset       <= {`D_OFFSET_WIDTH{1'b0}};
             req_wstrb_mask   <= 32'd0;
             req_wdata        <= 32'd0;
             cacop_en_r       <= 1'b0;
             cacop_code_r     <= 5'b0;
             cacop_way_r      <= {WAY_IDX_W{1'b0}};
-            cacop_index_r    <= {`INDEX_WIDTH{1'b0}};
+            cacop_index_r    <= {`D_INDEX_WIDTH{1'b0}};
             cacop_is_index_r <= 1'b0;
             cacop_is_hit_r   <= 1'b0;
         end
@@ -564,29 +564,29 @@ module dcache (
     // ============================================================
     // TagV相关逻辑
     wire refill_tagv_we = main_refill && ((return_valid && return_last && refill_cached) || (cacop_en_r && ((cacop_code_r[4:3] == 2'b00)|| (cacop_code_r[4:3] == 2'b01) || ((cacop_code_r[4:3] == 2'b10) && (|refill_way_hit_r)))));
-    wire [`INDEX_WIDTH-1:0] tagv_waddr_sel = cacop_en_r ? cacop_index_r : refill_index;
+    wire [`D_INDEX_WIDTH-1:0] tagv_waddr_sel = cacop_en_r ? cacop_index_r : refill_index;
     wire [ 3:0]             tagv_wmask_sel = (cacop_en_r && (cacop_code_r[4:3] == 2'b01 || cacop_code_r[4:3] ==2'b10))  ? 4'b0001 : {TAGV_BYTES{1'b1}};
-    wire [`TAG_WIDTH:0]     tagv_wdata_sel = cacop_en_r ? { (`TAG_WIDTH+1){1'b0} } : vc_write_cache ? vc_tagv[refill_vc_hitway_idx_r] : {refill_tag, 1'b1};
+    wire [`D_TAG_WIDTH:0]     tagv_wdata_sel = cacop_en_r ? { (`D_TAG_WIDTH+1){1'b0} } : vc_write_cache ? vc_tagv[refill_vc_hitway_idx_r] : {refill_tag, 1'b1};
 
 
     genvar gt;
     generate
-        for (gt = 0; gt < `WAY_NUM; gt = gt + 1) begin : tagv_ram_gen
+        for (gt = 0; gt < `D_WAY_NUM; gt = gt + 1) begin : tagv_ram_gen
             wire        tagv_wr = (refill_tagv_we && (refill_replace_way == gt)) || (vc_write_cache && (refill_replace_way == gt));
             wire        tagv_en  = tagv_wr || ram_read_en;
             wire [ 3:0] tagv_wen = tagv_wr ? tagv_wmask_sel : 4'b0;
-            wire [`INDEX_WIDTH-1:0] tagv_addr = tagv_wr ? tagv_waddr_sel : ram_raddr;
+            wire [`D_INDEX_WIDTH-1:0] tagv_addr = tagv_wr ? tagv_waddr_sel : ram_raddr;
 
             sp_ram #(
-                .WIDTH (`TAG_WIDTH + 1),
+                .WIDTH (`D_TAG_WIDTH + 1),
                 .DEPTH (INDEX_DEPTH),
-                .ADDRW (`INDEX_WIDTH)
+                .ADDRW (`D_INDEX_WIDTH)
             ) u_tagv_ram (
                 .clk   (clk),
                 .en    (tagv_en),
                 .wen   (tagv_wen),
                 .addr  (tagv_addr),
-                .wdata ({ {32-(`TAG_WIDTH+1){1'b0}}, tagv_wdata_sel }),
+                .wdata ({ {32-(`D_TAG_WIDTH+1){1'b0}}, tagv_wdata_sel }),
                 .rdata (tagv_rdata[gt])
             );
         end
@@ -597,13 +597,13 @@ module dcache (
     integer d_idx;
     always @(posedge clk) begin
         if (~resetn) begin
-            for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1) begin
+            for (d_wi = 0; d_wi < `D_WAY_NUM; d_wi = d_wi + 1) begin
                 for (d_idx = 0; d_idx < INDEX_DEPTH; d_idx = d_idx + 1)
                     d_ram[d_wi][d_idx] = 1'b0;
             end
         end
         else begin
-            for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1) begin
+            for (d_wi = 0; d_wi < `D_WAY_NUM; d_wi = d_wi + 1) begin
                 if ((main_refill && return_valid && return_last && refill_cached) && (refill_replace_way == d_wi))
                     d_ram[d_wi][refill_index] <= req_op;
                 else if (vc_write_cache && (refill_replace_way == d_wi))
@@ -612,7 +612,7 @@ module dcache (
                     d_ram[d_wi][wb_index] <= 1'b1;
             end
             if (ram_read_en) begin
-                for (d_wi = 0; d_wi < `WAY_NUM; d_wi = d_wi + 1)    
+                for (d_wi = 0; d_wi < `D_WAY_NUM; d_wi = d_wi + 1)    
                     d_rdata[d_wi] <= d_ram[d_wi][ram_raddr];
             end
         end
@@ -621,7 +621,7 @@ module dcache (
     // Data Bank RAM 例化
     genvar gw, gb;
     generate
-        for (gw = 0; gw < `WAY_NUM; gw = gw + 1) begin : bank_ram_way
+        for (gw = 0; gw < `D_WAY_NUM; gw = gw + 1) begin : bank_ram_way
             for (gb = 0; gb < BANK_NUM; gb = gb + 1) begin : bank_ram_col
                 wire bank_wr_refill = main_refill && return_valid && return_last && (refill_replace_way == gw) && refill_cached;
                 wire bank_wr_hit    = wb_write && wb_way_hit[gw] && (wb_bank == gb);
@@ -631,7 +631,7 @@ module dcache (
                 wire [ 3:0] bank_wen = bank_wr_refill ? 4'b1111 :
                                        bank_wr_hit    ? {wb_wstrb_mask[24], wb_wstrb_mask[16], wb_wstrb_mask[ 8], wb_wstrb_mask[ 0]} :
                                        bank_wr_vc     ? 4'b1111 : 4'b0;
-                wire [`INDEX_WIDTH-1:0] bank_addr = bank_wr_refill ? refill_index :
+                wire [`D_INDEX_WIDTH-1:0] bank_addr = bank_wr_refill ? refill_index :
                                                     bank_wr_hit    ? wb_index :
                                                     bank_wr_vc     ? refill_index : ram_raddr;
 
@@ -647,7 +647,7 @@ module dcache (
                 sp_ram #(
                     .WIDTH (32),
                     .DEPTH (INDEX_DEPTH),
-                    .ADDRW (`INDEX_WIDTH)
+                    .ADDRW (`D_INDEX_WIDTH)
                 ) u_bank_ram (
                     .clk   (clk),
                     .en    (bank_en),
@@ -681,7 +681,7 @@ module dcache (
                                          : 3'b000;
 
     assign wr_addr = !is_uncached_store ?
-                     {tagv_rdata[refill_replace_way][`TAG_WIDTH:1], refill_index, 4'b0000} :
+                     {tagv_rdata[refill_replace_way][`D_TAG_WIDTH:1], refill_index, 4'b0000} :
                      {refill_tag, refill_index, refill_offset};
 
     assign wr_wstrb = !is_uncached_store ? 4'b1111 : req_wstrb_4b;

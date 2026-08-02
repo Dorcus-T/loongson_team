@@ -9,8 +9,8 @@ module if_stage (
     output wire                     if_to_id_upd,         // IF→ID 更新 data_n
     // 与 ICache 的接口
     output wire                     icache_cpu_req,      // ICache 请求有效
-    output wire [`INDEX_WIDTH-1:0]  icache_cpu_index,    // ICache 组索引
-    output wire [`OFFSET_WIDTH-1:0] icache_cpu_offset,   // ICache 块内偏移
+    output wire [`I_INDEX_WIDTH-1:0]  icache_cpu_index,    // ICache 组索引
+    output wire [`I_OFFSET_WIDTH-1:0] icache_cpu_offset,   // ICache 块内偏移
     input  wire                     icache_cpu_addr_ok,  // ICache 地址就绪
     input  wire                     icache_cpu_data_ok,  // ICache 数据就绪
     input  wire [31:0]              icache_cpu_rdata,    // ICache 读数据
@@ -337,8 +337,8 @@ module if_stage (
     // ========== ICache 输出信号 ==========
     assign if_to_mmu_vaddr = pre_if_pc_r;
     assign icache_cpu_req   = can_req && !req_already;
-    assign icache_cpu_index  = pre_if_pc_r[`OFFSET_WIDTH +: `INDEX_WIDTH];
-    assign icache_cpu_offset = pre_if_pc_r[0 +: `OFFSET_WIDTH];
+    assign icache_cpu_index  = pre_if_pc_r[`I_OFFSET_WIDTH +: `I_INDEX_WIDTH];
+    assign icache_cpu_offset = pre_if_pc_r[0 +: `I_OFFSET_WIDTH];
     assign icache_cpu_accept = if_ready_go && lpower[1] || inst_dirty != 3'b0;
     assign if_inst           = icache_cpu_rdata;
 

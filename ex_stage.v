@@ -445,9 +445,9 @@ module exe_stage (
     wire       is_cpucfg  = res_from_csr && (ex_csr_num == 14'h00b1);
     wire [7:0] cfg_valen  = `VALEN - 1;
     wire [7:0] cfg_palen  = `PALEN - 1;
-    wire [3:0] cfg_off    = `OFFSET_WIDTH;
-    wire [7:0] cfg_idx    = `INDEX_WIDTH;
-    wire [15:0] cfg_ways  = `WAY_NUM - 1;
+    wire [3:0] cfg_off    = `D_OFFSET_WIDTH;
+    wire [7:0] cfg_idx    = `D_INDEX_WIDTH;
+    wire [15:0] cfg_ways  = `D_WAY_NUM - 1;
     wire [31:0] cpucfg_rvalue =
         (rj_value[5:0] == 6'd1)  ? {12'd0, cfg_valen, cfg_palen, 1'b0, 1'b1, 2'd0} :
         (rj_value[5:0] == 6'd2)  ? 32'h0 :

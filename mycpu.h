@@ -202,10 +202,18 @@
 `define ESUBCODE_ADEF       9'd0                          // 取指地址错例外
 `define ESUBCODE_ADEM       9'd1                          // 访存指令地址错例外
 // ============================================================================
-// cache相关参数定义
+// ICache 参数定义
 // ============================================================================
-`define WAY_NUM      2
-`define INDEX_WIDTH  8
-`define TAG_WIDTH    20
-`define OFFSET_WIDTH 4
+`define I_WAY_NUM       2
+`define I_INDEX_WIDTH   8
+`define I_TAG_WIDTH     20
+`define I_OFFSET_WIDTH  4
+
+// ============================================================================
+// DCache 参数定义
+// ============================================================================
+`define D_WAY_NUM       2
+`define D_INDEX_WIDTH   8
+`define D_TAG_WIDTH     20
+`define D_OFFSET_WIDTH  4
 `endif

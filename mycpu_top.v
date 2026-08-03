@@ -60,7 +60,16 @@ module core_top (
     output wire [31:0]  debug0_wb_inst,            // WB阶段指令
     // 性能计数器
     output wire [31:0]  debug0_pred_cnt,           // 分支预测次数
-    output wire [31:0]  debug0_mispred_cnt        // 分支预测错误次数
+    output wire [31:0]  debug0_mispred_cnt,        // 分支预测错误次数
+    output wire [31:0]  debug0_icache_total_req,   // ICache 总请求数
+    output wire [31:0]  debug0_icache_access_cnt,  // ICache 查找次数（cached）
+    output wire [31:0]  debug0_icache_miss_cnt,    // ICache miss 次数
+    output wire [31:0]  debug0_icache_real_miss_cnt, // ICache 真实 miss 次数
+    output wire [31:0]  debug0_dcache_total_req,   // DCache 访存指令总数
+    output wire [31:0]  debug0_dcache_access_cnt,  // DCache 查找次数（cached）
+    output wire [31:0]  debug0_dcache_miss_cnt,    // DCache L1 miss（含 VC hit）
+    output wire [31:0]  debug0_dcache_real_miss_cnt, // DCache 真实 miss 次数
+    output wire [31:0]  debug0_dcache_vc_hit_cnt   // DCache VC 命中次数
 );
 
     // ========== 复位信号处理（将低有效转换为高有效） ==========
@@ -831,7 +840,12 @@ module core_top (
         .rd_rdy        (icache_rd_rdy),
         .return_valid  (icache_return_valid),
         .return_last   (icache_return_last),
-        .return_data   (icache_return_data)
+        .return_data   (icache_return_data),
+        // perf 计数器
+        .debug_perf_total_req     (debug0_icache_total_req),
+        .debug_perf_access_cnt    (debug0_icache_access_cnt),
+        .debug_perf_miss_cnt      (debug0_icache_miss_cnt),
+        .debug_perf_real_miss_cnt (debug0_icache_real_miss_cnt)
     );
 
     // ================================================================
@@ -873,7 +887,13 @@ module core_top (
         .wr_wstrb      (dcache_wr_wstrb),
         .wr_data       (dcache_wr_data),
         .wr_rdy        (dcache_wr_rdy),
-        .wr_done       (dcache_wr_done)
+        .wr_done       (dcache_wr_done),
+        // perf 计数器
+        .debug_perf_total_req     (debug0_dcache_total_req),
+        .debug_perf_access_cnt    (debug0_dcache_access_cnt),
+        .debug_perf_miss_cnt      (debug0_dcache_miss_cnt),
+        .debug_perf_real_miss_cnt (debug0_dcache_real_miss_cnt),
+        .debug_perf_vc_hit_cnt    (debug0_dcache_vc_hit_cnt)
     );
 
     // ================================================================

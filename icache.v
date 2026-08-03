@@ -41,7 +41,13 @@ module icache (
     output wire [`I_INDEX_WIDTH-1:0]  debug_cpu_index,
     output wire                     debug_refill_cached,
     output wire [`I_INDEX_WIDTH-1:0]  debug_refill_index,
-    output wire [`I_INDEX_WIDTH-1:0]  debug_req_index
+    output wire [`I_INDEX_WIDTH-1:0]  debug_req_index,
+
+    // perf 计数器（仿真统计用）
+    output wire [31:0]              debug_perf_total_req,
+    output wire [31:0]              debug_perf_access_cnt,
+    output wire [31:0]              debug_perf_miss_cnt,
+    output wire [31:0]              debug_perf_real_miss_cnt
 );
 
     // ============================================================
@@ -497,4 +503,9 @@ module icache (
     assign debug_refill_cached = refill_cached;
     assign debug_refill_index  = refill_index;
     assign debug_req_index     = req_index;
+
+    assign debug_perf_total_req     = perf_total_req;
+    assign debug_perf_access_cnt    = perf_access_cnt;
+    assign debug_perf_miss_cnt      = perf_miss_cnt;
+    assign debug_perf_real_miss_cnt = perf_real_miss_cnt;
 endmodule

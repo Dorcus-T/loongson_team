@@ -9,7 +9,7 @@ module mem_stage (
     // 输出给wb阶段
     output wire                         mem_to_wb_valid,       // MEM到WB有效（= current_valid）
     output wire [`MEM_TO_WB_BUS_WD-1:0] mem_to_wb_bus,         // MEM到WB总线
-    output wire                         mem_to_wb_upd,         // MEM→WB 更新 data_n
+    (* max_fanout = 64 *) output wire   mem_to_wb_upd,         // MEM→WB 更新 data_n
     output wire                         mem_ready_go,          // MEM阶段就绪标志
      // 来自 DCache
     input  wire [31:0]                  dcache_cpu_rdata,      // DCache 读数据

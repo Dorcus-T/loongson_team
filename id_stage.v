@@ -9,7 +9,7 @@ module id_stage (
     // 输出给ex阶段
     output wire                         id_to_ex_valid,      // ID到EX的有效标志
     output wire [`ID_TO_EX_BUS_WD-1:0]  id_to_ex_bus,        // ID到EX的控制总线
-    output wire                         id_to_ex_upd,         // ID→EX 更新 data_n
+    (* max_fanout = 64 *) output wire   id_to_ex_upd,         // ID→EX 更新 data_n
     output wire                         id_ready_go,         // ID阶段就绪标志
     // wb阶段输入的寄存器文件总线
     input  wire [`WB_TO_RF_BUS_WD-1:0]  wb_to_rf_bus,        // WB阶段写回数据

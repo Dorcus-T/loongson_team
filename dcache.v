@@ -176,19 +176,11 @@ module dcache (
 
     // VIPT 别名检测 — index 高位越界进页号时与物理 tag 低位比较，
     // 不一致说明虚地址 index 与物理地址不符，取消命中
-    // 仅当 index 位宽越界（INDEX+OFFSET > 12）且 tag 未用满（TAG < 20）时生成，
-    // 否则切片区间为空（非法切片），恒不触发
-    wire mmu_index_cancel;
-    generate
-        if (`D_INDEX_WIDTH + `D_OFFSET_WIDTH > 12) begin : vipt_check
-            assign mmu_index_cancel = main_lookup && ((cacop_en_r
-                ? cacop_index_r[`D_INDEX_WIDTH-1 : 12 - `D_OFFSET_WIDTH]
-                : req_index[`D_INDEX_WIDTH-1 : 12 - `D_OFFSET_WIDTH]) != mmu_tag[MMU_TAG_WD - `D_TAG_WIDTH - 1 : 0]);
-        end
-        else begin : vipt_off
-            assign mmu_index_cancel = 1'b0;
-        end
-    endgenerate
+    // 约束：TAG_WIDTH = 32 - INDEX_WIDTH - OFFSET_WIDTH（地址拼接隐式约束），
+    // 此时 index 越界位宽 = INDEX+OFFSET-12 = MMU_TAG_WD - TAG_WIDTH，切片合法
+    wire mmu_index_cancel = main_lookup && ((cacop_en_r
+        ? cacop_index_r[`D_INDEX_WIDTH-1 : 12 - `D_OFFSET_WIDTH]
+        : req_index[`D_INDEX_WIDTH-1 : 12 - `D_OFFSET_WIDTH]) != mmu_tag[MMU_TAG_WD - `D_TAG_WIDTH - 1 : 0]);
 
     //lookup以后阶段判定是否是uncache store指令
     wire is_uncached_store = !refill_cached && req_op && !cacop_en_r;

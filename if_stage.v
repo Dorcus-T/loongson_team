@@ -6,7 +6,7 @@ module if_stage (
     // 输出给id阶段
     output wire                     if_to_id_valid,      // IF到ID有效标志
     output wire [`IF_TO_ID_BUS_WD-1:0] if_to_id_bus,     // IF到ID总线
-    output wire                     if_to_id_upd,         // IF→ID 更新 data_n
+    (* max_fanout = 64 *) output wire if_to_id_upd,         // IF→ID 更新 data_n
     // 与 ICache 的接口
     output wire                     icache_cpu_req,      // ICache 请求有效
     output wire [`I_INDEX_WIDTH-1:0]  icache_cpu_index,    // ICache 组索引

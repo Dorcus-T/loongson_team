@@ -10,7 +10,7 @@ module exe_stage (
     // 输出给PRE_MEM阶段
     output wire                     ex_to_pre_mem_valid, // EX到PRE_MEM有效
     output wire [`EX_TO_PRE_MEM_BUS_WD-1:0] ex_to_pre_mem_bus, // EX到PRE_MEM总线
-    output wire                     ex_to_pre_mem_upd,  // EX→PRE_MEM 更新 data_n
+    (* max_fanout = 64 *) output wire ex_to_pre_mem_upd,  // EX→PRE_MEM 更新 data_n
     output wire                     ex_ready_go,         // EX阶段就绪标志
     // 前递控制
     output wire [ 4:0]              ex_to_id_dest,      // EX阶段写回寄存器号

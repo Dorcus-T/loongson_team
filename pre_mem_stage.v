@@ -10,7 +10,7 @@ module pre_mem_stage (
     // 输出给MEM阶段
     output wire                     pre_mem_to_mem_valid, // PRE_MEM到MEM有效
     output wire [`PRE_MEM_TO_MEM_BUS_WD-1:0] pre_mem_to_mem_bus, // PRE_MEM到MEM总线
-    output wire                     pre_mem_to_mem_upd,  // PRE_MEM→MEM 更新 data_n
+    (* max_fanout = 64 *) output wire pre_mem_to_mem_upd,  // PRE_MEM→MEM 更新 data_n
     output wire                     pre_mem_ready_go,     // PRE_MEM阶段就绪标志
     // 访问MMU信号
     output wire [31:0]              pre_mem_to_mmu_vaddr, // 虚地址输出

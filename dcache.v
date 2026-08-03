@@ -9,7 +9,7 @@ module dcache (
     input  wire                     cpu_req,
     input  wire                     cpu_op,
     input  wire [`D_INDEX_WIDTH-1:0]  cpu_index,
-    input  wire [ `D_TAG_WIDTH-1:0]   mmu_tag,
+    input  wire [19:0]                 mmu_tag,         // MMU 物理 tag = paddr[31:12]，固定 20-bit
     input  wire [`D_OFFSET_WIDTH-1:0] cpu_offset,
     input  wire [ 3:0]              cpu_wstrb,
     input  wire [31:0]              cpu_wdata,
@@ -45,7 +45,7 @@ module dcache (
     // debug
     output wire [ 6:0]              debug_main_state,
     output wire                     debug_rd_req,
-    output wire [`D_TAG_WIDTH-1:0]    debug_mmu_tag,
+    output wire [19:0]                debug_mmu_tag,   // 透传 MMU 物理 tag 20-bit
     output wire [`D_INDEX_WIDTH-1:0]  debug_cpu_index,
     output wire                     debug_refill_cached,
     output wire [`D_INDEX_WIDTH-1:0]  debug_refill_index,
@@ -68,6 +68,10 @@ module dcache (
     localparam WAY_IDX_W   = $clog2(`D_WAY_NUM);
     localparam PLRU_W      = `D_WAY_NUM - 1;
     localparam TAGV_BYTES  = (`D_TAG_WIDTH + 1 + 7) / 8;
+    localparam MMU_TAG_WD   = 20;
+
+    // 由 20-bit MMU tag 提取 cache 实际使用的 D_TAG_WIDTH 位（取高位）
+    wire [`D_TAG_WIDTH-1:0] mmu_tag_cache = mmu_tag[MMU_TAG_WD-1 : MMU_TAG_WD - `D_TAG_WIDTH];
 
     localparam MAIN_IDLE       = 7'b0000001;
     localparam MAIN_LOOKUP     = 7'b0000010;
@@ -158,18 +162,34 @@ module dcache (
     // 一些重要信号生成
     // ============================================================
     // 统一 RAM 读控制
-    wire ram_read_en = accept_new_req || main_reread;
+    wire ram_read_en = accept_new_req || main_reread || (mmu_index_cancel && !mmu_cancel);
 
     wire [`D_INDEX_WIDTH-1:0] ram_raddr = main_reread ? refill_index :
                                         cacop_en    ? cacop_index  : cpu_index;
 
     // accept_new_req — (IDLE || LOOKUP hit) && !冲突 && accept_ok
-    wire accept_new_req = accept_ok && (cpu_req || cacop_en) && (main_idle || (main_lookup && cache_hit)) 
+    wire accept_new_req = accept_ok && (cpu_req || cacop_en) && (main_idle || (main_lookup && cache_hit))
                                     && !(wb_write && !cpu_op && (wb_bank == cpu_offset[`D_OFFSET_WIDTH-1:2]));
 
     // REFILL 节拍
     wire refill_last = main_refill && return_valid && return_last;
-    
+
+    // VIPT 别名检测 — index 高位越界进页号时与物理 tag 低位比较，
+    // 不一致说明虚地址 index 与物理地址不符，取消命中
+    // 仅当 index 位宽越界（INDEX+OFFSET > 12）且 tag 未用满（TAG < 20）时生成，
+    // 否则切片区间为空（非法切片），恒不触发
+    wire mmu_index_cancel;
+    generate
+        if (`D_INDEX_WIDTH + `D_OFFSET_WIDTH > 12) begin : vipt_check
+            assign mmu_index_cancel = main_lookup && ((cacop_en_r
+                ? cacop_index_r[`D_INDEX_WIDTH-1 : 12 - `D_OFFSET_WIDTH]
+                : req_index[`D_INDEX_WIDTH-1 : 12 - `D_OFFSET_WIDTH]) != mmu_tag[MMU_TAG_WD - `D_TAG_WIDTH - 1 : 0]);
+        end
+        else begin : vipt_off
+            assign mmu_index_cancel = 1'b0;
+        end
+    endgenerate
+
     //lookup以后阶段判定是否是uncache store指令
     wire is_uncached_store = !refill_cached && req_op && !cacop_en_r;
 
@@ -190,14 +210,14 @@ module dcache (
     genvar gh;
     generate
         for (gh = 0; gh < `D_WAY_NUM; gh = gh + 1) begin : way_hit_gen
-            assign tag_diff[gh]  = tagv_rdata[gh][`D_TAG_WIDTH:1] ^ mmu_tag;
+            assign tag_diff[gh]  = tagv_rdata[gh][`D_TAG_WIDTH:1] ^ mmu_tag_cache;
             assign tag_match[gh] = ~(|tag_diff[gh]);
             assign way_hit[gh]   = tagv_rdata[gh][0]
                                  && tag_match[gh];
         end
     endgenerate
 
-    wire cache_hit = (|way_hit) && lookup_cached && !cacop_en_r && !mmu_cancel;
+    wire cache_hit = (|way_hit) && lookup_cached && !cacop_en_r && !mmu_cancel && !mmu_index_cancel;
 
     // VC 命中判断 — XOR 树同时比较 tag（20-bit）和 index（8-bit）
     wire [`D_TAG_WIDTH-1:0] vc_tag_diff    [0:3];
@@ -208,7 +228,7 @@ module dcache (
     genvar gvc;
     generate
         for (gvc = 0; gvc < 4; gvc = gvc + 1) begin : vc_hit_gen
-            assign vc_tag_diff[gvc]  = vc_tagv[gvc][`D_TAG_WIDTH:1] ^ mmu_tag;
+            assign vc_tag_diff[gvc]  = vc_tagv[gvc][`D_TAG_WIDTH:1] ^ mmu_tag_cache;
             assign vc_tag_match[gvc] = ~(|vc_tag_diff[gvc]);
             assign vc_idx_diff[gvc]  = vc_index[gvc] ^ req_index;
             assign vc_idx_match[gvc] = ~(|vc_idx_diff[gvc]);
@@ -218,7 +238,7 @@ module dcache (
         end
     endgenerate
 
-    wire vc_way_hit_any = |vc_way_hit && lookup_cached && !cacop_en_r && !mmu_cancel;
+    wire vc_way_hit_any = |vc_way_hit && lookup_cached && !cacop_en_r && !mmu_cancel && !mmu_index_cancel;
     
     // ============================================================
     // 命中路号编码
@@ -365,8 +385,9 @@ module dcache (
 
     wire main_idle_lookup   = main_idle   && accept_new_req;
 
-    wire main_lookup_reread       = main_lookup && cache_miss && (lookup_cached || cacop_en_r) && !mmu_cancel;
-    wire main_lookup_uncached_miss = main_lookup && cache_miss && !lookup_cached && !cacop_en_r && !mmu_cancel;
+    wire main_lookup_recheck       = main_lookup && mmu_index_cancel && !mmu_cancel;
+    wire main_lookup_reread        = main_lookup && cache_miss && !mmu_index_cancel && (lookup_cached || cacop_en_r) && !mmu_cancel;
+    wire main_lookup_uncached_miss = main_lookup && cache_miss && !mmu_index_cancel && !lookup_cached && !cacop_en_r && !mmu_cancel;
     wire main_lookup_lookup        = main_lookup && cache_hit && accept_new_req;
 
     wire main_reread_waitwr = main_reread;
@@ -400,6 +421,7 @@ module dcache (
         main_next = MAIN_IDLE;
         if (main_idle_lookup)                              main_next = MAIN_LOOKUP;
         if (main_lookup_lookup)                            main_next = MAIN_LOOKUP;
+        if (main_lookup_recheck)                           main_next = MAIN_LOOKUP;
         if (main_lookup_uncached_miss)                     main_next = MAIN_WAITWR;
         if (main_lookup_reread)                            main_next = MAIN_REREAD;
         if (main_reread_waitwr)                            main_next = MAIN_WAITWR;
@@ -509,9 +531,9 @@ module dcache (
     // Refill Buffer — LOOKUP miss 锁存，REFILL 拼装
     always @(posedge clk) begin
         // LOOKUP miss: 锁存总线读上下文 + 牺牲路号
-        if (main_lookup && !cache_hit && !mmu_cancel) begin
+        if (main_lookup && !cache_hit && !mmu_cancel && !mmu_index_cancel) begin
             refill_index       <= req_index;
-            refill_tag         <= mmu_tag;
+            refill_tag         <= mmu_tag_cache;
             refill_cached      <= lookup_cached;
             refill_offset      <= req_offset;
             refill_replace_way <= replace_way;
@@ -555,7 +577,7 @@ module dcache (
     wire cpu_fifo_re = cpu_accept && !cpu_fifo_empty;
 
     wire lookup_read_hit_done  = main_lookup && (cache_hit || vc_way_hit_any) && !req_op;
-    wire lookup_write_done     = main_lookup && req_op && !mmu_cancel;
+    wire lookup_write_done     = main_lookup && req_op && !mmu_cancel && !mmu_index_cancel;
     wire refill_read_miss_done = main_refill && return_valid && !req_op && (refill_cnt == refill_offset[`D_OFFSET_WIDTH-1:2] || !refill_cached);
 
     wire [31:0] live_rdata = lookup_read_hit_done  ? lookup_rdata :
@@ -758,7 +780,7 @@ module dcache (
         else begin
             if (accept_new_req && !cacop_en)
                 perf_total_req <= perf_total_req + 32'd1;
-            if (main_lookup && mmu_cache && !cacop_en_r && !mmu_cancel) begin
+            if (main_lookup && mmu_cache && !cacop_en_r && !mmu_cancel && !mmu_index_cancel) begin
                 perf_access_cnt <= perf_access_cnt + 32'd1;
                 if (!cache_hit) begin
                     perf_miss_cnt <= perf_miss_cnt + 32'd1;

@@ -81,12 +81,14 @@ module cache_axi_bridge (
     localparam IC_BEATS     = `I_LINE_WORDS;               // icache 行 = 几个 32-bit beat
     localparam IC_BEAT_W    = $clog2(IC_BEATS);            // beat 计数位宽
     localparam IC_BURST_LEN = IC_BEATS - 1;                // AXI arlen
-    localparam IC_LINE_BYTES = IC_BEATS * 4;               // icache 行字节数
-    localparam DC_BEATS     = `D_LINE_WORDS;               // dcache 行 beat 数
-    localparam DC_BEAT_W    = $clog2(DC_BEATS);            // beat 计数位宽
-    localparam DC_BURST_LEN = DC_BEATS - 1;                // AXI arlen/awlen
+    localparam IC_LINE_BYTES  = IC_BEATS * 4;               // icache 行字节数
+    localparam I_BYTE_WD      = $clog2(IC_LINE_BYTES + 1);  // icache 读冲突字节位宽
+    localparam DC_BEATS       = `D_LINE_WORDS;               // dcache 行 beat 数
+    localparam DC_BEAT_W      = $clog2(DC_BEATS);            // beat 计数位宽
+    localparam DC_BURST_LEN   = DC_BEATS - 1;                // AXI arlen/awlen
     localparam DC_LINE_BYTES  = DC_BEATS * 4;               // dcache 行字节数
-    localparam BYTE_WD        = $clog2(DC_LINE_BYTES + 1);  // 字节数位宽（参数化，OFFSET=7→8bit）
+    localparam D_BYTE_WD      = $clog2(DC_LINE_BYTES + 1);  // dcache 写追踪字节位宽
+    localparam RD_BYTE_WD     = (I_BYTE_WD > D_BYTE_WD) ? I_BYTE_WD : D_BYTE_WD;  // 函数端口位宽取最大
 
     // ============================================================
     // ICache 读 Buffer
@@ -124,7 +126,7 @@ module cache_axi_bridge (
     // 写追踪 FIFO — 记录已发但 B 未回的写，供读冲突检测
     // ============================================================
     reg  [31:0] wr_pend_addr  [0:3];
-    reg  [BYTE_WD-1:0] wr_pend_bytes [0:3];
+    reg  [D_BYTE_WD-1:0] wr_pend_bytes [0:3];
     reg  [ 1:0] wr_pend_wptr;
     reg  [ 1:0] wr_pend_rptr;
     reg  [ 2:0] wr_pend_cnt;
@@ -135,15 +137,15 @@ module cache_axi_bridge (
     assign wr_pend_empty = (wr_pend_cnt == 3'd0);
 
     // ========== 写总字节数 ==========
-    function [BYTE_WD-1:0] wr_total_bytes;
+    function [D_BYTE_WD-1:0] wr_total_bytes;
         input [2:0] wr_type;
         begin
             case (wr_type)
-                3'b100:  wr_total_bytes = DC_LINE_BYTES[BYTE_WD-1:0];
-                3'b010:  wr_total_bytes = {{BYTE_WD-3{1'b0}}, 3'd4};
-                3'b001:  wr_total_bytes = {{BYTE_WD-2{1'b0}}, 2'd2};
-                3'b000:  wr_total_bytes = {{BYTE_WD-1{1'b0}}, 1'd1};
-                default: wr_total_bytes = {{BYTE_WD-3{1'b0}}, 3'd4};
+                3'b100:  wr_total_bytes = DC_LINE_BYTES[D_BYTE_WD-1:0];
+                3'b010:  wr_total_bytes = {{D_BYTE_WD-3{1'b0}}, 3'd4};
+                3'b001:  wr_total_bytes = {{D_BYTE_WD-2{1'b0}}, 2'd2};
+                3'b000:  wr_total_bytes = {{D_BYTE_WD-1{1'b0}}, 1'd1};
+                default: wr_total_bytes = {{D_BYTE_WD-3{1'b0}}, 3'd4};
             endcase
         end
     endfunction
@@ -154,19 +156,19 @@ module cache_axi_bridge (
     // ============================================================
     function rd_wr_conflict;
         input [31:0] rd_addr;
-        input [BYTE_WD-1:0] rd_bytes;
+        input [RD_BYTE_WD-1:0] rd_bytes;
         reg   [31:0] rd_end;
         reg   [31:0] wr_end;
         reg   [31:0] same_wr_end;
         integer      k;
         begin
-            rd_end = rd_addr + {{32-BYTE_WD{1'b0}}, rd_bytes} - 32'd1;
+            rd_end = rd_addr + {{32-RD_BYTE_WD{1'b0}}, rd_bytes} - 32'd1;
             rd_wr_conflict = 1'b0;
 
             // 检查写追踪 FIFO
             for (k = 0; k < 4; k = k + 1) begin
                 if (((k[1:0] - wr_pend_rptr) & 2'd3) < wr_pend_cnt) begin
-                    wr_end = wr_pend_addr[k] + {{32-BYTE_WD{1'b0}}, wr_pend_bytes[k]} - 32'd1;
+                    wr_end = wr_pend_addr[k] + {{32-D_BYTE_WD{1'b0}}, wr_pend_bytes[k]} - 32'd1;
                     if (!(rd_end < wr_pend_addr[k] || rd_addr > wr_end)) begin
                         rd_wr_conflict = 1'b1;
                     end
@@ -175,7 +177,7 @@ module cache_axi_bridge (
 
             // 检查 Buffer 内尚未入 FIFO 的写
             if (dc_wr_buf_valid) begin
-                same_wr_end = dc_wr_buf_addr + {{32-BYTE_WD{1'b0}}, wr_total_bytes(dc_wr_buf_type)} - 32'd1;
+                same_wr_end = dc_wr_buf_addr + {{32-D_BYTE_WD{1'b0}}, wr_total_bytes(dc_wr_buf_type)} - 32'd1;
                 if (!(rd_end < dc_wr_buf_addr || rd_addr > same_wr_end))
                     rd_wr_conflict = 1'b1;
             end
@@ -184,8 +186,8 @@ module cache_axi_bridge (
 
     wire ic_rd_buf_conflict;
     wire dc_rd_buf_conflict;
-    assign ic_rd_buf_conflict = rd_wr_conflict(ic_rd_buf_addr, is_ic_rd_burst_buf ? IC_LINE_BYTES[BYTE_WD-1:0] : {{BYTE_WD-3{1'b0}}, 3'd4});
-    assign dc_rd_buf_conflict = rd_wr_conflict(dc_rd_buf_addr, is_dc_rd_burst_buf ? DC_LINE_BYTES[BYTE_WD-1:0] : {{BYTE_WD-3{1'b0}}, 3'd4});
+    assign ic_rd_buf_conflict = rd_wr_conflict(ic_rd_buf_addr, is_ic_rd_burst_buf ? IC_LINE_BYTES[I_BYTE_WD-1:0] : {{I_BYTE_WD-3{1'b0}}, 3'd4});
+    assign dc_rd_buf_conflict = rd_wr_conflict(dc_rd_buf_addr, is_dc_rd_burst_buf ? DC_LINE_BYTES[D_BYTE_WD-1:0] : {{D_BYTE_WD-3{1'b0}}, 3'd4});
 
     // ============================================================
     // Cache 侧握手 — 纯解耦，仅看 buffer 是否空
@@ -373,7 +375,7 @@ module cache_axi_bridge (
             wr_pend_cnt  <= 3'd0;
             for (pp = 0; pp < 4; pp = pp + 1) begin
                 wr_pend_addr[pp]  <= 32'b0;
-                wr_pend_bytes[pp] <= {{BYTE_WD-3{1'b0}}, 3'd4};
+                wr_pend_bytes[pp] <= {{D_BYTE_WD-3{1'b0}}, 3'd4};
             end
         end
         else begin
@@ -382,7 +384,7 @@ module cache_axi_bridge (
                     wr_pend_addr[wr_pend_wptr]  <= dc_wr_buf_addr;
                     wr_pend_bytes[wr_pend_wptr] <= single_wr_done
                                                   ? wr_total_bytes(dc_wr_buf_type)
-                                                  : DC_LINE_BYTES[BYTE_WD-1:0];
+                                                  : DC_LINE_BYTES[D_BYTE_WD-1:0];
                     wr_pend_wptr <= wr_pend_wptr + 2'd1;
                     wr_pend_cnt  <= wr_pend_cnt  + 3'd1;
                 end
@@ -394,7 +396,7 @@ module cache_axi_bridge (
                     wr_pend_addr[wr_pend_wptr]  <= dc_wr_buf_addr;
                     wr_pend_bytes[wr_pend_wptr] <= single_wr_done
                                                   ? wr_total_bytes(dc_wr_buf_type)
-                                                  : DC_LINE_BYTES[BYTE_WD-1:0];
+                                                  : DC_LINE_BYTES[D_BYTE_WD-1:0];
                     wr_pend_wptr <= wr_pend_wptr + 2'd1;
                     wr_pend_rptr <= wr_pend_rptr + 2'd1;
                 end

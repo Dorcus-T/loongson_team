@@ -98,7 +98,7 @@ module mem_stage (
     assign mem_ertn_o  = mem_ertn_flush;
 
     // ── → WB ──
-    assign mem_to_wb_upd   = (mem_ready_go && lpower) || !mem_valid;
+    assign mem_to_wb_upd   = lpower || !mem_valid;
 
     // ========== 异常信号 ==========
     wire [15:0] mem_exc_raw;

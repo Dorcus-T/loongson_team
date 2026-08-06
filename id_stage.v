@@ -118,7 +118,7 @@ module id_stage (
 
     // ── → EX ──
     assign id_to_ex_valid = id_valid;
-    assign id_to_ex_upd   = (id_ready_go && lpower) || !id_valid;
+    assign id_to_ex_upd   = lpower || !id_valid;
 
     // ========== 异常信号 ==========
     wire ipe;

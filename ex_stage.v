@@ -230,7 +230,7 @@ module exe_stage (
 
     // ── → PRE_MEM ──
     assign ex_to_pre_mem_valid = ex_valid;
-    assign ex_to_pre_mem_upd   = (ex_ready_go && lpower) || !ex_valid;
+    assign ex_to_pre_mem_upd   = lpower || !ex_valid;
 
     // ============================================================
     // EX 级统一分支验证与预测器训练

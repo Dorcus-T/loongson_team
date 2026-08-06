@@ -182,7 +182,7 @@ module pre_mem_stage (
 
     // ── → MEM ──
     assign pre_mem_to_mem_valid = pre_mem_valid;
-    assign pre_mem_to_mem_upd   = (pre_mem_ready_go && lpower) || !pre_mem_valid;
+    assign pre_mem_to_mem_upd   = lpower || !pre_mem_valid;
 
     assign can_req = pre_mem_valid && !pre_mem_exc_valid && lpower;
 

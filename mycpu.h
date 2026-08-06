@@ -214,8 +214,8 @@
 // DCache 参数定义
 // ============================================================================
 `define D_WAY_NUM       2
-`define D_INDEX_WIDTH   11
+`define D_INDEX_WIDTH   10
 `define D_TAG_WIDTH     17
-`define D_OFFSET_WIDTH  4
-`define D_LINE_WORDS    (1 << (`D_OFFSET_WIDTH - 2))  // = 4
+`define D_OFFSET_WIDTH  5
+`define D_LINE_WORDS    (1 << (`D_OFFSET_WIDTH - 2))  // = 8
 `endif

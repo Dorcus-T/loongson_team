@@ -65,7 +65,7 @@ module if_stage (
     reg                  if_valid_old;
     wire                 if_valid = (ldata[1] ? if_valid_n : if_valid_old) & lvalid[1];
 
-    wire pre_if_upd = (pre_if_ready_go && lpower[0]) || !pre_if_valid;
+    wire pre_if_upd = lpower[0] || !pre_if_valid;
 
     // TLB 异常合并：if_data_n[3:0] = {ADEF, 3'b0}，OR 上 if_tlb_exc
     wire [3:0] if_exc_raw       = if_data_n[3:0];
@@ -271,7 +271,7 @@ module if_stage (
     wire if_work_done = (icache_cpu_data_ok || if_exc_valid) && (inst_dirty == 3'b0);
     assign if_ready_go    = if_work_done || !if_valid || lready[1];
     assign if_to_id_valid = if_valid;
-    assign if_to_id_upd   = (if_ready_go && lpower[1]) || !if_valid;
+    assign if_to_id_upd   = lpower[1] || !if_valid;
 
     // ========== ICache 请求控制（仿 MEM 模式） ==========
     wire req_set = icache_cpu_req && icache_cpu_addr_ok;

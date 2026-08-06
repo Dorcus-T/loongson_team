@@ -17,7 +17,7 @@ module mem_stage (
     // 前递控制
     output wire [ 4:0]                  mem_to_id_dest,        // MEM阶段写回寄存器号
     output wire [31:0]                  mem_to_id_result,      // MEM阶段计算结果
-    output wire                         mem_to_id_data_ok,     // MEM前递给id的数据是否准备好
+    output wire                         mem_to_id_load_op,     // MEM阶段是否有load（用于load-use检测）
     // csr与ertn冒险
     output wire                         mem_csr_we,            // mem阶段确定要写csr
     output wire [13:0]                  mem_csr_num,           // mem阶段写csr的号码
@@ -50,9 +50,6 @@ module mem_stage (
     reg  [`PRE_MEM_TO_MEM_BUS_WD-1:0] data_o;          // 旧数据寄存器
     reg                          valid_o;              // 旧 valid
 
-    reg  [31:0] load_data_r;                          // 锁存 cache 返回的读数据（打断长组合路径）
-    wire        load_data_latched;                    // 数据已锁存，本拍正在处理
-    reg         load_data_state;                      // 数据锁存状态
 
     // ========== 双寄存器逻辑 ==========
 
@@ -119,10 +116,6 @@ module mem_stage (
     wire        ertn_flush;               // 异常返回冲刷信号
     wire [ 2:0] mem_size;                 // 访存大小
     wire        mem_sign_ext;             // 符号扩展标志
-    // 访存数据控制信号
-    wire [ 1:0] offset;                   // 偏移量，地址低两位
-    wire [31:0] shift_data;               // 偏移后的数据
-    wire [31:0] data_result;              // 最终读的数据
     // csr交互信号
     wire        res_from_csr;             // 结果来自csr寄存器堆
     wire [31:0] csr_rvalue;               // csr读数据
@@ -153,7 +146,7 @@ module mem_stage (
     wire [241:0] _unused_diff_pad;
     `endif
 
-    // ========== 解析来自EX阶段的总线 ==========
+    // ========== 解析来自PRE_MEM阶段的总线 ==========
     assign {
         `ifdef DIFFTEST_EN
         dift_csr_data,       // 452:421 csr读数据 for difftest
@@ -209,6 +202,10 @@ module mem_stage (
 
     // ========== 输出到WB阶段的总线 ==========
     assign mem_to_wb_bus = {
+        res_from_mem,        // 480     结果来自存储器（load 数据扩展使能）
+        mem_sign_ext,        // 479     符号扩展标志
+        mem_size,            // 478:476 访存大小
+        dcache_cpu_rdata,    // 475:444 原始读数据（dcache 直通，load 时有效）
         `ifdef DIFFTEST_EN
         dift_csr_data,       // 443:412 csr读数据 for difftest
         dift_csr_rstat_en,   // 411     csr estat读使能 for difftest
@@ -245,57 +242,19 @@ module mem_stage (
                              mem_exc_raw[11] || ex_tlb_exc[3], mem_exc_raw[10:3], ex_tlb_exc[2:0]};  // 合并 MMU TLB 异常后的异常
 
     // ========== 流水线控制 ==========
-    assign work_done       = is_mem_inst && !mem_we && !mem_exc_valid ? load_data_latched : 1'b1;
+    // load 数据直通 WB 总线，data_ok 即完成（无需锁存处理拍）
+    assign work_done       = is_mem_inst && !mem_we && !mem_exc_valid ? dcache_cpu_data_ok : 1'b1;
     assign mem_ready_go    = work_done || !mem_valid || lready;
     assign mem_to_wb_valid = mem_valid;
 
     // ========== DCache 数据接受 ==========
-    assign dcache_cpu_accept = mem_valid && lpower && is_mem_inst && !mem_we && !load_data_latched;
-
-    // ========== load 数据锁存控制（打断 cache→MEM→ID 长组合路径） ==========
-    wire latch_data;
-    assign latch_data = mem_valid && lpower && is_mem_inst && !mem_we && !load_data_latched && dcache_cpu_data_ok;
-
-    always @(posedge clk) begin
-        if (latch_data) begin
-            load_data_r <= dcache_cpu_rdata;
-        end
-    end
-
-    always @(posedge clk) begin
-        if (reset) begin
-            load_data_state <= 1'b0;
-        end
-        else if (ldata && !latch_data) begin
-            load_data_state <= 1'b0;
-        end
-        else if (latch_data) begin
-            load_data_state <= 1'b1;
-        end
-    end
-    assign load_data_latched = load_data_state && !ldata;
+    assign dcache_cpu_accept = mem_valid && lpower && is_mem_inst && !mem_we;
 
     // ========== csr写文件写回控制 ==========
     assign mem_csr_we = csr_we && mem_valid;
 
-    // ========== 存储器读数据处理（字节/半字/字，支持符号扩展） ==========
-    // 数据源：已锁存则用寄存器（打断长组合路径），否则直通 cache 输出
-    wire [31:0] mem_rdata;
-    assign mem_rdata = load_data_r;
-
-    assign offset = alu_result[1:0];
-
-    // 移位对齐（将目标数据移到最低位）
-    assign shift_data = mem_rdata >> (offset * 8);
-
-    // 根据访存大小提取并扩展
-    assign data_result = mem_size[2] ? mem_rdata :                                             // 字
-                         mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} :  // 半字
-                         mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :    // 字节
-                         32'b0;
-
-    // 最终结果：来自存储器或ALU或者CSR
-    assign final_result = res_from_mem   ? data_result   :
+    // 最终结果：来自ALU/CSR/计数器（load 数据由 WB 级从总线 mem_rdata 扩展）
+    assign final_result = res_from_mem   ? alu_result    :
                           res_from_csr   ? csr_rvalue    :
                           res_from_timer ? timer_finalval :
                           alu_result;
@@ -303,7 +262,7 @@ module mem_stage (
     // ========== 前递输出 ==========
     assign mem_to_id_dest    = dest & {5{mem_valid}} & {5{gr_we}};
     assign mem_to_id_result  = final_result;
-    assign mem_to_id_data_ok = res_from_mem ? load_data_latched : 1'b1;
+    assign mem_to_id_load_op = res_from_mem && mem_valid; // load 在 MEM 时消费者需 stall（数据由 WB 前递）
 
     // ========== 检测异常与ertn ==========
     assign mem_exc_valid  = (|mem_exc || mem_rf_valid) && mem_valid;

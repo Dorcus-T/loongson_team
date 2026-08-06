@@ -121,9 +121,18 @@ module wb_stage (
     wire        tlbfill_en;
     wire        gr_we;                     // 通用寄存器写使能
     wire [ 4:0] dest;                      // 目的寄存器号
-    wire [31:0] final_result;              // 最终计算结果
+    wire [31:0] mem_final_result;          // 总线上的最终结果（load 时为地址，无意义）
+    wire [31:0] final_result;              // 最终计算结果（load 时由 mem_rdata 扩展）
     wire [31:0] wb_pc;                     // 程序计数器值
     wire [31:0] mem_addr;                  // 访存地址
+    wire        res_from_mem;              // 结果来自存储器（load 数据扩展使能）
+    wire        mem_sign_ext;              // 符号扩展标志
+    wire [ 2:0] mem_size;                  // 访存大小
+    wire [31:0] mem_rdata;                 // 原始读数据（dcache 直通）
+    // 访存数据控制信号
+    wire [ 1:0] offset;                    // 偏移量，地址低两位
+    wire [31:0] shift_data;                // 偏移后的数据
+    wire [31:0] data_result;               // 最终读的数据
     wire        ertn_flush;                // 异常返回冲刷信号
     wire        rf_we;                     // 寄存器写使能
     wire [ 4:0] rf_waddr;                  // 写地址（寄存器号）
@@ -156,6 +165,10 @@ module wb_stage (
     // ========== 解析来自MEM阶段的总线 ==========
     // 从锁存的执行级总线中提取各个字段
     assign {
+        res_from_mem,          // 480     结果来自存储器（load 数据扩展使能）
+        mem_sign_ext,          // 479     符号扩展标志
+        mem_size,              // 478:476 访存大小
+        mem_rdata,             // 475:444 原始读数据（dcache 直通）
         `ifdef DIFFTEST_EN
         dift_csr_data,         // 443:412 csr读数据 for difftest
         dift_csr_rstat_en,     // 411     csr estat读使能 for difftest
@@ -183,7 +196,7 @@ module wb_stage (
         mem_addr,              // 101-70：访存地址（32位）
         gr_we,                 // 69：    寄存器写使能
         dest,                  // 68-64： 目的寄存器号（5位）
-        final_result,          // 63-32： 最终计算结果（32位）
+        mem_final_result,      // 63-32： 总线最终结果（load 时为地址，无意义）
         wb_pc                  // 31-0：  PC值（32位）
     } = current_bus;
 
@@ -207,6 +220,22 @@ module wb_stage (
         rf_waddr,           // 位36-32：写寄存器号
         rf_wdata            // 位31-0： 写数据
     };
+
+    // ========== 存储器读数据处理（字节/半字/字，支持符号扩展） ==========
+    // load 原始数据经总线直通到本级，在此做移位对齐与扩展（MEM 级不再处理）
+    assign offset = mem_addr[1:0];
+
+    // 移位对齐（将目标数据移到最低位）
+    assign shift_data = mem_rdata >> (offset * 8);
+
+    // 根据访存大小提取并扩展
+    assign data_result = mem_size[2] ? mem_rdata :                                             // 字
+                         mem_size[1] ? {{16{mem_sign_ext & shift_data[15]}}, shift_data[15:0]} :  // 半字
+                         mem_size[0] ? {{24{mem_sign_ext & shift_data[7]}}, shift_data[7:0]} :    // 字节
+                         32'b0;
+
+    // 最终结果：load 由原始数据扩展，其余直接使用总线值
+    assign final_result = res_from_mem ? data_result : mem_final_result;
 
     // ========== 寄存器文件写回控制 ==========
     // 只有当写回级有效且指令需要写寄存器时，才使能寄存器写操作

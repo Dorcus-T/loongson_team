@@ -154,7 +154,7 @@ module core_top (
     wire [31:0] wb_to_id_result;         // WB阶段计算结果
     wire        ex_to_id_load_op;        // EX阶段是否为加载指令（用于load-use检测）
     wire        calc_not_ready;          // EX → ID mul/div 结果未就绪
-    wire        mem_to_id_data_ok;       // MEM前递给id的数据是否准备好
+    wire        mem_to_id_load_op;       // MEM阶段是否有load（用于load-use检测）
 
     // ========== 异常信号与ertn（各阶段直连 ID 做 csr_stall） ==========
     wire ex_ertn_flush;
@@ -490,7 +490,7 @@ module core_top (
         .ex_to_id_result    (ex_to_id_result),
         .mem_to_id_result   (mem_to_id_result),
         .wb_to_id_result    (wb_to_id_result),
-        .mem_to_id_data_ok  (mem_to_id_data_ok),
+        .mem_to_id_load_op  (mem_to_id_load_op),
         .calc_not_ready     (calc_not_ready),
         .ex_csr_we          (ex_csr_we),
         .ex_csr_num         (ex_csr_num),
@@ -622,7 +622,7 @@ module core_top (
         .dcache_cpu_data_ok  (dcache_cpu_data_ok),
         .mem_to_id_dest      (mem_to_id_dest),
         .mem_to_id_result    (mem_to_id_result),
-        .mem_to_id_data_ok   (mem_to_id_data_ok),
+        .mem_to_id_load_op   (mem_to_id_load_op),
         .mem_csr_we          (mem_csr_we),
         .mem_csr_num         (mem_csr_num),
         .dcache_cpu_accept   (dcache_cpu_accept),

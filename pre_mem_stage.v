@@ -81,7 +81,6 @@ module pre_mem_stage (
     wire tlbrd_en;                      // WB读tlb并写csr
     wire tlbwr_en;                      // tlbwrWB写tlb
     wire tlbfill_en;                    // tlbfillWB写tlb
-    wire ex_load_op;                    // 加载指令标志
     wire res_from_mem;                  // 结果是否来自存储器
     wire gr_we;                         // 通用寄存器写使能
     wire mem_we;                        // 存储器写使能
@@ -190,23 +189,22 @@ module pre_mem_stage (
     wire        bp_en_comb;
     wire [`BP_BUS_WD-1:0] bp_bus_next;
     assign {
-        bp_en_comb,        // 627     分支预测更新使能
-        bp_bus_next,       // 626:525 分支预测更新数据
-        cacop_code_int,    // 524:520 cache操作类型
-        cacop_en,          // 519     cache操作使能
-        rj_value,          // 521:490 源操作数1（用于 vtlb_enop ASID）
-        rkd_value,         // 490:459 源操作数2（用于 dcache_wdata / vtlb_enop VPPN）
-        ex_load_op,        // 458     加载指令标志（用于 ALE 检测 / ld_and_str / pre_mem_to_id_load_op）
+        bp_en_comb,        // 626     分支预测更新使能
+        bp_bus_next,       // 625:524 分支预测更新数据
+        cacop_code_int,    // 523:519 cache操作类型
+        cacop_en,          // 518     cache操作使能
+        rj_value,          // 520:489 源操作数1（用于 vtlb_enop ASID）
+        rkd_value,         // 489:458 源操作数2（用于 dcache_wdata / vtlb_enop VPPN）
         `ifdef DIFFTEST_EN
-        dift_csr_rvalue,   // 451:420 csr读数据 for difftest
-        dift_csr_rstat_en, // 420     csr estat读使能 for difftest
-        dift_inst_st_en,   // 419:412 store使能 for difftest
-        dift_inst_ld_en,   // 411:404 load使能 for difftest
-        dift_cnt_inst,     // 403     计数器指令 for difftest
-        dift_timer_64,     // 402:339 定时器值 for difftest
-        dift_id_inst,      // 338:307 指令编码 for difftest
-        dift_vaddr,        // 306:275 load/store虚地址 for difftest
-        dift_st_data,      // 274:243 store数据 for difftest
+        dift_csr_rvalue,   // 450:419 csr读数据 for difftest
+        dift_csr_rstat_en, // 419     csr estat读使能 for difftest
+        dift_inst_st_en,   // 418:411 store使能 for difftest
+        dift_inst_ld_en,   // 410:403 load使能 for difftest
+        dift_cnt_inst,     // 402     计数器指令 for difftest
+        dift_timer_64,     // 401:338 定时器值 for difftest
+        dift_id_inst,      // 337:306 指令编码 for difftest
+        dift_vaddr,        // 305:274 load/store虚地址 for difftest
+        dift_st_data,      // 273:242 store数据 for difftest
         `else
         _unused_diff_pad,  // 占位：保持非difftest字段bit位置不变
         `endif
@@ -260,7 +258,7 @@ module pre_mem_stage (
 
     // ========== ALE 检测（PRE_MEM 负责，EX 不检测访存对齐） ==========
     wire ale;
-    assign ale = (pre_mem_valid && (ex_load_op || mem_we)) &&
+    assign ale = (pre_mem_valid && (res_from_mem || mem_we)) &&
                  ((mem_size[1] && (alu_result[0] != 1'b0)) ||
                   (mem_size[2] && (alu_result[1:0] != 2'b00)));
     // ========== 输出到MEM阶段的总线 ==========
@@ -361,7 +359,7 @@ module pre_mem_stage (
     };
     assign final_csr_wmask  = tlbsrch_en && srch_value[5] ? 32'h8000001f : csr_wmask;
     assign final_csr_wvalue = tlbsrch_en && srch_value[5] ? {27'b0,srch_value[4:0]} : csr_wvalue;
-    assign ld_and_str       = {ex_load_op || (cacop_en && cacop_code_int[4:3] == 2'b10), mem_we} & {2{pre_mem_valid}};
+    assign ld_and_str       = {res_from_mem || (cacop_en && cacop_code_int[4:3] == 2'b10), mem_we} & {2{pre_mem_valid}};
 
     // ========== cacop相关信号 ==========
     assign cacop_code     = cacop_code_int;
@@ -387,7 +385,7 @@ module pre_mem_stage (
     assign pre_mem_to_id_result  = res_from_csr ? csr_rvalue : 
                                    res_from_timer ? timer_finalval :
                                    alu_result;
-    assign pre_mem_to_id_load_op = ex_load_op & pre_mem_valid;
+    assign pre_mem_to_id_load_op = res_from_mem & pre_mem_valid;
 
     // ========== 异常（EX自身异常 + ALE，不含 TLB） ==========
     assign pre_mem_exc       = {ex_exc[12:1], ale, 3'b0};

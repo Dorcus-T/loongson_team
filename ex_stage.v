@@ -65,7 +65,6 @@ module exe_stage (
     wire tlbwr_en;                      // tlbwrWB写tlb
     wire tlbfill_en;                    // tlbfillWB写tlb
     wire [18:0] alu_op;                 // ALU操作码
-    wire ex_load_op;                    // 加载指令标志
     wire src1_is_pc;                    // 源操作数1是否来自PC
     wire src2_is_imm;                   // 源操作数2是否立即数
     wire res_from_mem;                  // 结果是否来自存储器
@@ -131,57 +130,56 @@ module exe_stage (
     // ========== 解析来自ID阶段的总线（493 bit）==========
     assign {
         `ifdef DIFFTEST_EN
-        dift_csr_rstat_en,  // 476     csr estat读使能 for difftest
-        dift_inst_st_en,    // 475:468 store使能 for difftest
-        dift_inst_ld_en,    // 467:460 load使能 for difftest
-        dift_cnt_inst,      // 459     计数器指令 for difftest
-        dift_timer_64,      // 458:395 定时器值 for difftest
-        dift_id_inst,       // 394:363 指令编码 for difftest
+        dift_csr_rstat_en,  // 475     csr estat读使能 for difftest
+        dift_inst_st_en,    // 474:467 store使能 for difftest
+        dift_inst_ld_en,    // 466:459 load使能 for difftest
+        dift_cnt_inst,      // 458     计数器指令 for difftest
+        dift_timer_64,      // 457:394 定时器值 for difftest
+        dift_id_inst,       // 393:362 指令编码 for difftest
         `else
         _unused_diff_pad,   // 占位：保持非difftest字段bit位置不变
         `endif
-        cacop_code,     // 362:358 cache操作类型
-        cacop_en,       // 357     cache操作使能
-        tlbsrch_en,     // 356     tlbsrch使能
-        invtlb_en,      // 355     invtlb使能
-        tlbrd_en,       // 354     tlbrd使能
-        tlbwr_en,       // 353     tlbwf使能
-        tlbfill_en,     // 352
-        ex_rf_valid,    // 351     重取指标志
-        timer_high,     // 350     使用计数器高32位
-        res_from_timer, // 349     结果来自计数器
-        res_from_csr,   // 348     结果来自csr寄存器堆
-        ex_csr_num,     // 347:334 csr号码
-        csr_rvalue,     // 333:302 csr读数据
-        csr_we,         // 301     csr写使能
-        csr_wmask,      // 300:269 csr写掩码
-        csr_wvalue,     // 268:237 csr写数据
-        ertn_flush,     // 236     异常返回冲刷信号
-        ex_exc[12:3],   // 235:226 异常类型
-        res_from_mem,   // 225     结果来源（存储器/ALU）
-        ex_pc,          // 224:193 指令PC
-        rkd_value,      // 192:161 源操作数2（寄存器或立即数）
-        rj_value,       // 160:129 源操作数1（寄存器值）
-        imm,            // 128:97  立即数
-        dest,           // 96:92   目标寄存器号
-        mem_sign_ext,   // 91      符号扩展标志
-        mem_size,       // 90:88   访存大小
-        mem_we,         // 87      存储器写使能
-        gr_we,          // 86      寄存器写使能
-        src2_is_imm,    // 85      操作数2来源（立即数/寄存器）
-        src1_is_pc,     // 84      操作数1来源（PC/寄存器）
-        ex_load_op,     // 83      加载指令标志
-        alu_op,         // 82:64   ALU操作码
+        cacop_code,     // 361:357 cache操作类型
+        cacop_en,       // 356     cache操作使能
+        tlbsrch_en,     // 355     tlbsrch使能
+        invtlb_en,      // 354     invtlb使能
+        tlbrd_en,       // 353     tlbrd使能
+        tlbwr_en,       // 352     tlbwf使能
+        tlbfill_en,     // 351
+        ex_rf_valid,    // 350     重取指标志
+        timer_high,     // 349     使用计数器高32位
+        res_from_timer, // 348     结果来自计数器
+        res_from_csr,   // 347     结果来自csr寄存器堆
+        ex_csr_num,     // 346:333 csr号码
+        csr_rvalue,     // 332:301 csr读数据
+        csr_we,         // 300     csr写使能
+        csr_wmask,      // 299:268 csr写掩码
+        csr_wvalue,     // 267:236 csr写数据
+        ertn_flush,     // 235     异常返回冲刷信号
+        ex_exc[12:3],   // 234:225 异常类型
+        res_from_mem,   // 224     结果来源（存储器/ALU）
+        ex_pc,          // 223:192 指令PC
+        rkd_value,      // 191:160 源操作数2（寄存器或立即数）
+        rj_value,       // 159:128 源操作数1（寄存器值）
+        imm,            // 127:96  立即数
+        dest,           // 95:91   目标寄存器号
+        mem_sign_ext,   // 90      符号扩展标志
+        mem_size,       // 89:87   访存大小
+        mem_we,         // 86      存储器写使能
+        gr_we,          // 85      寄存器写使能
+        src2_is_imm,    // 84      操作数2来源（立即数/寄存器）
+        src1_is_pc,     // 83      操作数1来源（PC/寄存器）
+        alu_op,         // 81:63   ALU操作码
         // 预测透传
-        ex_pred_valid,      // 63      预测有效
-        ex_pred_taken,      // 62      预测方向
-        ex_pred_target,     // 61:32   预测目标 PC[31:2]
-        ex_pred_is_ras,     // 31      RAS预测
-        ex_pred_btb_index,  // 30:26   BTB命中索引
-        ex_pred_ras_index,  // 25:22   RAS命中索引
-        ex_br_type,         // 37:36   分支类型
-        ex_cond_cmp,        // 35:33   条件分支比较码
-        ex_br_offs,         // 32:1    分支偏移量（已符号扩展+左移2位）
+        ex_pred_valid,      // 62      预测有效
+        ex_pred_taken,      // 61      预测方向
+        ex_pred_target,     // 60:31   预测目标 PC[31:2]
+        ex_pred_is_ras,     // 30      RAS预测
+        ex_pred_btb_index,  // 29:25   BTB命中索引
+        ex_pred_ras_index,  // 24:21   RAS命中索引
+        ex_br_type,         // 36:35   分支类型
+        ex_cond_cmp,        // 34:32   条件分支比较码
+        ex_br_offs,         // 31:0    分支偏移量（已符号扩展+左移2位）
         ex_is_branch,        // 是否为分支指令
         ex_static_taken      // 静态分支预测
     } = current_bus;
@@ -342,23 +340,22 @@ module exe_stage (
 
     // ========== 输出到PRE_MEM阶段的总线 ==========
     assign ex_to_pre_mem_bus = {
-        bp_en_comb,            // 627     分支预测更新使能（PRE_MEM 消费）
-        bp_bus_next,           // 626:525 分支预测更新数据（PRE_MEM 消费）
-        cacop_code,            // 524:520 cache操作类型（PRE_MEM 消费）
-        cacop_en,              // 519     cache操作使能（PRE_MEM 消费）
-        rj_value,              // 521:490 源操作数1（PRE_MEM 用于 vtlb_enop ASID）
-        rkd_value,             // 490:459 源操作数2（PRE_MEM 用于 dcache_wdata / vtlb_enop VPPN）
-        ex_load_op,            // 458     加载指令标志（PRE_MEM 用于 ALE 检测 / ld_and_str）
+        bp_en_comb,            // 626     分支预测更新使能（PRE_MEM 消费）
+        bp_bus_next,           // 625:524 分支预测更新数据（PRE_MEM 消费）
+        cacop_code,            // 523:519 cache操作类型（PRE_MEM 消费）
+        cacop_en,              // 518     cache操作使能（PRE_MEM 消费）
+        rj_value,              // 520:489 源操作数1（PRE_MEM 用于 vtlb_enop ASID）
+        rkd_value,             // 489:458 源操作数2（PRE_MEM 用于 dcache_wdata / vtlb_enop VPPN）
         `ifdef DIFFTEST_EN
-        csr_rvalue,            // 451:420 csr读数据 for difftest
-        dift_csr_rstat_en,     // 420     csr estat读使能 for difftest
-        dift_inst_st_en,       // 419:412 store使能 for difftest
-        dift_inst_ld_en,       // 411:404 load使能 for difftest
-        dift_cnt_inst,         // 403     计数器指令 for difftest
-        timer_value,           // 402:339 定时器值 for difftest（EX 直接提供）
-        dift_id_inst,          // 338:307 指令编码 for difftest
-        diff_vaddr,            // 306:275 load/store虚地址 for difftest
-        diff_st_data,          // 274:243 store数据 for difftest
+        csr_rvalue,            // 450:419 csr读数据 for difftest
+        dift_csr_rstat_en,     // 419     csr estat读使能 for difftest
+        dift_inst_st_en,       // 418:411 store使能 for difftest
+        dift_inst_ld_en,       // 410:403 load使能 for difftest
+        dift_cnt_inst,         // 402     计数器指令 for difftest
+        timer_value,           // 401:338 定时器值 for difftest（EX 直接提供）
+        dift_id_inst,          // 337:306 指令编码 for difftest
+        diff_vaddr,            // 305:274 load/store虚地址 for difftest
+        diff_st_data,          // 273:242 store数据 for difftest
         `else
         210'd0,                // 占位：保持非difftest字段bit位置不变
         `endif
@@ -465,7 +462,7 @@ module exe_stage (
     assign ex_to_id_result  = res_from_csr ? csr_rvalue_actual :
                               res_from_timer ? timer_finalval :
                               alu_result;                  // 计算结果
-    assign ex_to_id_load_op = ex_load_op & ex_valid;       // 加载指令标志
+    assign ex_to_id_load_op = res_from_mem & ex_valid;     // 加载指令标志（load-use检测用）
 
     // ========== 检测异常与ertn（EX 只透传 ID 异常，ALE 由 PRE_MEM 检测） ==========
     assign ex_exc[2:0]       = 3'b0;                               // ALE 移至 PRE_MEM
